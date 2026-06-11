@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..manager import SFWManager
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ..manager import SFWManager
+
 from ..utils import err, ok, require
 
 
@@ -28,7 +31,7 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
                 binary=manager.sfw_path,
             )
 
-        elif action == "run":
+        if action == "run":
             error = require(params, "command")
             if error:
                 return err(error)
@@ -47,6 +50,7 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
                 return ok(**d)
             # failures: return raw JSON so success=False is never overridden
             import json as _json
+
             return _json.dumps(d)
 
         else:

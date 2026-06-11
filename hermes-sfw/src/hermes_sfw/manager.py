@@ -26,9 +26,19 @@ _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
 # Command prefix allowlist (Fix 1)
 # ---------------------------------------------------------------------------
 
-_ALLOWED_PREFIXES = frozenset({
-    "npm", "npx", "yarn", "pnpm", "pip", "pip3", "uv", "cargo", "rustup",
-})
+_ALLOWED_PREFIXES = frozenset(
+    {
+        "npm",
+        "npx",
+        "yarn",
+        "pnpm",
+        "pip",
+        "pip3",
+        "uv",
+        "cargo",
+        "rustup",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # OSError errno → generic message mapping (Fix 7)
@@ -100,7 +110,7 @@ def _validate_command(command: str) -> str | None:
     if not parts:
         return "Command is empty"
 
-    program = os.path.basename(parts[0])
+    program = Path(parts[0]).name
     if program not in _ALLOWED_PREFIXES:
         return (
             f"Command prefix '{program}' is not allowed. "
@@ -119,10 +129,10 @@ def _validate_workdir(workdir: str | None) -> str | None:
     if workdir is None:
         return None
 
-    resolved = os.path.realpath(os.path.expanduser(workdir))
-    if not os.path.exists(resolved):
+    resolved = str(Path(workdir).expanduser().resolve())
+    if not Path(resolved).exists():
         raise ValueError(f"Working directory does not exist: {workdir}")
-    if not os.path.isdir(resolved):
+    if not Path(resolved).is_dir():
         raise ValueError(f"Working directory is not a directory: {workdir}")
     return resolved
 
