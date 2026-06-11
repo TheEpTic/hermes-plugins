@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,11 +13,11 @@ import pytest
 # or test runners that don't read pyproject.toml.
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from hermes_sfw.manager import SFWConfig, SFWManager  # noqa: E402
+from hermes_sfw.manager import SFWConfig, SFWManager
 
 
 @pytest.fixture
-def manager(tmp_path: Path) -> Generator[SFWManager, None, None]:
+def manager(tmp_path: Path) -> SFWManager:
     """Create an SFWManager with a fake sfw binary for testing."""
     # Create a fake sfw script that passes through to the real command
     sfw_bin = tmp_path / "sfw"
@@ -39,7 +38,7 @@ def manager(tmp_path: Path) -> Generator[SFWManager, None, None]:
 
     config = SFWConfig(sfw_bin=str(sfw_bin))
     mgr = SFWManager(config)
-    yield mgr
+    return mgr
 
 
 @pytest.fixture

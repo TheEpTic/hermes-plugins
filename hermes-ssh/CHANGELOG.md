@@ -56,4 +56,4 @@
 - Atomic JSON writes with temp files for crash safety
 - Thread-safe operations via locks
 - 77 tests covering config, manager, tool handlers, and edge cases
-- CI with ruff, mypy, and pytest across Python 3.11–3.13
+- CI with black, mypy, and pytest across Python 3.11–3.13

@@ -14,8 +14,7 @@ pip install -e '.[dev]'
 ## Development
 
 ```bash
-ruff check src/ssh_tools/ tests/
-ruff format src/ssh_tools/ tests/
+black src/ssh_tools/ tests/
 mypy src/ssh_tools/
 pytest
 ```
@@ -44,7 +43,7 @@ Aim for **90%+ coverage** on new code. The test suite uses pytest fixtures defin
 
 - **Tests required for bug fixes.** Each fix gets a test that reproduces the issue.
 - **Separate PRs for separate concerns.** Don't bundle unrelated changes.
-- Run `ruff check` and `mypy` before pushing. CI will catch it if you don't.
+- Run `black` and `mypy` before pushing. CI will catch it if you don't.
 
 ## Project Structure
 

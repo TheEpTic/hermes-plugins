@@ -32,7 +32,7 @@ runtime = [
     "cryptography ~= 46.0",
 ]
 dev = [
-    "ruff==0.15.15",
+    "black==26.5.1",
     "mypy==1.16.0",
     "pytest==9.0.2",
 ]
@@ -40,74 +40,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/ssh_tools"]
 
-[tool.ruff]
-target-version = "py311"
+[tool.black]
 line-length = 100
-
-[tool.ruff.lint]
-select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "N",    # pep8-naming
-    "UP",   # pyupgrade
-    "B",    # flake8-bugbear
-    "SIM",  # flake8-simplify
-    "TCH",  # flake8-type-checking
-    "RUF",  # ruff-specific
-    "S",    # flake8-bandit (security)
-    "A",    # flake8-builtins
-    "C4",   # flake8-comprehensions
-    "DTZ",  # flake8-datetimez
-    "T20",  # flake8-print
-    "PT",   # flake8-pytest-style
-    "RSE",  # flake8-raise
-    "RET",  # flake8-return
-    "SLF",  # flake8-self
-    "ARG",  # flake8-unused-arguments
-    "PTH",  # flake8-use-pathlib
-    "ERA",  # eradicate (commented-out code)
-    "PGH",  # pygrep-hooks
-    "PLW",  # pylint warnings
-    "ISC",  # flake8-implicit-str-concat
-    "ICN",  # flake8-import-conventions
-    "INP",  # flake8-no-pep420
-    "PIE",  # flake8-pie
-    "TID",  # flake8-tidy-imports
-    "TC",   # flake8-type-checking (alias for TCH in newer ruff)
-]
-ignore = [
-    "E501",   # line too long (handled by formatter)
-    "UP007",  # use X | Y for union (need from __future__ import annotations)
-    "TID252", # relative imports are standard in a package
-    "S603",   # subprocess calls are intentional (ssh execution)
-    "S607",   # partial executable path is intentional (ssh)
-    "S110",   # try-except-pass is intentional for cleanup
-    "PTH105", # os.replace is fine
-    "PTH108", # os.unlink is fine
-    "PTH101",  # os.chmod is fine
-    "PTH110", # os.path.exists is fine
-    "PLW0602",# global read is fine
-    "PLW0603",# global write is fine
-    "PLW1510",# subprocess.run without check is fine
-    "ARG001", # **kwargs unused is fine for handler signature
-    "N806",   # _PRUNE_EVERY constant style is fine
-    "PLW2901", # loop var overwrite is fine (strip pattern)
-    "S108",    # /tmp paths are intentional
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "SLF001", "ARG001", "S108", "E402"]
-"src/*" = ["S101"]
-
-
-[tool.ruff.lint.isort]
-known-first-party = ["ssh_tools"]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
+target-version = ["py311"]
 
 [tool.mypy]
 python_version = "3.11"

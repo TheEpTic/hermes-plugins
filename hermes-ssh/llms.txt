@@ -200,10 +200,9 @@ src/ssh_tools/
 
 ```bash
 pip install -e '.[dev]'
-ruff check src/ssh_tools/ tests/
-ruff format --check src/ssh_tools/ tests/
+black --check src/ssh_tools/ tests/
 mypy src/ssh_tools/
 pytest
 ```
 
-CI runs on Python 3.11, 3.12, and 3.13 with ruff, mypy, and pytest.
+CI runs on Python 3.11, 3.12, and 3.13 with black, mypy, and pytest.

@@ -23,8 +23,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install black==26.5.1 mypy==1.16.0
-      - run: black --check src/ssh_tools/ tests/
-      - run: mypy src/ssh_tools/
+      - run: black --check src/hermes_sfw/ tests/
+      - run: mypy src/hermes_sfw/
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -38,6 +38,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e '.[dev]'
-      - run: black --check src/ssh_tools/ tests/
-      - run: mypy src/ssh_tools/
+      - run: black --check src/hermes_sfw/ tests/
+      - run: mypy src/hermes_sfw/
       - run: pytest

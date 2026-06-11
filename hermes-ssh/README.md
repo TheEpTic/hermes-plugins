@@ -234,8 +234,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
 # Run checks
-ruff check src/ssh_tools/ tests/
-ruff format --check src/ssh_tools/ tests/
+black --check src/ssh_tools/ tests/
 mypy src/ssh_tools/
 pytest
 ```

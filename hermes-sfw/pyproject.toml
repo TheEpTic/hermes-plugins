@@ -18,21 +18,22 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Systems Administration",
     "Typing :: Typed",
     "Operating System :: OS Independent",
 ]
 
-keywords = ["hermes", "agent", "plugin", "sfw", "socket", "security", "dependencies"]
+keywords = ["hermes", "agent", "plugin", "sfw", "security", "dependencies", "npm", "pip", "cargo"]
 
 [project.urls]
 Homepage = "https://github.com/TheEpTic/hermes-plugins"
 Repository = "https://github.com/TheEpTic/hermes-plugins"
 Issues = "https://github.com/TheEpTic/hermes-plugins/issues"
+Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-sfw/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
-    "ruff==0.15.15",
+    "black==26.5.1",
     "mypy==1.16.0",
     "pytest==9.0.2",
 ]
@@ -40,32 +41,28 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_sfw"]
 
-[tool.ruff]
-target-version = "py311"
+[tool.black]
 line-length = 100
-
-[tool.ruff.lint]
-select = [
-    "E",    # pycodestyle errors
-    "W",    # pycodestyle warnings
-    "F",    # pyflakes
-    "I",    # isort
-    "B",    # flake8-bugbear
-    "UP",   # pyupgrade
-]
-ignore = [
-    "ARG001", # unused kwargs (handler signatures need **kwargs by contract)
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*" = ["ARG001"]
+target-version = ["py311"]
 
 [tool.mypy]
-strict = true
 python_version = "3.11"
+strict = true
 warn_return_any = true
 warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["tools.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
 pythonpath = ["src"]

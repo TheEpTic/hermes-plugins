@@ -1,0 +1,122 @@
+# hermes-sfw
+
+> Socket Firewall Free plugin for Hermes Agent. Block malicious dependencies at install time.
+
+hermes-sfw gives Hermes one tool (`sfw`) with two actions (`run`, `status`) for running package manager commands through the Socket Firewall Free CLI. It validates command prefixes, parses output for blocked/installed packages, and returns structured JSON.
+
+## Installation
+
+### For Hermes Agent users (recommended)
+
+Clone and symlink into the Hermes plugins directory:
+
+```bash
+git clone https://github.com/TheEpTic/hermes-plugins.git
+ln -s "$(pwd)/hermes-plugins/hermes-sfw/src/hermes_sfw" ~/.hermes/plugins/hermes-sfw
+```
+
+Then restart Hermes with `/reset` or restart the process. Changes to source take effect through the symlink without restart.
+
+Or use the deploy script:
+
+```bash
+git clone https://github.com/TheEpTic/hermes-plugins.git
+cd hermes-plugins/hermes-sfw
+./deploy.sh
+```
+
+### As a Python package
+
+```bash
+pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-sfw
+```
+
+Add to Hermes config:
+
+```yaml
+plugins:
+  - name: hermes-sfw
+    module: hermes_sfw
+```
+
+### Requirements
+
+- Python 3.11+
+- sfw CLI installed (`npm i -g sfw`)
+- Hermes Agent (the plugin registers tools via the Hermes plugin API)
+
+## Usage
+
+### Running commands
+
+```
+sfw action=run command="npm install express"
+```
+
+Commands are validated against a prefix allowlist before execution. Only package manager commands are accepted.
+
+Supported prefixes: npm, npx, yarn, pnpm, pip, pip3, uv, cargo, rustup.
+
+Options:
+- `workdir` (optional): working directory for the command
+- `verbose` (default: false): enable verbose sfw output
+
+### Checking installation
+
+```
+sfw action=status
+```
+
+Returns: `installed` (bool), `version` (string or null), `binary` (path or null).
+
+### Blocked packages
+
+When sfw detects a malicious package, the response includes a `blocked` array with the package names. Safe packages appear in an `installed` array.
+
+### Output handling
+
+Output exceeding 10,000 characters is truncated with a size note. Commands timeout after 300 seconds (5 minutes) by default.
+
+## Configuration
+
+The plugin is configured via `SFWConfig` dataclass in `src/hermes_sfw/manager.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `sfw_bin` | `sfw` | Path to the sfw binary |
+| `timeout` | 300s | Max seconds per command |
+
+## Data storage
+
+hermes-sfw does not store any persistent data. All state is in-memory for the duration of the tool call.
+
+## Security notes
+
+- Only package manager commands are accepted (prefix allowlist)
+- Commands execute with the Hermes agent's permissions
+- Working directories validated with os.path.realpath() to prevent path traversal
+- Output truncated to prevent context overflow
+- Timeout protection prevents hanging processes
+
+## Project structure
+
+```
+src/hermes_sfw/
+├── __init__.py          # Plugin registration (register() function)
+├── manager.py           # SFWManager — command execution, validation, parsing
+├── schemas.py           # Tool schema (LLM-facing)
+├── utils.py             # ok(), err(), require() helpers
+└── handlers/
+    └── sfw.py           # sfw tool handler
+```
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+black --check src/hermes_sfw/ tests/
+mypy src/hermes_sfw/
+pytest
+```
+
+CI runs on Python 3.11, 3.12, and 3.13 with black, mypy, and pytest.
