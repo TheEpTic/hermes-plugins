@@ -9,10 +9,12 @@ Falls back gracefully: if no key exists, generates one. If decryption fails
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
 import logging
 import os
-import secrets
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +23,8 @@ from cryptography.fernet import Fernet, InvalidToken
 logger = logging.getLogger(__name__)
 
 _KEY_FILE = ".key"
-_KEY_PERMISSIONS = 0o600
-_DIR_PERMISSIONS = 0o700
+_RESTRICTED_PERMS = 0o600
+_DIR_PERMS = 0o700
 
 
 class EncryptedStore:
@@ -41,23 +43,40 @@ class EncryptedStore:
     # ----- Key management -----
 
     def _ensure_key(self) -> Fernet:
-        """Load or generate the encryption key."""
+        """Load or generate the encryption key.
+
+        Uses O_EXCL to atomically create the key file — exactly one process
+        wins the create, others read the winner's key. Prevents race condition
+        where two processes generate different keys and corrupt each other's data.
+        """
         if self._fernet is not None:
             return self._fernet
 
         key_path = self._data_dir / _KEY_FILE
 
+        # Try to read existing key
         if key_path.exists():
-            raw = key_path.read_text().strip()
+            raw = key_path.read_text(encoding="utf-8").strip()
             self._fernet = Fernet(raw.encode())
             return self._fernet
 
-        # Generate new key
+        # Generate new key — atomic create (O_EXCL fails if file already exists)
         key = Fernet.generate_key()
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        key_path.write_text(key.decode())
-        os.chmod(key_path, _KEY_PERMISSIONS)
-        os.chmod(self._data_dir, _DIR_PERMISSIONS)
+        os.chmod(self._data_dir, _DIR_PERMS)
+
+        try:
+            fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, _RESTRICTED_PERMS)
+            try:
+                os.write(fd, key)
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            # Another process won the race — read their key
+            raw = key_path.read_text(encoding="utf-8").strip()
+            self._fernet = Fernet(raw.encode())
+            return self._fernet
+
         self._fernet = Fernet(key)
         logger.info("Generated new encryption key at %s", key_path)
         return self._fernet
@@ -74,7 +93,7 @@ class EncryptedStore:
         if not path.exists():
             return default if default is not None else {}
 
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         if not raw.strip():
             return default if default is not None else {}
 
@@ -101,7 +120,6 @@ class EncryptedStore:
         fernet = self._ensure_key()
 
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(self._data_dir, _DIR_PERMISSIONS)
 
         plaintext = json.dumps(data, indent=2) + "\n"
         encrypted = fernet.encrypt(plaintext.encode()).decode()
@@ -118,7 +136,7 @@ class EncryptedStore:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, str(path))
-            os.chmod(path, _KEY_PERMISSIONS)
+            os.chmod(path, _RESTRICTED_PERMS)
         except Exception:
             with contextlib.suppress(OSError):
                 os.unlink(tmp_path)
@@ -134,12 +152,18 @@ class EncryptedStore:
         if not path.exists():
             return False
 
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         if not raw.strip():
             return False
 
-        # Check if it's already encrypted (Fernet tokens start with "gAAAAA")
-        if raw.strip().startswith("gAAAAA"):
+        # Check if it's already encrypted by trying to decrypt
+        try:
+            fernet = self._ensure_key()
+            fernet.decrypt(raw.encode())
+            return False  # decryption succeeded — already encrypted
+        except InvalidToken:
+            pass  # not encrypted — proceed with migration
+        except Exception:
             return False
 
         # It's plaintext — read it, encrypt, write back
@@ -152,8 +176,3 @@ class EncryptedStore:
         self.write(filename, data)
         logger.info("Migrated %s from plaintext to encrypted", filename)
         return True
-
-
-# Need these for atomic write
-import contextlib
-import tempfile

@@ -15,14 +15,17 @@ import json
 import sys
 from pathlib import Path
 
+try:
+    from .storage import EncryptedStore
+except ImportError:
+    from ssh_tools.storage import EncryptedStore  # type: ignore[no-redef]
+
 # Default data dir
 DEFAULT_DATA_DIR = Path.home() / ".hermes" / "ssh-tools"
 
 
 def migrate(data_dir: Path) -> None:
     """Migrate plaintext files to encrypted storage."""
-    from .storage import EncryptedStore
-
     store = EncryptedStore(data_dir)
 
     files_to_migrate = ["machines.json"]
@@ -34,14 +37,19 @@ def migrate(data_dir: Path) -> None:
             print(f"  {filename}: not found, skipping")
             continue
 
-        raw = path.read_text()
+        raw = path.read_text(encoding="utf-8")
         if not raw.strip():
             print(f"  {filename}: empty, skipping")
             continue
 
-        if raw.strip().startswith("gAAAAA"):
+        # Check if already encrypted by trying to decrypt
+        try:
+            fernet = store._ensure_key()
+            fernet.decrypt(raw.encode())
             print(f"  {filename}: already encrypted")
             continue
+        except Exception:
+            pass  # not encrypted — proceed
 
         # It's plaintext — migrate
         try:
@@ -65,31 +73,30 @@ def migrate(data_dir: Path) -> None:
         if not old_dir.exists():
             continue
         print(f"\nFound old data directory: {old_dir}")
+
         for filename in files_to_migrate:
             old_file = old_dir / filename
             if not old_file.exists():
                 continue
             try:
-                data = json.loads(old_file.read_text())
+                data = json.loads(old_file.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 print(f"  {filename}: corrupt, skipping")
                 continue
 
-            # Migrate to new encrypted store
             store.write(filename, data)
             old_file.unlink()
             print(f"  {filename}: migrated from old dir, deleted")
-
-            # Also migrate command log if it exists
-            old_log = old_dir / "command_log.jsonl"
-            if old_log.exists():
-                new_log = data_dir / "command_log.jsonl"
-                new_log.parent.mkdir(parents=True, exist_ok=True)
-                new_log.write_text(old_log.read_text())
-                old_log.unlink()
-                print(f"  command_log.jsonl: copied and deleted from old dir")
-
             migrated += 1
+
+        # Migrate command log if it exists (outside the inner loop)
+        old_log = old_dir / "command_log.jsonl"
+        if old_log.exists():
+            new_log = data_dir / "command_log.jsonl"
+            new_log.parent.mkdir(parents=True, exist_ok=True)
+            new_log.write_text(old_log.read_text(encoding="utf-8"), encoding="utf-8")
+            old_log.unlink()
+            print(f"  command_log.jsonl: copied and deleted from old dir")
 
     print(f"\nMigration complete. {migrated} file(s) migrated.")
     print(f"Data dir: {data_dir}")
@@ -102,6 +109,6 @@ if __name__ == "__main__":
     else:
         target = DEFAULT_DATA_DIR
 
-    print(f"Migrating hermes-ssh data to encrypted storage")
+    print("Migrating hermes-ssh data to encrypted storage")
     print(f"Target dir: {target}\n")
     migrate(target)

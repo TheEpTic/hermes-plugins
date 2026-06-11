@@ -28,11 +28,13 @@ Issues = "https://github.com/TheEpTic/hermes-plugins/issues"
 Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-runtime = []
+runtime = [
+    "cryptography ~= 46.0",
+]
 dev = [
-    "ruff==0.11.13",
+    "ruff==0.15.15",
     "mypy==1.16.0",
-    "pytest>=8.0,<9.0",
+    "pytest==9.0.2",
 ]
 
 [tool.hatch.build.targets.wheel]
