@@ -1,0 +1,209 @@
+# hermes-ssh
+
+> SSH remote execution plugin for Hermes Agent. Run commands on remote servers, track sessions, reuse connections.
+
+hermes-ssh gives Hermes three tools (`ssh_terminal`, `ssh_machines`, `ssh_sessions`) and one slash command (`/ssh`) for managing remote machines over SSH. It stores machine configs in local JSON, tracks active sessions, and reuses connections via SSH ControlMaster.
+
+## Installation
+
+### For Hermes Agent users (recommended)
+
+Clone and symlink into the Hermes plugins directory:
+
+```bash
+git clone https://github.com/TheEpTic/hermes-ssh.git
+ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
+```
+
+Then restart Hermes with `/reset` or restart the process. Changes to source take effect through the symlink without restart.
+
+Or use the deploy script:
+
+```bash
+git clone https://github.com/TheEpTic/hermes-ssh.git
+cd hermes-ssh
+./deploy.sh
+```
+
+### As a Python package
+
+```bash
+pip install git+https://github.com/TheEpTic/hermes-ssh.git
+```
+
+Add to Hermes config:
+
+```yaml
+plugins:
+  - name: hermes-ssh
+    module: ssh_tools
+```
+
+### Requirements
+
+- Python 3.11+
+- OpenSSH client (`ssh` binary on PATH)
+- Hermes Agent (the plugin registers tools via the Hermes plugin API)
+
+## Usage
+
+### Adding machines
+
+Register a remote server before running commands:
+
+```
+ssh_machines add name=web1 host=192.168.1.50 user=deploy key=~/.ssh/id_ed25519
+```
+
+Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 chars). Names like `../../etc` or `my server` are rejected.
+
+Fields:
+- `name` (required): unique identifier, used in all other commands
+- `host` (required): IP or hostname
+- `user` (default: `root`): SSH username
+- `port` (default: `22`): SSH port
+- `key` (optional): path to SSH private key
+- `aliases` (optional): alternative names (e.g. `["web1", "prod"]`)
+- `tags` (optional): labels for organization (e.g. `["production", "web"]`)
+
+### Running commands
+
+```
+ssh_terminal machine=web1 command="df -h"
+```
+
+Commands run through `bash -c` with `pipefail` enabled. Pipelines work correctly — non-zero exit if any component fails.
+
+Options:
+- `timeout` (default: 30): seconds before the command is killed
+- `new_session` (default: false): skip connection reuse
+- `background` (default: false): run in background, return immediately
+- `max_output_chars` (default: 50000): output truncation threshold
+
+### Background commands
+
+For long-running work, use `background=true`:
+
+```
+ssh_terminal machine=web1 command="make -j4" background=true
+```
+
+This returns a `session_id` immediately. Poll for status:
+
+```
+ssh_terminal poll=<session_id>
+```
+
+Read output when complete:
+
+```
+ssh_terminal read_output=<session_id>
+```
+
+Or use the sessions tool:
+
+```
+ssh_sessions action=poll session_id=<session_id>
+ssh_sessions action=read_output session_id=<session_id>
+```
+
+### Output truncation
+
+When output exceeds `max_output_chars`, the full output is saved to `/tmp/ssh_output_{session_id}_{stream}.txt` and a summary with the file path is returned. Use `read_file` on the path to get the complete output.
+
+### Managing sessions
+
+```
+ssh_sessions action=list                     # List active sessions
+ssh_sessions action=kill session_id=<id>     # Kill a session
+ssh_sessions action=cleanup                  # Kill all idle sessions (>30 min)
+ssh_sessions action=prune                    # Remove old closed sessions (>24h)
+```
+
+Idle sessions are auto-killed after 30 minutes by a background checker.
+
+### Slash command
+
+From Hermes chat:
+
+```
+/ssh                     # List machines and sessions
+/ssh web1                # Inspect machine details
+/ssh web1 uptime         # Run a command
+/ssh test                # Test connectivity to all machines
+/ssh cleanup             # Kill all idle sessions
+/ssh help                # Show help
+```
+
+### Machine registry
+
+```
+ssh_machines action=list                     # List all machines
+ssh_machines action=inspect name=web1        # Full details
+ssh_machines action=test name=web1           # Test SSH connectivity
+ssh_machines action=remove name=web1         # Remove a machine
+```
+
+## Configuration
+
+The plugin is configured via `SSHConfig` dataclass in `src/ssh_tools/config.py`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `default_port` | 22 | SSH port for new machines |
+| `default_user` | root | SSH user for new machines |
+| `connect_timeout` | 5s | SSH handshake timeout |
+| `command_timeout` | 30s | Command execution timeout |
+| `max_output_chars` | 50,000 | Output truncation threshold |
+| `idle_check_interval` | 60s | Seconds between idle checks |
+| `idle_timeout_minutes` | 30m | Auto-kill after this idle time |
+| `closed_prune_hours` | 24h | Remove closed sessions after this |
+| `strict_host_key_checking` | no | SSH host key verification |
+
+## Data storage
+
+All data is stored locally in the plugin directory under `data/`:
+
+- `data/machines.json` — machine registry (host, user, key, aliases, tags)
+- `data/sessions.json` — active and closed sessions
+- `data/sockets/` — SSH ControlMaster sockets
+- `data/command_log.jsonl` — command audit log
+
+The data directory has 0o700 permissions. Audit log and temp files use 0o600.
+
+## Security notes
+
+- `StrictHostKeyChecking=no` by default (convenient but vulnerable to MITM)
+- Credentials stored in plaintext JSON
+- Commands execute with the Hermes agent's permissions
+- Machine names validated to prevent path traversal and glob injection
+- Atomic JSON writes prevent corruption on crash
+
+## Project structure
+
+```
+src/ssh_tools/
+├── __init__.py          # Plugin registration (register() function)
+├── config.py            # SSHConfig dataclass
+├── manager.py           # SSHManager — all operations
+├── models.py            # Machine, Session dataclasses
+├── schemas.py           # Tool schemas (LLM-facing)
+├── utils.py             # ok(), err(), require() helpers
+└── handlers/
+    ├── terminal.py      # ssh_terminal handler
+    ├── machines.py      # ssh_machines handler
+    ├── sessions.py      # ssh_sessions handler
+    └── slash.py         # /ssh slash command
+```
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+ruff check src/ssh_tools/ tests/
+ruff format --check src/ssh_tools/ tests/
+mypy src/ssh_tools/
+pytest
+```
+
+CI runs on Python 3.11, 3.12, and 3.13 with ruff, mypy, and pytest.

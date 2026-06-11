@@ -1,0 +1,8 @@
+name: hermes-sfw
+version: 0.1.0
+description: "Socket Firewall Free wrapper — block malicious dependencies during install"
+author: TheEpTic
+kind: standalone
+platforms:
+  - linux
+  - macos

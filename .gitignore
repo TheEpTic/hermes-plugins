@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime data (secrets, credentials, logs — NEVER commit)
+**/data/
+**/sockets/
+*.tmp
+*.lock
+
+# Environment
+.env
+.env.*
+
+# Hermes runtime (if symlinked from install)
+*.log

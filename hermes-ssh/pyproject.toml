@@ -1,0 +1,137 @@
+[project]
+name = "hermes-ssh"
+version = "0.2.0"
+description = "SSH remote execution plugin for Hermes Agent"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "TheEpTic", email = "nexus@eptic.me" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+    "Operating System :: OS Independent",
+]
+
+keywords = ["ssh", "remote", "hermes", "agent", "devops"]
+
+[project.urls]
+Homepage = "https://github.com/TheEpTic/hermes-plugins"
+Repository = "https://github.com/TheEpTic/hermes-plugins"
+Issues = "https://github.com/TheEpTic/hermes-plugins/issues"
+Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+runtime = []
+dev = [
+    "ruff==0.11.13",
+    "mypy==1.16.0",
+    "pytest>=8.0,<9.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ssh_tools"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "RUF",  # ruff-specific
+    "S",    # flake8-bandit (security)
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez
+    "T20",  # flake8-print
+    "PT",   # flake8-pytest-style
+    "RSE",  # flake8-raise
+    "RET",  # flake8-return
+    "SLF",  # flake8-self
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "ERA",  # eradicate (commented-out code)
+    "PGH",  # pygrep-hooks
+    "PLW",  # pylint warnings
+    "ISC",  # flake8-implicit-str-concat
+    "ICN",  # flake8-import-conventions
+    "INP",  # flake8-no-pep420
+    "PIE",  # flake8-pie
+    "TID",  # flake8-tidy-imports
+    "TC",   # flake8-type-checking (alias for TCH in newer ruff)
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "UP007",  # use X | Y for union (need from __future__ import annotations)
+    "TID252", # relative imports are standard in a package
+    "S603",   # subprocess calls are intentional (ssh execution)
+    "S607",   # partial executable path is intentional (ssh)
+    "S110",   # try-except-pass is intentional for cleanup
+    "PTH105", # os.replace is fine
+    "PTH108", # os.unlink is fine
+    "PTH101",  # os.chmod is fine
+    "PTH110", # os.path.exists is fine
+    "PLW0602",# global read is fine
+    "PLW0603",# global write is fine
+    "PLW1510",# subprocess.run without check is fine
+    "ARG001", # **kwargs unused is fine for handler signature
+    "N806",   # _PRUNE_EVERY constant style is fine
+    "PLW2901", # loop var overwrite is fine (strip pattern)
+    "S108",    # /tmp paths are intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "SLF001", "ARG001", "S108", "E402"]
+"src/*" = ["S101"]
+
+
+[tool.ruff.lint.isort]
+known-first-party = ["ssh_tools"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = ["tools.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+pythonpath = ["src"]
+
+filterwarnings = [
+    "ignore::DeprecationWarning:paramiko.*",
+    "ignore::DeprecationWarning:asyncssh.*",
+    "ignore::DeprecationWarning:_distutils_hack.*",
+    "default::DeprecationWarning",
+]
