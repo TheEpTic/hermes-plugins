@@ -319,15 +319,9 @@ class SFWManager:
                 start_new_session=True,
             )
             try:
-                stdout_bytes, stderr_bytes = proc.communicate(
-                    timeout=self._config.timeout
-                )
-                stdout = _sanitize_output(
-                    stdout_bytes.decode("utf-8", errors="replace")
-                )
-                stderr = _sanitize_output(
-                    stderr_bytes.decode("utf-8", errors="replace")
-                )
+                stdout_bytes, stderr_bytes = proc.communicate(timeout=self._config.timeout)
+                stdout = _sanitize_output(stdout_bytes.decode("utf-8", errors="replace"))
+                stderr = _sanitize_output(stderr_bytes.decode("utf-8", errors="replace"))
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
                 # Kill entire process group (sfw + child package manager processes)
@@ -405,10 +399,7 @@ class SFWManager:
                 if token in _ALL_KEYWORDS and i + 1 < len(parts):
                     # Walk past any additional keyword tokens (e.g. 🔴 blocked)
                     j = i + 1
-                    while (
-                        j < len(parts)
-                        and parts[j].lower().strip(",:;") in _ALL_KEYWORDS
-                    ):
+                    while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
                         j += 1
                     if j < len(parts):
                         if token in _BLOCKED_KEYWORDS:

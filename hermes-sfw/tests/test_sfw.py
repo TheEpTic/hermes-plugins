@@ -78,9 +78,7 @@ class TestRun:
         args = call_args[0][0]
         assert "--verbose" in args
 
-    def test_run_workdir_forwarded(
-        self, tmp_path: Path, manager: SFWManager, mock_popen
-    ) -> None:
+    def test_run_workdir_forwarded(self, tmp_path: Path, manager: SFWManager, mock_popen) -> None:
         _call(
             manager,
             {
@@ -97,12 +95,7 @@ class TestRun:
         result = _call(manager, {"action": "run", "command": 'echo "unclosed'})
         assert result["success"] is False
         stderr = result.get("stderr", "").lower()
-        assert (
-            "invalid" in stderr
-            or "syntax" in stderr
-            or "parse" in stderr
-            or "closing" in stderr
-        )
+        assert "invalid" in stderr or "syntax" in stderr or "parse" in stderr or "closing" in stderr
 
     def test_run_disallowed_command(self, manager: SFWManager) -> None:
         result = _call(manager, {"action": "run", "command": "cat /etc/passwd"})
@@ -153,9 +146,7 @@ class TestCommandValidation:
 
     def test_reject_absolute_path(self, manager: SFWManager) -> None:
         """Absolute path should be rejected (finding 1)."""
-        result = _call(
-            manager, {"action": "run", "command": "/usr/bin/pip install foo"}
-        )
+        result = _call(manager, {"action": "run", "command": "/usr/bin/pip install foo"})
         assert result["success"] is False
         assert "path separator" in result.get("stderr", "").lower()
 
@@ -246,18 +237,14 @@ class TestParseOutput:
 
     def test_blocked_in_package_name_no_false_positive(self) -> None:
         """'blocked' as a substring in a package name should not match."""
-        blocked, installed = SFWManager._parse_output(
-            "Installing blocked-utils successfully"
-        )
+        blocked, installed = SFWManager._parse_output("Installing blocked-utils successfully")
         # Should NOT appear in blocked list
         assert "blocked-utils" not in blocked
         assert "successfully" not in blocked
 
     def test_added_in_package_name_no_false_positive(self) -> None:
         """'added' as a substring in a package name should not match."""
-        blocked, installed = SFWManager._parse_output(
-            "Removed added-package from cache"
-        )
+        blocked, installed = SFWManager._parse_output("Removed added-package from cache")
         assert "added-package" not in installed
 
     def test_full_line_not_dumped_as_package(self) -> None:
@@ -292,16 +279,12 @@ class TestParseOutput:
 
     def test_ansi_stripped_from_blocked(self) -> None:
         """ANSI escape codes should be stripped before parsing."""
-        blocked, installed = SFWManager._parse_output(
-            "\x1b[31m🔴 blocked malicious-pkg\x1b[0m"
-        )
+        blocked, installed = SFWManager._parse_output("\x1b[31m🔴 blocked malicious-pkg\x1b[0m")
         assert blocked == ["malicious-pkg"]
 
     def test_ansi_stripped_package_name_clean(self) -> None:
         """Package names should not contain ANSI artifacts."""
-        blocked, installed = SFWManager._parse_output(
-            "\x1b[32m🟢 installed express\x1b[0m"
-        )
+        blocked, installed = SFWManager._parse_output("\x1b[32m🟢 installed express\x1b[0m")
         assert installed == ["express"]
 
     def test_ansi_wrapped_keyword_still_matches(self) -> None:
@@ -499,14 +482,9 @@ class TestWorkdirValidation:
         mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin)))
         result = mgr.run_command("npm install express", workdir=str(a))
         assert result.success is False
-        assert (
-            "invalid" in result.stderr.lower()
-            or "working directory" in result.stderr.lower()
-        )
+        assert "invalid" in result.stderr.lower() or "working directory" in result.stderr.lower()
 
-    def test_workdir_tilde_expanded(
-        self, tmp_path: Path, manager: SFWManager, mock_popen
-    ) -> None:
+    def test_workdir_tilde_expanded(self, tmp_path: Path, manager: SFWManager, mock_popen) -> None:
         """~ should be expanded in workdir."""
         _call(
             manager,

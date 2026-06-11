@@ -15,9 +15,7 @@ from ..utils import err, ok, require
 def handle_sfw(manager: SFWManager) -> Callable[..., str]:
     """Return a handler with manager injected via closure."""
 
-    def _handle(
-        params: dict[str, Any], **kwargs: Any
-    ) -> str:  # **kwargs: Hermes framework compat
+    def _handle(params: dict[str, Any], **kwargs: Any) -> str:  # **kwargs: Hermes framework compat
         error = require(params, "action")
         if error:
             return err(error)

@@ -18,7 +18,7 @@ from pathlib import Path
 try:
     from .storage import EncryptedStore
 except ImportError:
-    from ssh_tools.storage import EncryptedStore  # type: ignore[no-redef]
+    from ssh_tools.storage import EncryptedStore
 
 # Default data dir
 DEFAULT_DATA_DIR = Path.home() / ".hermes" / "ssh-tools"
