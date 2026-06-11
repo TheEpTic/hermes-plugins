@@ -5,8 +5,10 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import re
 import shlex
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,12 +17,14 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level constants (Fix 5: moved from _parse_output)
+# Module-level constants
 # ---------------------------------------------------------------------------
 
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _BLOCKED_KEYWORDS = frozenset({"blocked", "🚫", "🔴"})
 _INSTALLED_KEYWORDS = frozenset({"installed", "🟢", "added"})
 _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
+_MAX_LIST_ENTRIES = 50
 
 # ---------------------------------------------------------------------------
 # Command prefix allowlist (Fix 1)
@@ -39,6 +43,12 @@ _ALLOWED_PREFIXES = frozenset(
         "rustup",
     }
 )
+
+# ---------------------------------------------------------------------------
+# Command maxLength (server-side enforcement)
+# ---------------------------------------------------------------------------
+
+_MAX_COMMAND_LENGTH = 1024
 
 # ---------------------------------------------------------------------------
 # OSError errno → generic message mapping (Fix 7)
@@ -102,6 +112,14 @@ def _validate_command(command: str) -> str | None:
     Returns an error message if the command is disallowed, or None if OK.
     Also handles shlex.split() ValueError (Fix 2).
     """
+    # Reject null bytes and control characters
+    if "\x00" in command:
+        return "Command contains null bytes"
+
+    # Server-side maxLength enforcement
+    if len(command) > _MAX_COMMAND_LENGTH:
+        return f"Command too long ({len(command)} chars, max {_MAX_COMMAND_LENGTH})"
+
     try:
         parts = shlex.split(command)
     except ValueError as exc:
@@ -111,6 +129,14 @@ def _validate_command(command: str) -> str | None:
         return "Command is empty"
 
     program = Path(parts[0]).name
+
+    # Reject path separators in the first token — prevents /tmp/evil/pip bypass
+    if os.sep in parts[0] or (os.altsep and os.altsep in parts[0]):
+        return (
+            "Command must not contain path separators. "
+            "Use bare command name (e.g. 'pip install foo', not '/usr/bin/pip install foo')"
+        )
+
     if program not in _ALLOWED_PREFIXES:
         return (
             f"Command prefix '{program}' is not allowed. "
@@ -129,7 +155,11 @@ def _validate_workdir(workdir: str | None) -> str | None:
     if workdir is None:
         return None
 
-    resolved = str(Path(workdir).expanduser().resolve())
+    try:
+        resolved = str(Path(workdir).expanduser().resolve())
+    except (ValueError, RuntimeError) as exc:
+        raise ValueError(f"Invalid working directory: {workdir}") from exc
+
     if not Path(resolved).exists():
         raise ValueError(f"Working directory does not exist: {workdir}")
     if not Path(resolved).is_dir():
@@ -150,6 +180,18 @@ def _sanitize_oserror(exc: OSError) -> str:
     if errnum is not None and errnum in _ERRNO_MESSAGES:
         return _ERRNO_MESSAGES[errnum]
     return "An internal error occurred"
+
+
+def _truncate_list(items: list[str], limit: int = _MAX_LIST_ENTRIES) -> list[str]:
+    """Cap a list to prevent context flooding."""
+    if len(items) <= limit:
+        return items
+    return items[:limit] + [f"... and {len(items) - limit} more"]
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return _ANSI_ESCAPE_RE.sub("", text)
 
 
 class SFWManager:
@@ -174,8 +216,10 @@ class SFWManager:
         # Check common locations (Fix 8: added os.access check)
         for candidate in [
             Path.home() / ".local" / "share" / "pnpm" / "bin" / "sfw",
-            Path("/usr/local/bin/sfw"),
+            Path.home() / ".local" / "bin" / "sfw",
             Path.home() / ".npm-global" / "bin" / "sfw",
+            Path.home() / ".cargo" / "bin" / "sfw",
+            Path("/usr/local/bin/sfw"),
         ]:
             if candidate.exists() and os.access(candidate, os.X_OK):
                 return str(candidate)
@@ -195,13 +239,15 @@ class SFWManager:
         if not self._sfw_path:
             return None
         try:
-            result = subprocess.run(
+            proc = subprocess.run(
                 [self._sfw_path, "--version"],
-                capture_output=True,
-                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 timeout=10,
             )
-            return result.stdout.strip() or result.stderr.strip()
+            stdout = proc.stdout.decode("utf-8", errors="replace").strip()
+            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+            return stdout or stderr or None
         except (subprocess.TimeoutExpired, OSError):
             return None
 
@@ -261,33 +307,56 @@ class SFWManager:
             args.append("--verbose")
         args.extend(cmd_parts)
 
-        logger.debug("sfw run: %s", " ".join(args))  # Fix 9: logger.debug
+        logger.debug("sfw run: %s", " ".join(args))
 
+        # Use Popen with start_new_session so we can kill the process group on timeout
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 args,
-                capture_output=True,
-                text=True,
-                timeout=self._config.timeout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=resolved_workdir,
+                start_new_session=True,
             )
-            stdout = _sanitize_output(proc.stdout)  # Fix 4
-            stderr = _sanitize_output(proc.stderr)  # Fix 4
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            return SFWResult(
-                success=False,
-                command=command,
-                stdout="",
-                stderr=f"Command timed out after {self._config.timeout}s",
-                exit_code=-1,
-            )
+            try:
+                stdout_bytes, stderr_bytes = proc.communicate(
+                    timeout=self._config.timeout
+                )
+                stdout = _sanitize_output(
+                    stdout_bytes.decode("utf-8", errors="replace")
+                )
+                stderr = _sanitize_output(
+                    stderr_bytes.decode("utf-8", errors="replace")
+                )
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                # Kill entire process group (sfw + child package manager processes)
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+                # Grace period for SIGTERM, then force-kill with SIGKILL
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        proc.kill()
+                    proc.wait()
+                return SFWResult(
+                    success=False,
+                    command=command,
+                    stdout="",
+                    stderr=f"Command timed out after {self._config.timeout}s",
+                    exit_code=-1,
+                )
         except OSError as exc:
             return SFWResult(
                 success=False,
                 command=command,
                 stdout="",
-                stderr=_sanitize_oserror(exc),  # Fix 7
+                stderr=_sanitize_oserror(exc),
                 exit_code=-1,
             )
 
@@ -324,7 +393,9 @@ class SFWManager:
         installed: list[str] = []
 
         for line in output.splitlines():
-            parts = line.split()
+            # Strip ANSI escape sequences before parsing
+            clean_line = _strip_ansi(line)
+            parts = clean_line.split()
             if not parts:
                 continue
 
@@ -334,7 +405,10 @@ class SFWManager:
                 if token in _ALL_KEYWORDS and i + 1 < len(parts):
                     # Walk past any additional keyword tokens (e.g. 🔴 blocked)
                     j = i + 1
-                    while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
+                    while (
+                        j < len(parts)
+                        and parts[j].lower().strip(",:;") in _ALL_KEYWORDS
+                    ):
                         j += 1
                     if j < len(parts):
                         if token in _BLOCKED_KEYWORDS:
@@ -343,8 +417,8 @@ class SFWManager:
                             installed.append(parts[j])
                     break
 
-        # Fix 6: deduplicate results while preserving order
-        blocked = list(dict.fromkeys(blocked))
-        installed = list(dict.fromkeys(installed))
+        # Deduplicate results while preserving order, then cap list size
+        blocked = _truncate_list(list(dict.fromkeys(blocked)))
+        installed = _truncate_list(list(dict.fromkeys(installed)))
 
         return blocked, installed

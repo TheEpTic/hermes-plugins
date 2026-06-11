@@ -15,7 +15,9 @@ from ..utils import err, ok, require
 def handle_sfw(manager: SFWManager) -> Callable[..., str]:
     """Return a handler with manager injected via closure."""
 
-    def _handle(params: dict[str, Any], **kwargs: Any) -> str:  # **kwargs: Hermes framework compat
+    def _handle(
+        params: dict[str, Any], **kwargs: Any
+    ) -> str:  # **kwargs: Hermes framework compat
         error = require(params, "action")
         if error:
             return err(error)
@@ -37,7 +39,15 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
                 return err(error)
 
             command = params["command"]
+
+            # Type-check: reject non-string command values (LLM hallucination guard)
+            if not isinstance(command, str):
+                return err(f"command must be a string, got {type(command).__name__}")
+
             workdir = params.get("workdir")
+            if workdir is not None and not isinstance(workdir, str):
+                return err(f"workdir must be a string, got {type(workdir).__name__}")
+
             verbose = params.get("verbose", False)
 
             result = manager.run_command(

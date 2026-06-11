@@ -42,12 +42,11 @@ def manager(tmp_path: Path) -> SFWManager:
 
 
 @pytest.fixture
-def mock_subprocess():
-    """Patch subprocess.run so no real processes are launched."""
-    with patch("hermes_sfw.manager.subprocess.run") as m:
+def mock_popen():
+    """Patch subprocess.Popen so no real processes are launched."""
+    with patch("hermes_sfw.manager.subprocess.Popen") as m:
         proc = MagicMock()
-        proc.stdout = ""
-        proc.stderr = ""
+        proc.communicate.return_value = (b"", b"")
         proc.returncode = 0
         m.return_value = proc
         yield m

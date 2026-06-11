@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from hermes_sfw.handlers import handle_sfw
-from hermes_sfw.manager import SFWConfig, SFWManager, SFWResult
+from hermes_sfw.manager import SFWConfig, SFWManager, SFWResult, _MAX_LIST_ENTRIES
 
 
 def _call(manager: SFWManager, params: dict[str, Any]) -> dict[str, Any]:
@@ -55,8 +55,8 @@ class TestRun:
         assert result["success"] is False
         assert "command" in result["error"]
 
-    def test_run_echo(self, manager: SFWManager, mock_subprocess) -> None:
-        mock_subprocess.return_value.stdout = "hello\n"
+    def test_run_echo(self, manager: SFWManager, mock_popen) -> None:
+        mock_popen.return_value.communicate.return_value = (b"hello\n", b"")
         result = _call(manager, {"action": "run", "command": "npm install express"})
         assert result["success"] is True
         assert "hello" in result.get("stdout", "")
@@ -68,47 +68,59 @@ class TestRun:
         assert result["success"] is False
         assert "not installed" in result.get("stderr", "").lower()
 
-    def test_run_verbose_flag(self, manager: SFWManager) -> None:
-        with patch("hermes_sfw.manager.subprocess.run") as mock_run:
-            mock_proc = MagicMock()
-            mock_proc.stdout = ""
-            mock_proc.stderr = ""
-            mock_proc.returncode = 0
-            mock_run.return_value = mock_proc
+    def test_run_verbose_flag(self, manager: SFWManager, mock_popen) -> None:
+        _call(
+            manager,
+            {"action": "run", "command": "npm install express", "verbose": True},
+        )
 
-            _call(manager, {"action": "run", "command": "npm install express", "verbose": True})
+        call_args = mock_popen.call_args
+        args = call_args[0][0]
+        assert "--verbose" in args
 
-            call_args = mock_run.call_args[0][0]
-            assert "--verbose" in call_args
+    def test_run_workdir_forwarded(
+        self, tmp_path: Path, manager: SFWManager, mock_popen
+    ) -> None:
+        _call(
+            manager,
+            {
+                "action": "run",
+                "command": "npm install express",
+                "workdir": str(tmp_path),
+            },
+        )
 
-    def test_run_workdir_forwarded(self, tmp_path: Path, manager: SFWManager) -> None:
-        with patch("hermes_sfw.manager.subprocess.run") as mock_run:
-            mock_proc = MagicMock()
-            mock_proc.stdout = ""
-            mock_proc.stderr = ""
-            mock_proc.returncode = 0
-            mock_run.return_value = mock_proc
-
-            _call(
-                manager,
-                {
-                    "action": "run",
-                    "command": "npm install express",
-                    "workdir": str(tmp_path),
-                },
-            )
-
-            call_kwargs = mock_run.call_args[1]
-            assert call_kwargs["cwd"] == str(tmp_path)
+        call_kwargs = mock_popen.call_args[1]
+        assert call_kwargs["cwd"] == str(tmp_path)
 
     def test_run_invalid_command_syntax(self, manager: SFWManager) -> None:
         result = _call(manager, {"action": "run", "command": 'echo "unclosed'})
         assert result["success"] is False
         stderr = result.get("stderr", "").lower()
-        assert "invalid" in stderr or "syntax" in stderr or "parse" in stderr or "closing" in stderr
+        assert (
+            "invalid" in stderr
+            or "syntax" in stderr
+            or "parse" in stderr
+            or "closing" in stderr
+        )
 
     def test_run_disallowed_command(self, manager: SFWManager) -> None:
         result = _call(manager, {"action": "run", "command": "cat /etc/passwd"})
+        assert result["success"] is False
+
+    def test_run_non_string_command(self, manager: SFWManager) -> None:
+        """Non-string command from LLM hallucination should be rejected."""
+        handler = handle_sfw(manager)
+        raw = handler({"action": "run", "command": 123})
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "string" in result["error"].lower()
+
+    def test_run_non_string_bool_command(self, manager: SFWManager) -> None:
+        """Boolean command from LLM hallucination should be rejected."""
+        handler = handle_sfw(manager)
+        raw = handler({"action": "run", "command": True})
+        result = json.loads(raw)
         assert result["success"] is False
 
 
@@ -129,6 +141,59 @@ class TestValidation:
         result = _call(manager, {"action": "bogus"})
         assert result["success"] is False
         assert "Unknown action" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Command validation — path separators and maxLength
+# ---------------------------------------------------------------------------
+
+
+class TestCommandValidation:
+    """Tests for command prefix allowlist edge cases."""
+
+    def test_reject_absolute_path(self, manager: SFWManager) -> None:
+        """Absolute path should be rejected (finding 1)."""
+        result = _call(
+            manager, {"action": "run", "command": "/usr/bin/pip install foo"}
+        )
+        assert result["success"] is False
+        assert "path separator" in result.get("stderr", "").lower()
+
+    def test_reject_relative_path(self, manager: SFWManager) -> None:
+        """Relative path should be rejected."""
+        result = _call(manager, {"action": "run", "command": "../pip install foo"})
+        assert result["success"] is False
+
+    def test_reject_command_too_long(self, manager: SFWManager) -> None:
+        """Commands exceeding maxLength should be rejected server-side."""
+        long_cmd = "npm install " + "x" * 1100
+        result = _call(manager, {"action": "run", "command": long_cmd})
+        assert result["success"] is False
+        assert "too long" in result.get("stderr", "").lower()
+
+    def test_accept_bare_command(self, manager: SFWManager, mock_popen) -> None:
+        """Bare command names should be accepted."""
+        _call(manager, {"action": "run", "command": "npm install express"})
+        assert mock_popen.called
+
+    def test_reject_empty_command(self, manager: SFWManager) -> None:
+        """Empty command string should be rejected."""
+        result = _call(manager, {"action": "run", "command": ""})
+        assert result["success"] is False
+        assert "empty" in result.get("stderr", "").lower()
+
+    def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
+        """Null bytes in command should be rejected."""
+        result = _call(manager, {"action": "run", "command": "npm install\x00evil"})
+        assert result["success"] is False
+
+    def test_reject_non_string_workdir(self, manager: SFWManager) -> None:
+        """Non-string workdir should be rejected."""
+        handler = handle_sfw(manager)
+        raw = handler({"action": "run", "command": "npm install x", "workdir": [1, 2]})
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert "string" in result["error"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -181,14 +246,18 @@ class TestParseOutput:
 
     def test_blocked_in_package_name_no_false_positive(self) -> None:
         """'blocked' as a substring in a package name should not match."""
-        blocked, installed = SFWManager._parse_output("Installing blocked-utils successfully")
+        blocked, installed = SFWManager._parse_output(
+            "Installing blocked-utils successfully"
+        )
         # Should NOT appear in blocked list
         assert "blocked-utils" not in blocked
         assert "successfully" not in blocked
 
     def test_added_in_package_name_no_false_positive(self) -> None:
         """'added' as a substring in a package name should not match."""
-        blocked, installed = SFWManager._parse_output("Removed added-package from cache")
+        blocked, installed = SFWManager._parse_output(
+            "Removed added-package from cache"
+        )
         assert "added-package" not in installed
 
     def test_full_line_not_dumped_as_package(self) -> None:
@@ -218,6 +287,49 @@ class TestParseOutput:
         blocked, installed = SFWManager._parse_output("\n\n\n")
         assert blocked == []
         assert installed == []
+
+    # --- New tests for ANSI stripping ---
+
+    def test_ansi_stripped_from_blocked(self) -> None:
+        """ANSI escape codes should be stripped before parsing."""
+        blocked, installed = SFWManager._parse_output(
+            "\x1b[31m🔴 blocked malicious-pkg\x1b[0m"
+        )
+        assert blocked == ["malicious-pkg"]
+
+    def test_ansi_stripped_package_name_clean(self) -> None:
+        """Package names should not contain ANSI artifacts."""
+        blocked, installed = SFWManager._parse_output(
+            "\x1b[32m🟢 installed express\x1b[0m"
+        )
+        assert installed == ["express"]
+
+    def test_ansi_wrapped_keyword_still_matches(self) -> None:
+        """Keywords wrapped in ANSI should still be detected after stripping."""
+        blocked, installed = SFWManager._parse_output("\x1b[1mblocked\x1b[0m evil-pkg")
+        assert "evil-pkg" in blocked
+
+    # --- List capping ---
+
+    def test_blocked_list_capped(self) -> None:
+        """Blocked list should be capped at _MAX_LIST_ENTRIES."""
+        output = "\n".join(f"🔴 blocked pkg-{i}" for i in range(100))
+        blocked, installed = SFWManager._parse_output(output)
+        assert len(blocked) == _MAX_LIST_ENTRIES + 1  # 50 entries + "... and N more"
+        assert "and 50 more" in blocked[-1]
+
+    def test_installed_list_capped(self) -> None:
+        """Installed list should be capped at _MAX_LIST_ENTRIES."""
+        output = "\n".join(f"🟢 installed pkg-{i}" for i in range(100))
+        blocked, installed = SFWManager._parse_output(output)
+        assert len(installed) == _MAX_LIST_ENTRIES + 1
+        assert "and 50 more" in installed[-1]
+
+    def test_list_not_capped_under_limit(self) -> None:
+        """Lists under the cap should not be truncated."""
+        output = "\n".join(f"🔴 blocked pkg-{i}" for i in range(10))
+        blocked, installed = SFWManager._parse_output(output)
+        assert len(blocked) == 10
 
 
 # ---------------------------------------------------------------------------
@@ -362,3 +474,67 @@ class TestGetVersion:
         version = manager.get_version()
         assert version is not None
         assert isinstance(version, str)
+
+
+# ---------------------------------------------------------------------------
+# Workdir validation edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestWorkdirValidation:
+    """Tests for workdir validation edge cases."""
+
+    def test_symlink_loop_raises_value_error(self, tmp_path: Path) -> None:
+        """Circular symlinks should raise ValueError, not RuntimeError."""
+        # Create a true circular symlink: a -> b -> a
+        a = tmp_path / "a"
+        b = tmp_path / "b"
+        a.symlink_to(b)
+        b.symlink_to(a)
+
+        sfw_bin = tmp_path / "sfw"
+        sfw_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        sfw_bin.chmod(0o755)
+
+        mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin)))
+        result = mgr.run_command("npm install express", workdir=str(a))
+        assert result.success is False
+        assert (
+            "invalid" in result.stderr.lower()
+            or "working directory" in result.stderr.lower()
+        )
+
+    def test_workdir_tilde_expanded(
+        self, tmp_path: Path, manager: SFWManager, mock_popen
+    ) -> None:
+        """~ should be expanded in workdir."""
+        _call(
+            manager,
+            {
+                "action": "run",
+                "command": "npm install express",
+                "workdir": "~",
+            },
+        )
+        # Should not fail — ~ resolves to home dir
+        assert mock_popen.called
+
+
+# ---------------------------------------------------------------------------
+# Unicode handling
+# ---------------------------------------------------------------------------
+
+
+class TestUnicodeHandling:
+    """Tests for non-UTF-8 output handling."""
+
+    def test_binary_output_no_crash(self, tmp_path: Path) -> None:
+        """Binary/non-UTF-8 output should not crash the manager."""
+        sfw_bin = tmp_path / "sfw"
+        sfw_bin.write_bytes(b"#!/bin/bash\nprintf '\\x80\\x81\\x82\\xff\\xfe'\n")
+        sfw_bin.chmod(0o755)
+
+        mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin)))
+        result = mgr.run_command("npm install express")
+        # Should not raise UnicodeDecodeError
+        assert isinstance(result.stdout, str)
