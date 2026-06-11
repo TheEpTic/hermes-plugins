@@ -24,6 +24,7 @@ from typing import Any
 
 from .config import DEFAULT_CONFIG, SSHConfig
 from .models import Machine, Session
+from .storage import EncryptedStore
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ class SSHManager:
         self._checker_event = threading.Event()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._config.ensure_dirs()
+        self._store = EncryptedStore(self._config.data_dir)
+        # Auto-migrate plaintext machines.json to encrypted
+        self._store.migrate_plaintext("machines.json")
 
     @property
     def config(self) -> SSHConfig:
@@ -86,10 +90,10 @@ class SSHManager:
                 os.unlink(tmp_path)
             raise
 
-    # ----- Machine registry -----
+    # ----- Machine registry (encrypted) -----
 
     def _load_machines(self) -> dict[str, dict[str, Any]]:
-        raw = self._read_json(self._config.machines_file, {"machines": {}})
+        raw = self._store.read("machines.json", {"machines": {}})
         result = raw.get("machines", {})
         if not isinstance(result, dict):
             logger.warning("Corrupt machines.json structure, resetting")
@@ -97,7 +101,7 @@ class SSHManager:
         return result
 
     def _save_machines(self, machines: dict[str, dict[str, Any]]) -> None:
-        self._write_json(self._config.machines_file, {"machines": machines})
+        self._store.write("machines.json", {"machines": machines})
 
     def list_machines(self) -> dict[str, Machine]:
         raw = self._load_machines()
