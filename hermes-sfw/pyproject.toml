@@ -35,7 +35,7 @@ Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-sfw/CHA
 dev = [
     "black==26.5.1",
     "mypy==1.16.0",
-    "pytest==9.0.2",
+    "pytest==9.0.3",
 ]
 
 [tool.hatch.build.targets.wheel]
