@@ -877,7 +877,7 @@ def test_read_output_nonexistent(tmp_path: Path) -> None:
 
 
 def test_run_command_large_output_saves_to_file(tmp_path: Path) -> None:
-    """stdout/stderr exceeding max_output_chars are saved to /tmp/ files."""
+    """stdout/stderr exceeding max_output_chars are saved to restricted files."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
 
@@ -922,13 +922,13 @@ def test_maybe_save_output_short() -> None:
     assert path is None
 
 
-def test_maybe_save_output_long() -> None:
-    """_maybe_save_output writes to /tmp/ and returns summary."""
-    mgr = SSHManager.__new__(SSHManager)
+def test_maybe_save_output_long(tmp_path: Path) -> None:
+    """_maybe_save_output writes to output_dir and returns summary."""
+    mgr = _make_manager(tmp_path)
     long_text = "x" * 500
     text, path = mgr._maybe_save_output(long_text, 100, "s1", "stdout")
     assert path is not None
-    assert "/tmp/ssh_output_s1_stdout.txt" in path
+    assert str(tmp_path / "outputs" / "ssh_output_s1_stdout.txt") == path
     assert "output saved to" in text
     assert "500 chars total" in text
     assert len(text) < 500  # summary is shorter than full
@@ -1072,11 +1072,27 @@ def test_add_machine_rejects_bad_name(tmp_path: Path) -> None:
         mgr.add_machine(Machine(name="../../etc", host="1.1.1.1"))
 
 
-# ---- Bug fix: /tmp output file permissions ----
+def test_add_machine_rejects_unsafe_host_user_port_alias_and_key(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    bad_cases = [
+        Machine(name="h1", host="bad host"),
+        Machine(name="h2", host="-oProxyCommand=evil"),
+        Machine(name="h3", host="1.1.1.1", user="root@evil"),
+        Machine(name="h4", host="1.1.1.1", port=0),
+        Machine(name="h5", host="1.1.1.1", port=65536),
+        Machine(name="h6", host="1.1.1.1", aliases=["../../etc"]),
+        Machine(name="h7", host="1.1.1.1", key="bad\x00key"),
+    ]
+    for machine in bad_cases:
+        with pytest.raises(ValueError):
+            mgr.add_machine(machine)
+
+
+# ---- Output file permissions ----
 
 
 def test_maybe_save_output_permissions(tmp_path: Path) -> None:
-    """Output files saved to /tmp should be 0o600 (owner-only)."""
+    """Output files saved to output_dir should be 0o600 (owner-only)."""
     mgr = _make_manager(tmp_path)
     big_text = "x" * 100
     _summary, path_str = mgr._maybe_save_output(big_text, 10, "test_session", "stdout")
@@ -1130,13 +1146,35 @@ def test_run_command_zero_timeout_uses_default(tmp_path: Path) -> None:
         assert result["success"] is True
 
 
-# ---- Bug fix: _close_sessions_batch cleans /tmp ----
-
-
-def test_close_sessions_batch_cleans_tmp(tmp_path: Path) -> None:
-    """Batch-closed sessions should have their /tmp output files cleaned."""
+def test_run_command_rejects_non_numeric_timeout(tmp_path: Path) -> None:
+    """Non-numeric timeout should return an error instead of crashing."""
     mgr = _make_manager(tmp_path)
-    fake_file = Path("/tmp/ssh_output_test_batch_stdout.txt")
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    result = mgr.run_command("h", "echo ok", timeout="abc")
+    assert result["success"] is False
+    assert "timeout" in result["error"]
+
+
+def test_run_command_clamps_max_output_chars(tmp_path: Path) -> None:
+    """Huge max_output_chars values are clamped server-side."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    big_stdout = "x" * 600_000
+    with patch("ssh_tools.manager.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=big_stdout, stderr="")
+        result = mgr.run_command("h", "echo ok", max_output_chars=999_999_999)
+    assert result["success"] is True
+    assert len(result["stdout"]) < len(big_stdout)
+    assert "stdout_file" in result
+
+
+# ---- _close_sessions_batch cleans saved outputs ----
+
+
+def test_close_sessions_batch_cleans_output_dir(tmp_path: Path) -> None:
+    """Batch-closed sessions should have their saved output files cleaned."""
+    mgr = _make_manager(tmp_path)
+    fake_file = mgr._config.output_dir / "ssh_output_test_batch_stdout.txt"
     fake_file.write_text("test")
     try:
         mgr._close_sessions_batch(["test_batch"])

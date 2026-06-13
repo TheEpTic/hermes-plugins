@@ -76,7 +76,7 @@ sfw action=run command="pnpm add -D vitest" verbose=true
 sfw action=run command="npm install" workdir="/path/to/project"
 ```
 
-**Supported package managers:** npm, npx, yarn, pnpm (JS/TS), pip, pip3, uv (Python), cargo, rustup (Rust).
+**Supported package managers:** npm, yarn, pnpm (JS/TS), pip, pip3, uv (Python), cargo, rustup (Rust). `npx` is intentionally blocked because it can execute arbitrary package code.
 
 **Blocked packages:** When sfw detects a malicious package, the install is blocked and the package name is returned in the response. Non-package-manager commands (like `cat`, `rm`, `curl`) are rejected by the prefix allowlist.
 

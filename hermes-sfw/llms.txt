@@ -55,7 +55,7 @@ sfw action=run command="npm install express"
 
 Commands are validated against a prefix allowlist before execution. Only package manager commands are accepted.
 
-Supported prefixes: npm, npx, yarn, pnpm, pip, pip3, uv, cargo, rustup.
+Supported prefixes: npm, yarn, pnpm, pip, pip3, uv, cargo, rustup. npx is intentionally blocked because it can execute arbitrary package code.
 
 Options:
 - `workdir` (optional): working directory for the command

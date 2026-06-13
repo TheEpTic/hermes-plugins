@@ -18,6 +18,8 @@ SSH_TERMINAL_SCHEMA = {
                 "type": "integer",
                 "description": "Seconds before killing the command (default: 30)",
                 "default": 30,
+                "minimum": 1,
+                "maximum": 600,
             },
             "new_session": {
                 "type": "boolean",
@@ -31,8 +33,10 @@ SSH_TERMINAL_SCHEMA = {
             },
             "max_output_chars": {
                 "type": "integer",
-                "description": "Max output characters to return. Truncated if exceeded (default: 50000).",
+                "description": "Max output characters to return. Truncated if exceeded (default: 50000, max: 500000).",
                 "default": 50000,
+                "minimum": 1,
+                "maximum": 500000,
             },
             "poll": {
                 "type": "string",
@@ -43,7 +47,7 @@ SSH_TERMINAL_SCHEMA = {
                 "description": "Session ID of a completed background command to read full stdout/stderr from.",
             },
         },
-        "required": ["machine", "command"],
+        "required": [],
     },
 }
 

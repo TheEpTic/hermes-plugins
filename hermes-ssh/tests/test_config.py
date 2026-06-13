@@ -15,6 +15,7 @@ def test_default_config_paths(tmp_path: Path) -> None:
     assert config.machines_file == tmp_path / "machines.json"
     assert config.sessions_file == tmp_path / "sessions.json"
     assert config.socket_dir == tmp_path / "sockets"
+    assert config.output_dir == tmp_path / "outputs"
 
 
 def test_ensure_dirs_creates_directories(tmp_path: Path) -> None:
@@ -22,6 +23,7 @@ def test_ensure_dirs_creates_directories(tmp_path: Path) -> None:
     config.ensure_dirs()
     assert (tmp_path / "deep" / "nested").is_dir()
     assert (tmp_path / "deep" / "nested" / "sockets").is_dir()
+    assert (tmp_path / "deep" / "nested" / "outputs").is_dir()
 
 
 def test_config_defaults() -> None:
@@ -33,6 +35,7 @@ def test_config_defaults() -> None:
     assert config.idle_check_interval == 60
     assert config.idle_timeout_minutes == 30
     assert config.closed_prune_hours == 24
+    assert config.strict_host_key_checking == "accept-new"
 
 
 def test_config_is_frozen() -> None:

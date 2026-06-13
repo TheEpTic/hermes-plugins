@@ -27,7 +27,7 @@ SFW_TOOL_SCHEMA = {
                 "maxLength": 1024,
                 "description": (
                     "Package manager command to run through sfw. "
-                    "Must start with: npm, npx, yarn, pnpm, pip, pip3, uv, cargo, rustup. "
+                    "Must start with: npm, yarn, pnpm, pip, pip3, uv, cargo, rustup. "
                     "Any command the underlying package manager supports works here. "
                     "Examples: "
                     "'npm install express', 'npm uninstall lodash', "

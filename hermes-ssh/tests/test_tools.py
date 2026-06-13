@@ -43,6 +43,27 @@ def test_ssh_terminal_nonexistent_machine(tmp_path: Path) -> None:
     assert "not found" in result["error"]
 
 
+def test_ssh_terminal_rejects_non_string_machine(tmp_path: Path) -> None:
+    handler = handle_ssh_terminal(_make_manager(tmp_path))
+    result = json.loads(handler({"machine": 123, "command": "echo hi"}))
+    assert result["success"] is False
+    assert "machine" in result["error"]
+
+
+def test_ssh_terminal_rejects_empty_command(tmp_path: Path) -> None:
+    handler = handle_ssh_terminal(_make_manager(tmp_path))
+    result = json.loads(handler({"machine": "h", "command": ""}))
+    assert result["success"] is False
+    assert "command" in result["error"]
+
+
+def test_ssh_terminal_rejects_non_boolean_background(tmp_path: Path) -> None:
+    handler = handle_ssh_terminal(_make_manager(tmp_path))
+    result = json.loads(handler({"machine": "h", "command": "echo hi", "background": "yes"}))
+    assert result["success"] is False
+    assert "background" in result["error"]
+
+
 # ---------------------------------------------------------------------------
 # handle_ssh_machines
 # ---------------------------------------------------------------------------
@@ -97,6 +118,20 @@ def test_machines_add_missing_host(tmp_path: Path) -> None:
     result = json.loads(handler({"action": "add", "name": "h1"}))
     assert result["success"] is False
     assert "required" in result["error"]
+
+
+def test_machines_add_rejects_invalid_host(tmp_path: Path) -> None:
+    handler = handle_ssh_machines(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "add", "name": "h1", "host": "bad host"}))
+    assert result["success"] is False
+    assert "Host" in result["error"]
+
+
+def test_machines_add_rejects_invalid_port(tmp_path: Path) -> None:
+    handler = handle_ssh_machines(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "add", "name": "h1", "host": "1.1.1.1", "port": 0}))
+    assert result["success"] is False
+    assert "Port" in result["error"]
 
 
 def test_machines_remove(tmp_path: Path) -> None:
@@ -479,7 +514,7 @@ def test_approval_not_available_commands_pass(tmp_path: Path) -> None:
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     handler = handle_ssh_terminal(mgr)
     with (
-        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=None),
+        mock_patch("ssh_tools.handlers.terminal.check_approval", return_value=None),
         mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -496,7 +531,7 @@ def test_approval_denies_dangerous_command(tmp_path: Path) -> None:
     handler = handle_ssh_terminal(mgr)
     deny_result = {"approved": False, "message": "BLOCKED: recursive delete flagged"}
     with (
-        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=deny_result),
+        mock_patch("ssh_tools.handlers.terminal.check_approval", return_value=deny_result),
         mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
     ):
         result = json.loads(handler({"machine": "h", "command": "rm -rf /home"}))
@@ -514,7 +549,7 @@ def test_approval_allows_safe_command(tmp_path: Path) -> None:
     handler = handle_ssh_terminal(mgr)
     approve_result = {"approved": True, "message": None}
     with (
-        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=approve_result),
+        mock_patch("ssh_tools.handlers.terminal.check_approval", return_value=approve_result),
         mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -524,14 +559,14 @@ def test_approval_allows_safe_command(tmp_path: Path) -> None:
 
 
 def test_approval_none_passes_through(tmp_path: Path) -> None:
-    """When _check_approval returns None (approved), command executes."""
+    """When check_approval returns None (approved), command executes."""
     from unittest.mock import patch as mock_patch
 
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     handler = handle_ssh_terminal(mgr)
     with (
-        mock_patch("ssh_tools.handlers.terminal._check_approval", return_value=None),
+        mock_patch("ssh_tools.handlers.terminal.check_approval", return_value=None),
         mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
@@ -545,7 +580,7 @@ def test_approval_does_not_block_poll(tmp_path: Path) -> None:
 
     mgr = _make_manager(tmp_path)
     handler = handle_ssh_terminal(mgr)
-    with mock_patch("ssh_tools.handlers.terminal._check_approval") as mock_check:
+    with mock_patch("ssh_tools.handlers.terminal.check_approval") as mock_check:
         result = json.loads(handler({"read_output": "nonexistent"}))
         assert result["success"] is False
         mock_check.assert_not_called()

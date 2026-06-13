@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from ..approval import check_approval
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -70,10 +72,22 @@ def create_slash_handler(
         if not target:
             return f"Machine '{name}' not found in registry."
 
-        # Run command if provided
+        # Run command if provided.
         if len(args) > 1:
-            command = " ".join(args[1:])
-            result = manager.run_command(name, command)
+            background = args[1] == "-bg"
+            command_parts = args[2:] if background else args[1:]
+            command = " ".join(command_parts).strip()
+            if not command:
+                return "Command is required."
+            approval = check_approval(command)
+            if approval is not None and not approval.get("approved", True):
+                return str(approval.get("message", "Command blocked by approval system"))
+            result = manager.run_command(name, command, background=background)
+            if background and result.get("success"):
+                return (
+                    f"started: {result.get('session_id')} "
+                    f"pid={result.get('pid')} on {result.get('machine', name)}"
+                )
             parts = []
             if result.get("stdout"):
                 parts.append(result["stdout"].rstrip())

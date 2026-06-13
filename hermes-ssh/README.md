@@ -35,7 +35,7 @@ git clone https://github.com/TheEpTic/hermes-ssh.git
 ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
 ```
 
-Then `/reset` in Hermes. Changes to the source take effect immediately through the symlink — no restart needed.
+Then `/reset` in Hermes. The symlink points at the source tree, but Python modules are imported once, so code changes still require `/reset` or a Hermes process restart before they load.
 
 ### Option 3: As a Python package
 
@@ -68,7 +68,7 @@ ssh_terminal machine=web1 command="tail -f /var/log/syslog" background=true
 ssh_terminal machine=web1 command="make -j4" timeout=300
 ```
 
-**Output truncation:** When output exceeds `max_output_chars` (default: 50,000), the full output is saved to a `/tmp/` file and a summary with the file path is returned. The LLM can then use `read_file` to access the complete output.
+**Output truncation:** When output exceeds `max_output_chars` (default: 50,000), the full output is saved under the plugin's restricted output directory and a summary with the file path is returned. The LLM can then use `read_file` to access the complete output.
 
 **Background commands:** Long-running commands can be backgrounded. The plugin tracks the process and lets you poll for status or retrieve output later.
 
@@ -155,7 +155,7 @@ All settings live in `src/ssh_tools/config.py` as an `SSHConfig` dataclass:
 | `idle_check_interval` | 60s | Seconds between idle checks |
 | `idle_timeout_minutes` | 30m | Auto-kill after this idle time |
 | `closed_prune_hours` | 24h | Remove closed sessions after this |
-| `strict_host_key_checking` | no | SSH host key verification |
+| `strict_host_key_checking` | accept-new | SSH host key verification |
 
 ## Architecture
 
@@ -190,8 +190,8 @@ See [SECURITY.md](SECURITY.md) for the full picture.
 
 **Defaults you should know about:**
 
-- `StrictHostKeyChecking=no` — convenient but vulnerable to MITM. Set to `yes` for production.
-- Credentials stored in plaintext JSON at `data/machines.json`. Data directory is 0o700.
+- `StrictHostKeyChecking=accept-new` — accepts first-seen host keys but rejects changed keys. Set to `yes` for strict production hosts.
+- Machine credentials are encrypted at rest in `~/.hermes/ssh-tools/machines.json`. Data directory is 0o700.
 - All commands execute with the permissions of the Hermes agent process.
 
 **Hardening applied:**
@@ -220,7 +220,7 @@ The SSH key path stored in the machine registry may be incorrect, or the remote 
 Commands exceeding `command_timeout` (default 30s) are killed. Increase the timeout or use `background=true` for long-running work.
 
 **Output looks truncated**
-This is intentional — large outputs are saved to `/tmp/` and a summary is returned. Use `read_output` or `read_file` on the returned path for the full output.
+This is intentional — large outputs are saved under the restricted plugin output directory and a summary is returned. Use `read_output` or `read_file` on the returned path for the full output.
 
 **Session stuck as "active" after process died**
 If the agent restarted, background process references are lost. Use `ssh_sessions action=cleanup` to kill stale sessions, or `ssh_sessions action=prune` to remove old closed ones.

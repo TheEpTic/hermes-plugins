@@ -15,7 +15,7 @@ git clone https://github.com/TheEpTic/hermes-ssh.git
 ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
 ```
 
-Then restart Hermes with `/reset` or restart the process. Changes to source take effect through the symlink without restart.
+Then restart Hermes with `/reset` or restart the process. The symlink points at the source tree, but plugin modules are imported once, so code changes still need a reload before they take effect.
 
 Or use the deploy script:
 
@@ -109,7 +109,7 @@ ssh_sessions action=read_output session_id=<session_id>
 
 ### Output truncation
 
-When output exceeds `max_output_chars`, the full output is saved to `/tmp/ssh_output_{session_id}_{stream}.txt` and a summary with the file path is returned. Use `read_file` on the path to get the complete output.
+When output exceeds `max_output_chars`, the full output is saved under `~/.hermes/ssh-tools/outputs/` and a summary with the file path is returned. Use `read_file` on the path to get the complete output.
 
 ### Managing sessions
 
@@ -158,23 +158,24 @@ The plugin is configured via `SSHConfig` dataclass in `src/ssh_tools/config.py`:
 | `idle_check_interval` | 60s | Seconds between idle checks |
 | `idle_timeout_minutes` | 30m | Auto-kill after this idle time |
 | `closed_prune_hours` | 24h | Remove closed sessions after this |
-| `strict_host_key_checking` | no | SSH host key verification |
+| `strict_host_key_checking` | accept-new | SSH host key verification |
 
 ## Data storage
 
-All data is stored locally in the plugin directory under `data/`:
+All data is stored locally under `~/.hermes/ssh-tools/` by default:
 
-- `data/machines.json` — machine registry (host, user, key, aliases, tags)
-- `data/sessions.json` — active and closed sessions
-- `data/sockets/` — SSH ControlMaster sockets
-- `data/command_log.jsonl` — command audit log
+- `machines.json` — encrypted machine registry (host, user, key, aliases, tags)
+- `sessions.json` — active and closed sessions
+- `sockets/` — SSH ControlMaster sockets
+- `outputs/` — saved large command outputs
+- `command_log.jsonl` — command audit log
 
 The data directory has 0o700 permissions. Audit log and temp files use 0o600.
 
 ## Security notes
 
-- `StrictHostKeyChecking=no` by default (convenient but vulnerable to MITM)
-- Credentials stored in plaintext JSON
+- `StrictHostKeyChecking=accept-new` by default (accepts first-seen host keys, rejects changed keys)
+- Machine credentials encrypted at rest with Fernet
 - Commands execute with the Hermes agent's permissions
 - Machine names validated to prevent path traversal and glob injection
 - Atomic JSON writes prevent corruption on crash

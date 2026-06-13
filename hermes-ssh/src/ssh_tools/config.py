@@ -22,10 +22,10 @@ class SSHConfig:
     default_user: str = "root"
     connect_timeout: int = 5
     command_timeout: int = 30
-    strict_host_key_checking: str = "no"
+    strict_host_key_checking: str = "accept-new"
 
     # Output
-    max_output_chars: int = 50_000  # save to /tmp/ file if exceeded
+    max_output_chars: int = 50_000  # save to output_dir if exceeded
 
     # Session management
     idle_check_interval: int = 60  # seconds between idle checks
@@ -45,16 +45,21 @@ class SSHConfig:
     def socket_dir(self) -> Path:
         return self.data_dir / "sockets"
 
+    @property
+    def output_dir(self) -> Path:
+        return self.data_dir / "outputs"
+
     def ensure_dirs(self) -> None:
         """Create all required directories with restricted permissions."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.socket_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         # Clean orphaned temp files from previous crashes
         for tmp in self.data_dir.glob("*.tmp"):
             with contextlib.suppress(OSError):
                 tmp.unlink()
         # Restrict permissions — data dir contains machine credentials
-        for d in (self.data_dir, self.socket_dir):
+        for d in (self.data_dir, self.socket_dir, self.output_dir):
             with contextlib.suppress(OSError):
                 os.chmod(d, 0o700)
 

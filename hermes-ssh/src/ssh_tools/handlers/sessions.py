@@ -33,10 +33,22 @@ def handle_ssh_sessions(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             error = require(params, "session_id")
             if error:
                 return err(error)
-            return ok(**manager.kill_session(params["session_id"]))
+            session_id = params["session_id"]
+            if not isinstance(session_id, str) or not session_id:
+                return err("session_id must be a non-empty string")
+            return ok(**manager.kill_session(session_id))
 
         if action == "cleanup":
             max_idle = params.get("max_idle_minutes")
+            if isinstance(max_idle, bool):
+                return err("max_idle_minutes must be an integer")
+            if isinstance(max_idle, str):
+                try:
+                    max_idle = int(max_idle)
+                except ValueError:
+                    return err("max_idle_minutes must be an integer")
+            if max_idle is not None and not isinstance(max_idle, int):
+                return err("max_idle_minutes must be an integer")
             result = manager.cleanup_idle(max_idle)
             return ok(cleaned=result["count"], details=result["killed"])
 
@@ -48,14 +60,20 @@ def handle_ssh_sessions(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             error = require(params, "session_id")
             if error:
                 return err(error)
-            result = manager.poll_session(params["session_id"])
+            session_id = params["session_id"]
+            if not isinstance(session_id, str) or not session_id:
+                return err("session_id must be a non-empty string")
+            result = manager.poll_session(session_id)
             return ok(**result)
 
         if action == "read_output":
             error = require(params, "session_id")
             if error:
                 return err(error)
-            result = manager.read_output(params["session_id"])
+            session_id = params["session_id"]
+            if not isinstance(session_id, str) or not session_id:
+                return err("session_id must be a non-empty string")
+            result = manager.read_output(session_id)
             return ok(**result)
 
         return err(f"Unknown action: {action}")

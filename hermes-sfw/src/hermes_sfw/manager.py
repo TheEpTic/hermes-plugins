@@ -27,13 +27,12 @@ _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
 _MAX_LIST_ENTRIES = 50
 
 # ---------------------------------------------------------------------------
-# Command prefix allowlist (Fix 1)
+# Command prefix allowlist
 # ---------------------------------------------------------------------------
 
 _ALLOWED_PREFIXES = frozenset(
     {
         "npm",
-        "npx",
         "yarn",
         "pnpm",
         "pip",
@@ -51,7 +50,7 @@ _ALLOWED_PREFIXES = frozenset(
 _MAX_COMMAND_LENGTH = 1024
 
 # ---------------------------------------------------------------------------
-# OSError errno → generic message mapping (Fix 7)
+# OSError errno → generic message mapping
 # ---------------------------------------------------------------------------
 
 _ERRNO_MESSAGES: dict[int, str] = {
@@ -110,7 +109,7 @@ def _validate_command(command: str) -> str | None:
     """Check that the command starts with an allowed prefix.
 
     Returns an error message if the command is disallowed, or None if OK.
-    Also handles shlex.split() ValueError (Fix 2).
+    Also handles shlex.split() ValueError.
     """
     # Reject null bytes and control characters
     if "\x00" in command:
@@ -147,7 +146,7 @@ def _validate_command(command: str) -> str | None:
 
 
 def _validate_workdir(workdir: str | None) -> str | None:
-    """Resolve and validate the working directory (Fix 3).
+    """Resolve and validate the working directory.
 
     Returns the resolved real path if valid, or None if workdir is not set.
     Raises ValueError with a message if the path is invalid.
@@ -168,14 +167,14 @@ def _validate_workdir(workdir: str | None) -> str | None:
 
 
 def _sanitize_output(text: str, max_len: int = 10_000) -> str:
-    """Truncate long output and add a note about total size (Fix 4)."""
+    """Truncate long output and add a note about total size."""
     if len(text) <= max_len:
         return text
     return text[:max_len] + f"\n... [output truncated, total {len(text)} chars]"
 
 
 def _sanitize_oserror(exc: OSError) -> str:
-    """Map common errno values to generic messages (Fix 7)."""
+    """Map common errno values to generic messages."""
     errnum = getattr(exc, "errno", None)
     if errnum is not None and errnum in _ERRNO_MESSAGES:
         return _ERRNO_MESSAGES[errnum]
@@ -213,7 +212,7 @@ class SFWManager:
         path = shutil.which(self._config.sfw_bin)
         if path:
             return path
-        # Check common locations (Fix 8: added os.access check)
+        # Check common locations.
         for candidate in [
             Path.home() / ".local" / "share" / "pnpm" / "bin" / "sfw",
             Path.home() / ".local" / "bin" / "sfw",
@@ -276,7 +275,7 @@ class SFWManager:
                 exit_code=1,
             )
 
-        # Fix 1 + Fix 2: validate command prefix allowlist and handle parse errors
+        # Validate command prefix allowlist and handle parse errors.
         cmd_err = _validate_command(command)
         if cmd_err is not None:
             return SFWResult(
@@ -290,7 +289,7 @@ class SFWManager:
         # Command passed validation, so shlex.split should succeed here too
         cmd_parts = shlex.split(command)
 
-        # Fix 3: validate workdir
+        # Validate workdir.
         try:
             resolved_workdir = _validate_workdir(workdir)
         except ValueError as exc:

@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -27,6 +28,10 @@ from .models import Machine, Session
 from .storage import EncryptedStore
 
 logger = logging.getLogger(__name__)
+
+_HOST_RE = re.compile(r"[A-Za-z0-9_.:-]{1,253}")
+_USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_MAX_OUTPUT_RETURN_CHARS = 500_000
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +51,7 @@ class SSHManager:
         self._checker_thread: threading.Thread | None = None
         self._checker_event = threading.Event()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._process_lock = threading.Lock()
         self._config.ensure_dirs()
         self._store = EncryptedStore(self._config.data_dir)
         # Auto-migrate plaintext machines.json to encrypted
@@ -132,10 +138,10 @@ class SSHManager:
         return None
 
     @staticmethod
-    def _validate_machine_name(name: str) -> str | None:
+    def _validate_machine_name(name: object) -> str | None:
         """Return an error message if the machine name is unsafe, else None."""
-        import re
-
+        if not isinstance(name, str):
+            return "Machine name must be a string"
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", name):
             return (
                 "Machine name must be 1-64 chars, alphanumeric, dots, hyphens, "
@@ -143,11 +149,73 @@ class SSHManager:
             )
         return None
 
+    @staticmethod
+    def _validate_host(host: object) -> str | None:
+        """Return an error message if an SSH host string is unsafe."""
+        if not isinstance(host, str) or not host:
+            return "Host must be a non-empty string"
+        if host.startswith("-") or "@" in host or not _HOST_RE.fullmatch(host):
+            return (
+                "Host must be a hostname/IP with no spaces, @ signs, slashes, or shell characters"
+            )
+        return None
+
+    @staticmethod
+    def _validate_user(user: object) -> str | None:
+        """Return an error message if an SSH username is unsafe."""
+        if not isinstance(user, str) or not _USER_RE.fullmatch(user):
+            return "User must be 1-64 chars: letters, numbers, dots, hyphens, underscores"
+        return None
+
+    @staticmethod
+    def _coerce_port(port: object) -> int:
+        """Validate and normalize an SSH port."""
+        if isinstance(port, bool):
+            raise ValueError("Port must be an integer from 1 to 65535")
+        try:
+            port_int = int(port) if isinstance(port, str) else port
+        except ValueError as exc:
+            raise ValueError("Port must be an integer from 1 to 65535") from exc
+        if not isinstance(port_int, int) or not 1 <= port_int <= 65535:
+            raise ValueError("Port must be an integer from 1 to 65535")
+        return port_int
+
+    @staticmethod
+    def _validate_key_path(key: object) -> str | None:
+        """Return an error message if an SSH key path is unsafe."""
+        if not isinstance(key, str):
+            return "Key path must be a string"
+        if any(ch in key for ch in ("\x00", "\n", "\r")):
+            return "Key path must not contain control characters"
+        return None
+
+    @classmethod
+    def _validate_machine(cls, machine: Machine) -> Machine:
+        """Validate and normalize a machine before it is persisted."""
+        for error in (
+            cls._validate_machine_name(machine.name),
+            cls._validate_host(machine.host),
+            cls._validate_user(machine.user),
+            cls._validate_key_path(machine.key),
+        ):
+            if error:
+                raise ValueError(error)
+        port = cls._coerce_port(machine.port)
+        aliases = machine.aliases or []
+        tags = machine.tags or []
+        if not isinstance(aliases, list) or any(cls._validate_machine_name(a) for a in aliases):
+            raise ValueError("Aliases must be a list of safe machine names")
+        if not isinstance(tags, list) or any(not isinstance(t, str) or len(t) > 64 for t in tags):
+            raise ValueError("Tags must be a list of strings up to 64 chars")
+        if not isinstance(machine.description, str):
+            raise ValueError("Description must be a string")
+        if port != machine.port or aliases is not machine.aliases or tags is not machine.tags:
+            machine = replace(machine, port=port, aliases=aliases, tags=tags)
+        return machine
+
     def add_machine(self, machine: Machine) -> Machine:
         """Add or update a machine. Returns the stored machine."""
-        name_err = self._validate_machine_name(machine.name)
-        if name_err:
-            raise ValueError(name_err)
+        machine = self._validate_machine(machine)
         if not machine.added:
             machine = replace(machine, added=datetime.now(UTC).isoformat())
         with self._lock:
@@ -258,10 +326,10 @@ class SSHManager:
                 self._save_sessions(sessions)
 
     def _cleanup_output_files(self, session_id: str) -> None:
-        """Remove any /tmp/ output files saved for this session."""
+        """Remove any saved output files for this session."""
         prefix = f"ssh_output_{session_id}_"
         try:
-            for p in Path("/tmp").iterdir():
+            for p in self._config.output_dir.iterdir():
                 if p.name.startswith(prefix) and p.name.endswith(".txt"):
                     with contextlib.suppress(OSError):
                         p.unlink()
@@ -270,6 +338,8 @@ class SSHManager:
 
     def close_session(self, session_id: str) -> None:
         self._cleanup_output_files(session_id)
+        with self._process_lock:
+            self._processes.pop(session_id, None)
         with self._lock:
             sessions = self._load_sessions()
             if session_id in sessions:
@@ -482,14 +552,42 @@ class SSHManager:
         cmd.extend(["bash", "-c", shlex.quote(wrapped)])
         return cmd
 
+    def _normalize_timeout(self, timeout: object | None) -> int:
+        """Normalize a caller-supplied timeout, falling back to the configured default."""
+        if timeout is None:
+            return self._config.command_timeout
+        if isinstance(timeout, bool):
+            raise ValueError("timeout must be a positive integer")
+        try:
+            timeout_int = int(timeout) if isinstance(timeout, str) else timeout
+        except ValueError as exc:
+            raise ValueError("timeout must be a positive integer") from exc
+        if not isinstance(timeout_int, int):
+            raise ValueError("timeout must be a positive integer")
+        return timeout_int if timeout_int > 0 else self._config.command_timeout
+
+    def _normalize_max_output_chars(self, max_output_chars: object) -> int:
+        """Clamp caller-supplied output limits to a safe server-side maximum."""
+        if isinstance(max_output_chars, bool):
+            raise ValueError("max_output_chars must be a positive integer")
+        try:
+            limit = int(max_output_chars) if isinstance(max_output_chars, str) else max_output_chars
+        except ValueError as exc:
+            raise ValueError("max_output_chars must be a positive integer") from exc
+        if not isinstance(limit, int):
+            raise ValueError("max_output_chars must be a positive integer")
+        if limit <= 0:
+            return self._config.max_output_chars
+        return min(limit, _MAX_OUTPUT_RETURN_CHARS)
+
     def run_command(
         self,
         machine_name: str,
         command: str,
-        timeout: int | None = None,
+        timeout: object | None = None,
         new_session: bool = False,
         background: bool = False,
-        max_output_chars: int = 50_000,
+        max_output_chars: object = 50_000,
     ) -> dict[str, Any]:
         """Run a command on a remote machine via SSH.
 
@@ -501,9 +599,15 @@ class SSHManager:
             background: If True, launch via Popen and return immediately.
             max_output_chars: Truncate stdout/stderr beyond this length.
         """
-        timeout = int(timeout) if timeout is not None else self._config.command_timeout
-        if timeout <= 0:
-            timeout = self._config.command_timeout
+        if not isinstance(machine_name, str) or not machine_name:
+            return {"success": False, "error": "machine_name must be a non-empty string"}
+        if not isinstance(command, str) or not command.strip():
+            return {"success": False, "error": "command must be a non-empty string"}
+        try:
+            timeout = self._normalize_timeout(timeout)
+            max_output_chars = self._normalize_max_output_chars(max_output_chars)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc), "exit_code": -1}
 
         machine = self.get_machine(machine_name)
         if not machine:
@@ -524,6 +628,7 @@ class SSHManager:
                     ssh_args,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    start_new_session=True,
                 )
                 # Register session first so kill_session can find it
                 self.register_session(
@@ -531,7 +636,8 @@ class SSHManager:
                         id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
                     )
                 )
-                self._processes[session_id] = proc
+                with self._process_lock:
+                    self._processes[session_id] = proc
                 elapsed = round(time.monotonic() - start_time, 2)
                 self._log_command(
                     canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
@@ -609,14 +715,17 @@ class SSHManager:
         """Return *(text_or_summary, file_path_or_None).
 
         If *text* fits within *max_chars* it is returned unchanged.
-        Otherwise the full output is written to a ``/tmp/`` file and a
-        short summary is returned — the caller should include the file
+        Otherwise the full output is written to the plugin's restricted
+        output directory and a short summary is returned — the caller should include the file
         path in its response so the LLM can ``read_file`` the rest.
         """
         if len(text) <= max_chars:
             return text, None
-        path = Path(f"/tmp/ssh_output_{session_id}_{stream}.txt")
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        path = self._config.output_dir / f"ssh_output_{session_id}_{stream}.txt"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         summary = (
@@ -634,14 +743,17 @@ class SSHManager:
         Returns a dict with ``running`` (bool) and, when the process has
         finished, the collected stdout/stderr plus the exit code.
         """
-        proc = self._processes.pop(session_id, None)
-        if proc is None:
-            return {"success": False, "error": f"No background process for session '{session_id}'"}
-        exit_code = proc.poll()
-        if exit_code is None:
-            # Still running — put it back
-            self._processes[session_id] = proc
-            return {"success": True, "session_id": session_id, "running": True}
+        with self._process_lock:
+            proc = self._processes.get(session_id)
+            if proc is None:
+                return {
+                    "success": False,
+                    "error": f"No background process for session '{session_id}'",
+                }
+            exit_code = proc.poll()
+            if exit_code is None:
+                return {"success": True, "session_id": session_id, "running": True}
+            self._processes.pop(session_id, None)
         # Process finished — collect output
         stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
         stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
@@ -670,17 +782,20 @@ class SSHManager:
         process is still running — it is intended for callers who already
         know the process has finished.
         """
-        proc = self._processes.pop(session_id, None)
-        if proc is None:
-            return {"success": False, "error": f"No background process for session '{session_id}'"}
-        exit_code = proc.poll()
-        if exit_code is None:
-            # Still running — put it back so poll_session can collect later
-            self._processes[session_id] = proc
-            return {
-                "success": False,
-                "error": f"Process for session '{session_id}' is still running",
-            }
+        with self._process_lock:
+            proc = self._processes.get(session_id)
+            if proc is None:
+                return {
+                    "success": False,
+                    "error": f"No background process for session '{session_id}'",
+                }
+            exit_code = proc.poll()
+            if exit_code is None:
+                return {
+                    "success": False,
+                    "error": f"Process for session '{session_id}' is still running",
+                }
+            self._processes.pop(session_id, None)
         stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
         stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
         max_chars = self._config.max_output_chars

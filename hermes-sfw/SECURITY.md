@@ -17,7 +17,7 @@ hermes-sfw wraps package manager commands with Socket Firewall Free (sfw) to blo
 The `sfw run` tool executes package manager commands on the host. Anyone with access to the Hermes agent can run `npm install`, `pip install`, etc. on registered working directories. Ensure your Hermes instance is appropriately access-controlled.
 
 **Prefix allowlist**
-Only commands starting with allowed prefixes (npm, npx, yarn, pnpm, pip, pip3, uv, cargo, rustup) are accepted. Non-package-manager commands are rejected. This prevents misuse of the tool for arbitrary command execution, but the allowlist is not a security boundary — package managers themselves can execute arbitrary code (postinstall scripts, etc.).
+Only commands starting with allowed prefixes (npm, yarn, pnpm, pip, pip3, uv, cargo, rustup) are accepted. Non-package-manager commands are rejected. `npx` is intentionally blocked because it can execute arbitrary package code even when the package is not known-malicious yet. This prevents misuse of the tool for arbitrary command execution, but the allowlist is not a security boundary — package managers themselves can execute arbitrary code (postinstall scripts, etc.).
 
 **Working directory**
 When a `workdir` is specified, it is resolved with `os.path.realpath()` to prevent symlink-based path traversal. The directory must exist and be a directory.

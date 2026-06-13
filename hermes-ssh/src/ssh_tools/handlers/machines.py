@@ -40,18 +40,21 @@ def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             error = require(params, "name", "host")
             if error:
                 return err(error)
-            machine = manager.add_machine(
-                Machine(
-                    name=params["name"],
-                    host=params["host"],
-                    user=params.get("user", "root"),
-                    port=params.get("port", 22),
-                    key=params.get("key", ""),
-                    aliases=params.get("aliases", []),
-                    tags=params.get("tags", []),
-                    description=params.get("description", ""),
+            try:
+                machine = manager.add_machine(
+                    Machine(
+                        name=params["name"],
+                        host=params["host"],
+                        user=params.get("user", "root"),
+                        port=params.get("port", 22),
+                        key=params.get("key", ""),
+                        aliases=params.get("aliases", []),
+                        tags=params.get("tags", []),
+                        description=params.get("description", ""),
+                    )
                 )
-            )
+            except ValueError as exc:
+                return err(str(exc))
             return ok(machine=machine.to_dict())
 
         if action == "remove":
@@ -59,6 +62,8 @@ def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             if error:
                 return err(error)
             name = params["name"]
+            if not isinstance(name, str):
+                return err("name must be a string")
             removed = manager.remove_machine(name)
             return ok(
                 success=removed,
@@ -70,6 +75,8 @@ def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             if error:
                 return err(error)
             name = params["name"]
+            if not isinstance(name, str):
+                return err("name must be a string")
             inspected = manager.get_machine(name)
             if not inspected:
                 return err(f"Machine '{name}' not found")
@@ -80,7 +87,10 @@ def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             error = require(params, "name")
             if error:
                 return err(error)
-            return ok(**manager.test_machine(params["name"]))
+            name = params["name"]
+            if not isinstance(name, str):
+                return err("name must be a string")
+            return ok(**manager.test_machine(name))
 
         return err(f"Unknown action: {action}")
 

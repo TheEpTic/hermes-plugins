@@ -120,6 +120,7 @@ class EncryptedStore:
         fernet = self._ensure_key()
 
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._data_dir, _DIR_PERMS)
 
         plaintext = json.dumps(data, indent=2) + "\n"
         encrypted = fernet.encrypt(plaintext.encode()).decode()

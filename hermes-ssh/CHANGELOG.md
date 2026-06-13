@@ -5,8 +5,8 @@
 ### New features
 
 - **Background commands** — run long commands with `background=true`, poll status, read output when done
-- **Output truncation** — outputs exceeding `max_output_chars` (50K) saved to `/tmp/` files; LLM can `read_file` the full output
-- **Command audit log** — every command logged with timestamps, machine, exit code, and session ID (`data/command_log.jsonl`)
+- **Output truncation** — outputs exceeding `max_output_chars` (50K) saved under the restricted plugin output directory; LLM can `read_file` the full output
+- **Command audit log** — every command logged with timestamps, machine, exit code, and session ID (`~/.hermes/ssh-tools/command_log.jsonl`)
 - **Poll/read_output on ssh_terminal** — check background command status directly from the terminal tool
 - **Machine name validation** — names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`; prevents path traversal and glob injection
 
@@ -14,8 +14,8 @@
 
 - `ssh_terminal` poll/read_output no longer requires machine/command parameters
 - Background process dict uses atomic `pop()` to prevent output loss on concurrent polls
-- `/tmp` output files written with 0o600 permissions (were 0o644, world-readable)
-- Batch session cleanup now removes orphaned `/tmp` output files
+- Output files written with 0o600 permissions in the restricted plugin output directory
+- Batch session cleanup now removes orphaned saved output files
 - `_write_json` calls `fsync` before `os.replace` to prevent data loss on crash
 - Orphaned SSH control socket files removed after session kill
 - `slash.py` no longer uses `assert` in production code (stripped with `python -O`)
@@ -34,7 +34,7 @@
 
 - Data directory created with 0o700 permissions
 - Audit log created with 0o600 permissions
-- `/tmp` output files written with 0o600 permissions
+- Output files written with 0o600 permissions
 - Machine names validated against `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`
 - `_cleanup_output_files` uses `iterdir()` + prefix matching instead of glob (prevents glob injection)
 

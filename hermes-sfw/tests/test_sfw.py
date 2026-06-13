@@ -173,6 +173,12 @@ class TestCommandValidation:
         assert result["success"] is False
         assert "empty" in result.get("stderr", "").lower()
 
+    def test_reject_npx_command(self, manager: SFWManager) -> None:
+        """npx can execute arbitrary package code and should stay blocked."""
+        result = _call(manager, {"action": "run", "command": "npx cowsay hello"})
+        assert result["success"] is False
+        assert "not allowed" in result.get("stderr", "").lower()
+
     def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
         """Null bytes in command should be rejected."""
         result = _call(manager, {"action": "run", "command": "npm install\x00evil"})
