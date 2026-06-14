@@ -574,6 +574,48 @@ def test_approval_none_passes_through(tmp_path: Path) -> None:
         assert result["success"] is True
 
 
+def test_approval_mode_off_bypasses_checks(tmp_path: Path) -> None:
+    """approvals.mode=off should bypass ssh plugin approval checks too."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    with (
+        mock_patch("ssh_tools.approval._get_approval_mode", return_value="off"),
+        mock_patch("ssh_tools.approval._check_dangerous") as mock_check,
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = json.loads(handler({"machine": "h", "command": "rm -rf /tmp/test"}))
+        assert result["success"] is True
+        mock_check.assert_not_called()
+
+
+def test_approval_required_message_tells_user_exact_command(tmp_path: Path) -> None:
+    """gateway approval wording should tell the user to use /approve or /deny."""
+    from unittest.mock import patch as mock_patch
+
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    handler = handle_ssh_terminal(mgr)
+    approval_required = {
+        "approved": False,
+        "status": "approval_required",
+        "description": "recursive delete",
+        "message": "approval required: recursive delete. the user must reply with /approve or /deny.",
+    }
+    with (
+        mock_patch("ssh_tools.handlers.terminal.check_approval", return_value=approval_required),
+        mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
+    ):
+        result = json.loads(handler({"machine": "h", "command": "rm -rf /tmp/test"}))
+        assert result["success"] is False
+        assert "/approve" in result["error"]
+        assert "/deny" in result["error"]
+        mock_run.assert_not_called()
+
+
 def test_approval_does_not_block_poll(tmp_path: Path) -> None:
     """Poll/read_output should bypass approval checks entirely."""
     from unittest.mock import patch as mock_patch
