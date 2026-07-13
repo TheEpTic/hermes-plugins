@@ -15,7 +15,7 @@ jobs:
     outputs:
       plugin: ${{ steps.release.outputs.plugin }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: release
         name: validate tag and package version
         shell: bash
@@ -43,8 +43,8 @@ jobs:
       run:
         working-directory: ${{ needs.prepare.outputs.plugin }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
       - name: build distributions
         run: uv build --out-dir ../dist
       - name: verify distributions

@@ -13,7 +13,7 @@ jobs:
     name: validate release tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: validate package version
         shell: bash
         run: |
@@ -34,8 +34,8 @@ jobs:
       run:
         working-directory: hermes-sfw
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
       - name: build distributions
         run: uv build --out-dir ../dist
       - name: verify distributions
