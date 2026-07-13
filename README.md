@@ -31,10 +31,6 @@ hermes plugins enable hermes-ssh
 
 Then restart the gateway or run `/reset`.
 
-## Releases
-
-Each plugin publishes independently to PyPI when a matching protected tag is pushed. The workflow uses short-lived GitHub OIDC credentials, never a stored PyPI token. [Release setup and checklist](RELEASING.md).
-
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
