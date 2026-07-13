@@ -8,7 +8,7 @@ version = "0.3.0"
 description = "SSH remote execution plugin for Hermes Agent"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["cryptography ~= 46.0"]
+dependencies = ["cryptography >= 48.0.1, < 49"]
 authors = [
     { name = "TheEpTic", email = "nexus@eptic.me" },
 ]
