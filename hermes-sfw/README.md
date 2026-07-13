@@ -1,5 +1,6 @@
 # hermes-sfw
 
+[![CI](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
@@ -14,7 +15,7 @@ sfw action=status
 
 ## Quick Start
 
-> **Requires Python 3.11+** and the [sfw CLI](https://github.com/nicedoc/socket-firewall-free) installed on the host system.
+> **Requires Python 3.11+** and the [sfw CLI](https://github.com/SocketDev/sfw-free) installed on the host system.
 
 ### Option 1: Deploy script (recommended)
 
@@ -41,12 +42,10 @@ Then `/reset` in Hermes. The symlink points at the source tree, but Python modul
 pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-sfw
 ```
 
-Then add to your Hermes config:
+Then enable it and restart Hermes:
 
-```yaml
-plugins:
-  - name: hermes-sfw
-    module: hermes_sfw
+```bash
+hermes plugins enable hermes-sfw
 ```
 
 ## Features
@@ -94,7 +93,7 @@ Returns: `installed` (bool), `version` (string), `binary` (path).
 
 ## How It Works
 
-hermes-sfw is a thin wrapper around the [sfw CLI](https://github.com/nicedoc/socket-firewall-free). It:
+hermes-sfw is a thin wrapper around the [sfw CLI](https://github.com/SocketDev/sfw-free). It:
 
 1. Validates the command starts with an allowed package manager prefix
 2. Resolves and validates the working directory (if specified)
@@ -154,7 +153,7 @@ See [SECURITY.md](SECURITY.md) for the full picture.
 ## Requirements
 
 - Python 3.11+
-- [sfw CLI](https://github.com/nicedoc/socket-firewall-free) installed on PATH
+- [sfw CLI](https://github.com/SocketDev/sfw-free) installed on PATH
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 
 ## Troubleshooting

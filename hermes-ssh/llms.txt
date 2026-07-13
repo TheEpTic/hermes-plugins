@@ -11,8 +11,8 @@ hermes-ssh gives Hermes three tools (`ssh_terminal`, `ssh_machines`, `ssh_sessio
 Clone and symlink into the Hermes plugins directory:
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+ln -s "$(pwd)/hermes-plugins/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
 ```
 
 Then restart Hermes with `/reset` or restart the process. The symlink points at the source tree, but plugin modules are imported once, so code changes still need a reload before they take effect.
@@ -20,23 +20,21 @@ Then restart Hermes with `/reset` or restart the process. The symlink points at 
 Or use the deploy script:
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-cd hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+cd hermes-plugins/hermes-ssh
 ./deploy.sh
 ```
 
 ### As a Python package
 
 ```bash
-pip install git+https://github.com/TheEpTic/hermes-ssh.git
+pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-ssh
 ```
 
-Add to Hermes config:
+Enable it and restart Hermes:
 
-```yaml
-plugins:
-  - name: hermes-ssh
-    module: ssh_tools
+```bash
+hermes plugins enable hermes-ssh
 ```
 
 ### Requirements

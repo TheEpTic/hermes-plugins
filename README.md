@@ -1,6 +1,6 @@
 # hermes-plugins
 
-Community plugins for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Community plugins for [Hermes Agent](https://github.com/NousResearch/hermes-agent). Each directory is independently installable; the repository keeps shared CI and release hygiene in one place.
 
 ## Plugins
 
@@ -18,12 +18,13 @@ Each plugin is a standalone directory. To install:
 git clone https://github.com/TheEpTic/hermes-plugins.git
 cd hermes-plugins
 
-# Symlink a plugin into Hermes
-ln -s $(pwd)/hermes-sfw/src/hermes_sfw ~/.hermes/plugins/hermes-sfw
-ln -s $(pwd)/hermes-ssh/src/ssh_tools ~/.hermes/plugins/hermes-ssh
+# Install either plugin (or both)
+./hermes-sfw/deploy.sh
+./hermes-ssh/deploy.sh
 
-# Enable in config
-hermes config set plugins.enabled hermes-sfw hermes-ssh
+# Hermes discovers third-party plugins but does not run them until enabled
+hermes plugins enable hermes-sfw
+hermes plugins enable hermes-ssh
 ```
 
 Then restart the gateway or run `/reset`.

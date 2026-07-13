@@ -15,7 +15,7 @@ git clone https://github.com/TheEpTic/hermes-plugins.git
 ln -s "$(pwd)/hermes-plugins/hermes-sfw/src/hermes_sfw" ~/.hermes/plugins/hermes-sfw
 ```
 
-Then restart Hermes with `/reset` or restart the process. Changes to source take effect through the symlink without restart.
+Then restart Hermes with `/reset` or restart the process. The symlink points at source, but plugin modules are imported once, so code changes still need a reload before they take effect.
 
 Or use the deploy script:
 
@@ -31,12 +31,10 @@ cd hermes-plugins/hermes-sfw
 pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-sfw
 ```
 
-Add to Hermes config:
+Enable it and restart Hermes:
 
-```yaml
-plugins:
-  - name: hermes-sfw
-    module: hermes_sfw
+```bash
+hermes plugins enable hermes-sfw
 ```
 
 ### Requirements

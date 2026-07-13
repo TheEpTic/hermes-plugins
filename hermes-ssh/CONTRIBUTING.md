@@ -5,8 +5,8 @@ PRs welcome. Here's the workflow.
 ## Setup
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-cd hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+cd hermes-plugins/hermes-ssh
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 ```

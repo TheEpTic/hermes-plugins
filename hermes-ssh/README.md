@@ -1,6 +1,6 @@
 # hermes-ssh
 
-[![CI](https://github.com/TheEpTic/hermes-ssh/actions/workflows/ci.yml/badge.svg)](https://github.com/TheEpTic/hermes-ssh/actions/workflows/ci.yml)
+[![CI](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
@@ -21,8 +21,8 @@ ssh_sessions list
 ### Option 1: Deploy script (recommended)
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-cd hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+cd hermes-plugins/hermes-ssh
 ./deploy.sh
 ```
 
@@ -31,8 +31,8 @@ Then restart Hermes with `/reset`.
 ### Option 2: Manual symlink
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-ln -s "$(pwd)/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+ln -s "$(pwd)/hermes-plugins/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
 ```
 
 Then `/reset` in Hermes. The symlink points at the source tree, but Python modules are imported once, so code changes still require `/reset` or a Hermes process restart before they load.
@@ -40,15 +40,13 @@ Then `/reset` in Hermes. The symlink points at the source tree, but Python modul
 ### Option 3: As a Python package
 
 ```bash
-pip install git+https://github.com/TheEpTic/hermes-ssh.git
+pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-ssh
 ```
 
-Then add to your Hermes config:
+Then enable it and restart Hermes:
 
-```yaml
-plugins:
-  - name: hermes-ssh
-    module: ssh_tools
+```bash
+hermes plugins enable hermes-ssh
 ```
 
 ## Features
@@ -228,8 +226,8 @@ If the agent restarted, background process references are lost. Use `ssh_session
 ## Development
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-ssh.git
-cd hermes-ssh
+git clone https://github.com/TheEpTic/hermes-plugins.git
+cd hermes-plugins/hermes-ssh
 python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
