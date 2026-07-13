@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
     from ..manager import SFWManager
 
+from ..approval import check_approval
 from ..utils import err, ok, require
 
 
@@ -47,6 +48,12 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
                 return err(f"workdir must be a string, got {type(workdir).__name__}")
 
             verbose = params.get("verbose", False)
+            if not isinstance(verbose, bool):
+                return err(f"verbose must be a boolean, got {type(verbose).__name__}")
+
+            approval = check_approval(command)
+            if approval is not None and not approval.get("approved", True):
+                return err(str(approval.get("message", "Command blocked by approval system")))
 
             result = manager.run_command(
                 command=command,

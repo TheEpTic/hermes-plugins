@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hermes_sfw.handlers import handle_sfw
 from hermes_sfw.manager import SFWConfig, SFWManager, SFWResult, _MAX_LIST_ENTRIES
 
@@ -135,6 +137,17 @@ class TestValidation:
         assert result["success"] is False
         assert "Unknown action" in result["error"]
 
+    def test_approval_denial_blocks_execution(self, manager: SFWManager) -> None:
+        denial = {"approved": False, "message": "BLOCKED: approval required"}
+        with (
+            patch("hermes_sfw.handlers.sfw.check_approval", return_value=denial),
+            patch("hermes_sfw.manager.subprocess.Popen") as popen,
+        ):
+            result = _call(manager, {"action": "run", "command": "npm install left-pad"})
+        assert result["success"] is False
+        assert "BLOCKED" in result["error"]
+        popen.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Command validation — path separators and maxLength
@@ -178,6 +191,23 @@ class TestCommandValidation:
         result = _call(manager, {"action": "run", "command": "npx cowsay hello"})
         assert result["success"] is False
         assert "not allowed" in result.get("stderr", "").lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm exec sh",
+            "npm run postinstall",
+            "pnpm dlx cowsay hi",
+            "yarn run build",
+            "uv run python evil.py",
+            "cargo run",
+            "rustup run stable sh",
+        ],
+    )
+    def test_reject_execution_subcommands(self, manager: SFWManager, command: str) -> None:
+        result = _call(manager, {"action": "run", "command": command})
+        assert result["success"] is False
+        assert "execution subcommand" in result.get("stderr", "").lower()
 
     def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
         """Null bytes in command should be rejected."""

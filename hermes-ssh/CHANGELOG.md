@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] - 2026-07-13
+
+- Fail closed when Hermes command approvals are unavailable.
+- Never signal persisted PIDs after restart; only tracked process groups can be killed.
+- Preserve shared SSH ControlMaster sockets when killing individual commands.
+- Make `cryptography` a required dependency and add packaged-plugin discovery metadata.
+- Declare provided tools in the Hermes plugin manifest.
+
 ## 0.2.0 — Bug hunt, security hardening, documentation
 
 ### New features

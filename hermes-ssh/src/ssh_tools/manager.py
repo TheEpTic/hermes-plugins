@@ -353,64 +353,45 @@ class SSHManager:
             self._save_sessions(sessions)
 
     def kill_session(self, session_id: str) -> dict[str, Any]:
-        """Kill an active SSH session by PID and close control socket.
+        """Kill a background SSH process tracked by this manager instance.
 
-        Note: There is a small race window between SIGTERM and the SIGKILL
-        fallback check where the PID could be recycled by another process.
-        In practice this is extremely unlikely (0.5s window, PIDs rarely
-        recycle that fast on busy systems) but worth being aware of.
+        Persisted PIDs are never signalled: after a Hermes restart they may
+        identify an unrelated recycled process. Shared ControlMaster sockets
+        are connection state and are deliberately left alive.
         """
         session = self.get_session(session_id)
         if not session:
             return {"success": False, "error": f"Session '{session_id}' not found"}
 
-        results: dict[str, Any] = {"pid_killed": False, "socket_closed": False}
+        with self._process_lock:
+            proc = self._processes.pop(session_id, None)
+        if proc is None:
+            with self._lock:
+                sessions = self._load_sessions()
+                if session_id in sessions:
+                    sessions[session_id]["status"] = "orphaned"
+                    self._save_sessions(sessions)
+            return {
+                "success": False,
+                "error": "Session is not owned by this Hermes process; refusing to signal persisted PID",
+                "status": "orphaned",
+            }
 
-        # Kill the SSH process
-        if session.pid:
+        killed = proc.poll() is not None
+        if not killed:
             try:
-                os.kill(session.pid, signal.SIGTERM)
-                time.sleep(0.5)
-                try:
-                    os.kill(session.pid, 0)
-                    os.kill(session.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                results["pid_killed"] = True
-            except OSError:
-                results["pid_killed"] = True  # Already dead
-
-        # Close control socket
-        if session.control_path and os.path.exists(session.control_path):
-            hostname = None
-            try:
-                machine = self.get_machine(session.machine)
-                if machine:
-                    hostname = machine.host
-            except Exception:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+            except ProcessLookupError:
                 pass
-            try:
-                subprocess.run(
-                    [
-                        "ssh",
-                        "-O",
-                        "exit",
-                        "-o",
-                        f"ControlPath={session.control_path}",
-                        hostname or "dummy",
-                    ],
-                    capture_output=True,
-                    timeout=5,
-                )
-                results["socket_closed"] = True
-            except Exception:
-                pass
-            # Remove orphaned socket file
-            with contextlib.suppress(OSError):
-                os.unlink(session.control_path)
+            killed = True
 
         self.close_session(session_id)
-        return {"success": True, **results}
+        return {"success": True, "pid_killed": killed, "socket_closed": False}
 
     def cleanup_idle(self, max_idle_minutes: int | None = None) -> dict[str, Any]:
         """Kill all sessions idle for more than max_idle_minutes."""
@@ -423,51 +404,12 @@ class SSHManager:
             if idle is not None and idle > threshold:
                 to_kill.append(sid)
 
-        # Kill processes and close control sockets (no session file reloads)
         killed: list[dict[str, Any]] = []
         for sid in to_kill:
             session = active[sid]
-            result: dict[str, Any] = {"pid_killed": False, "socket_closed": False}
-            # Kill the SSH process
-            if session.pid:
-                try:
-                    os.kill(session.pid, signal.SIGTERM)
-                    time.sleep(0.5)
-                    try:
-                        os.kill(session.pid, 0)
-                        os.kill(session.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    result["pid_killed"] = True
-                except OSError:
-                    result["pid_killed"] = True  # Already dead
-            # Close control socket
-            if session.control_path and os.path.exists(session.control_path):
-                try:
-                    machine = self.get_machine(session.machine)
-                    hostname = machine.host if machine else "dummy"
-                except Exception:
-                    hostname = "dummy"
-                try:
-                    subprocess.run(
-                        [
-                            "ssh",
-                            "-O",
-                            "exit",
-                            "-o",
-                            f"ControlPath={session.control_path}",
-                            hostname,
-                        ],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    result["socket_closed"] = True
-                except Exception:
-                    pass
+            result = self.kill_session(sid)
             killed.append({"session_id": sid, "machine": session.machine, **result})
 
-        # Batch close all sessions in one save
-        self._close_sessions_batch(to_kill)
         return {"killed": killed, "count": len(killed)}
 
     def _close_sessions_batch(self, session_ids: list[str]) -> None:

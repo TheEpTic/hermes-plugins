@@ -16,6 +16,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from hermes_sfw.manager import SFWConfig, SFWManager
 
 
+@pytest.fixture(autouse=True)
+def _approved_commands():
+    """Unit tests exercise handlers independently of a Hermes runtime."""
+    with patch("hermes_sfw.handlers.sfw.check_approval", return_value=None):
+        yield
+
+
 @pytest.fixture
 def manager(tmp_path: Path) -> SFWManager:
     """Create an SFWManager with a fake sfw binary for testing."""

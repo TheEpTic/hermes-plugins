@@ -4,10 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-ssh"
-version = "0.2.0"
+version = "0.3.0"
 description = "SSH remote execution plugin for Hermes Agent"
 requires-python = ">=3.11"
 license = "MIT"
+dependencies = ["cryptography ~= 46.0"]
 authors = [
     { name = "TheEpTic", email = "nexus@eptic.me" },
 ]
@@ -29,20 +30,20 @@ keywords = ["ssh", "remote", "hermes", "agent", "devops"]
 Homepage = "https://github.com/TheEpTic/hermes-plugins"
 Repository = "https://github.com/TheEpTic/hermes-plugins"
 Issues = "https://github.com/TheEpTic/hermes-plugins/issues"
-Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-ssh/CHANGELOG.md"
 
 [project.optional-dependencies]
-runtime = [
-    "cryptography ~= 46.0",
-]
 dev = [
     "black==26.5.1",
     "mypy==1.16.0",
-    "pytest==9.0.2",
+    "pytest==9.0.3",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ssh_tools"]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-ssh = "ssh_tools"
 
 [tool.black]
 line-length = 100

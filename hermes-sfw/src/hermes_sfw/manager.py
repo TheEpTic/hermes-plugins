@@ -43,6 +43,17 @@ _ALLOWED_PREFIXES = frozenset(
     }
 )
 
+# Command runners are not dependency operations. Allowing these would turn the
+# package-manager prefix allowlist into arbitrary shell execution.
+_EXECUTION_SUBCOMMANDS = {
+    "npm": {"exec", "run", "run-script"},
+    "pnpm": {"dlx", "exec", "run"},
+    "yarn": {"dlx", "exec", "run"},
+    "uv": {"run", "tool"},
+    "cargo": {"run"},
+    "rustup": {"run"},
+}
+
 # ---------------------------------------------------------------------------
 # Command maxLength (server-side enforcement)
 # ---------------------------------------------------------------------------
@@ -141,6 +152,10 @@ def _validate_command(command: str) -> str | None:
             f"Command prefix '{program}' is not allowed. "
             f"Allowed: {', '.join(sorted(_ALLOWED_PREFIXES))}"
         )
+
+    subcommand = next((part for part in parts[1:] if not part.startswith("-")), "")
+    if subcommand in _EXECUTION_SUBCOMMANDS.get(program, set()):
+        return f"Execution subcommand '{program} {subcommand}' is not allowed"
 
     return None
 

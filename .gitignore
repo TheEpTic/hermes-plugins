@@ -29,6 +29,7 @@ Thumbs.db
 **/sockets/
 *.tmp
 *.lock
+!**/uv.lock
 
 # Environment
 .env

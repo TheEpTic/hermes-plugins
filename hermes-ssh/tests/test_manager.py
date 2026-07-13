@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -341,7 +342,7 @@ def test_cleanup_idle(tmp_path: Path) -> None:
 
     s = mgr.get_session("s1")
     assert s is not None
-    assert s.status == "closed"
+    assert s.status == "orphaned"
 
 
 def test_cleanup_idle_skips_recent(tmp_path: Path) -> None:
@@ -600,71 +601,55 @@ from ssh_tools.manager import SSHManager
 # ---------------------------------------------------------------------------
 
 
-def test_kill_session_no_pid(tmp_path: Path) -> None:
-    """kill_session with pid=0 skips os.kill and still closes the session."""
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=0))
-    result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["pid_killed"] is False
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "closed"
-
-
-def test_kill_session_with_pid_mocked(tmp_path: Path) -> None:
-    """Kill session with a real PID — mock os.kill to avoid actually killing."""
+def test_kill_session_refuses_untracked_persisted_pid(tmp_path: Path) -> None:
+    """Persisted PIDs are never signalled after manager restart."""
     mgr = _make_manager(tmp_path)
     mgr.register_session(Session(id="s1", machine="h", pid=99999))
-
-    with (
-        patch("ssh_tools.manager.os.kill") as mock_kill,
-        patch("ssh_tools.manager.time.sleep"),
-    ):
-        # First call (SIGTERM) succeeds, second (alive check) raises OSError = dead
-        mock_kill.side_effect = [None, OSError("No such process")]
+    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
         result = mgr.kill_session("s1")
+    assert result["success"] is False
+    assert result["status"] == "orphaned"
+    mock_killpg.assert_not_called()
+    assert mgr.get_session("s1").status == "orphaned"
 
+
+def test_kill_session_tracked_process_group(tmp_path: Path) -> None:
+    """Only an in-memory tracked process group may be signalled."""
+    mgr = _make_manager(tmp_path)
+    mgr.register_session(Session(id="s1", machine="h", pid=99999))
+    proc = MagicMock(pid=99999)
+    proc.poll.return_value = None
+    mgr._processes["s1"] = proc
+    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
+        result = mgr.kill_session("s1")
     assert result["success"] is True
     assert result["pid_killed"] is True
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "closed"
+    mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
+    assert mgr.get_session("s1").status == "closed"
 
 
-def test_kill_session_real_machine_hostname_in_ssh_exit(tmp_path: Path) -> None:
-    """Verify hostname from machine registry is used in ssh -O exit command."""
+def test_kill_session_does_not_close_shared_control_socket(tmp_path: Path) -> None:
+    """Killing one command must not close a machine-wide ControlMaster."""
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="prod", host="10.0.0.1", user="admin"))
-    # Create a fake control path file so os.path.exists returns True
     ctrl = tmp_path / "prod.sock"
     ctrl.touch()
-    mgr.register_session(Session(id="s1", machine="prod", pid=0, control_path=str(ctrl)))
-
-    with (
-        patch("ssh_tools.manager.subprocess.run") as mock_sub,
-        patch("ssh_tools.manager.os.kill"),
-    ):
-        mock_sub.return_value = MagicMock(returncode=0)
+    mgr.register_session(Session(id="s1", machine="prod", pid=123, control_path=str(ctrl)))
+    proc = MagicMock(pid=123)
+    proc.poll.return_value = 0
+    mgr._processes["s1"] = proc
+    with patch("ssh_tools.manager.subprocess.run") as mock_sub:
         result = mgr.kill_session("s1")
-
     assert result["success"] is True
-    assert result["socket_closed"] is True
-    # Verify the ssh command used the real hostname "10.0.0.1"
-    call_args = mock_sub.call_args
-    cmd = call_args[0][0]
-    assert cmd[0] == "ssh"
-    assert "10.0.0.1" in cmd
+    assert result["socket_closed"] is False
+    mock_sub.assert_not_called()
 
 
 def test_kill_session_socket_path_missing(tmp_path: Path) -> None:
-    """When control_path file doesn't exist, socket_closed is False."""
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     mgr.register_session(Session(id="s1", machine="h", pid=0, control_path="/nonexistent.sock"))
     result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["socket_closed"] is False
+    assert result["success"] is False
+    assert result["status"] == "orphaned"
 
 
 def test_kill_session_nonexistent(tmp_path: Path) -> None:
@@ -724,13 +709,13 @@ def test_cleanup_idle_batch_close_single_save(tmp_path: Path) -> None:
         result = mgr.cleanup_idle(max_idle_minutes=30)
 
     assert result["count"] == 2
-    # Both sessions should be closed
+    # Untracked persisted sessions are marked orphaned without signalling PIDs.
     s1 = mgr.get_session("s1")
     assert s1 is not None
-    assert s1.status == "closed"
+    assert s1.status == "orphaned"
     s2 = mgr.get_session("s2")
     assert s2 is not None
-    assert s2.status == "closed"
+    assert s2.status == "orphaned"
 
 
 def test_cleanup_idle_empty_list(tmp_path: Path) -> None:

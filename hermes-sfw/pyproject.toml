@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-sfw"
-version = "0.1.0"
+version = "0.2.0"
 description = "Socket Firewall Free wrapper for Hermes — block malicious dependencies during install"
 requires-python = ">=3.11"
 license = "MIT"
@@ -35,11 +35,14 @@ Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-sfw/CHA
 dev = [
     "black==26.5.1",
     "mypy==1.16.0",
-    "pytest==9.0.2",
+    "pytest==9.0.3",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_sfw"]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-sfw = "hermes_sfw"
 
 [tool.black]
 line-length = 100

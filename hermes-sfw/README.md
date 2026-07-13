@@ -33,7 +33,7 @@ git clone https://github.com/TheEpTic/hermes-plugins.git
 ln -s "$(pwd)/hermes-plugins/hermes-sfw/src/hermes_sfw" ~/.hermes/plugins/hermes-sfw
 ```
 
-Then `/reset` in Hermes. Changes to the source take effect immediately through the symlink — no restart needed.
+Then `/reset` in Hermes. The symlink points at the source tree, but Python modules are imported once, so code changes still require `/reset` or a Hermes process restart before they load.
 
 ### Option 3: As a Python package
 

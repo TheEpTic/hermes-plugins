@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0] - 2026-07-13
+
+- Route package-manager commands through Hermes dangerous-command approval checks.
+- Fail closed when the approval system is unavailable.
+- Block package-manager subcommands that directly execute arbitrary commands.
+- Validate `verbose` as a strict boolean.
+- Add packaged-plugin discovery metadata and manifest tool declarations.
+
 ## 0.1.0 — Initial release
 
 - `sfw` tool — run package manager commands through Socket Firewall Free
