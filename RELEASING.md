@@ -11,7 +11,7 @@ this repository is a monorepo. each top-level `hermes-*` directory is a self-con
 | PyPI project | owner | repository | workflow | environment |
 | --- | --- | --- | --- | --- |
 | `hermes-ssh` | `TheEpTic` | `hermes-plugins` | `pypi-publish.yml` | `pypi` |
-| `hermes-sfw` | `TheEpTic` | `hermes-plugins` | `pypi-publish.yml` | `pypi` |
+| `hermes-sfw` | `TheEpTic` | `hermes-plugins` | `pypi-publish-sfw.yml` | `pypi` |
 
 PyPI uses GitHub OIDC. do not create or store a long-lived `PYPI_TOKEN` secret.
 

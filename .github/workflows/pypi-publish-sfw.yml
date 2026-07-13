@@ -1,0 +1,62 @@
+name: publish hermes-sfw to pypi
+
+"on":
+  push:
+    tags:
+      - "hermes-sfw-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#hermes-sfw-v}"
+          test -n "$version"
+          package_version=$(python -c "import tomllib; print(tomllib.load(open('hermes-sfw/pyproject.toml', 'rb'))['project']['version'])")
+          test "$version" = "$package_version" || {
+            echo "tag version $version does not match hermes-sfw version $package_version" >&2
+            exit 1
+          }
+
+  build:
+    name: build hermes-sfw
+    needs: prepare
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hermes-sfw
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: build distributions
+        run: uv build --out-dir ../dist
+      - name: verify distributions
+        run: uvx twine check ../dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hermes-sfw-dist
+          path: hermes-sfw/dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish hermes-sfw
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hermes-sfw-dist
+          path: dist
+      - name: publish package distributions to pypi
+        uses: pypa/gh-action-pypi-publish@release/v1

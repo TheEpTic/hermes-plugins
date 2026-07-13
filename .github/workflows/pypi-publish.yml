@@ -3,7 +3,7 @@ name: publish to pypi
 "on":
   push:
     tags:
-      - "hermes-*-v*"
+      - "hermes-ssh-v*"
 
 permissions:
   contents: read
