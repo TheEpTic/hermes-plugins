@@ -52,7 +52,7 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
                 return err(f"verbose must be a boolean, got {type(verbose).__name__}")
 
             approval = check_approval(command)
-            if approval is not None and not approval.get("approved", True):
+            if approval is not None and approval.get("approved") is not True:
                 return err(str(approval.get("message", "Command blocked by approval system")))
 
             result = manager.run_command(

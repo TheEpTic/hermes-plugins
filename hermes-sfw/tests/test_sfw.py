@@ -148,6 +148,20 @@ class TestValidation:
         assert "BLOCKED" in result["error"]
         popen.assert_not_called()
 
+    def test_approval_required_without_explicit_denial_blocks_execution(
+        self, manager: SFWManager
+    ) -> None:
+        """Approval state must never fall through to command execution."""
+        pending = {"status": "approval_required", "message": "awaiting approval"}
+        with (
+            patch("hermes_sfw.handlers.sfw.check_approval", return_value=pending),
+            patch("hermes_sfw.manager.subprocess.Popen") as popen,
+        ):
+            result = _call(manager, {"action": "run", "command": "npm install left-pad"})
+        assert result["success"] is False
+        assert "awaiting approval" in result["error"]
+        popen.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Command validation — path separators and maxLength
@@ -202,12 +216,31 @@ class TestCommandValidation:
             "uv run python evil.py",
             "cargo run",
             "rustup run stable sh",
+            # option arguments used to be mistaken for the command verb.
+            "npm --prefix /tmp exec sh",
+            "npm --prefix=/tmp run-script x",
+            "uv --project /tmp run sh",
+            "uv --project=/tmp run sh",
+            "cargo --manifest-path /tmp/Cargo.toml run",
+            "rustup toolchain run stable sh",
         ],
     )
-    def test_reject_execution_subcommands(self, manager: SFWManager, command: str) -> None:
+    def test_reject_execution_and_option_hidden_subcommands(
+        self, manager: SFWManager, command: str
+    ) -> None:
         result = _call(manager, {"action": "run", "command": command})
         assert result["success"] is False
-        assert "execution subcommand" in result.get("stderr", "").lower()
+        assert "not allowed" in result.get("stderr", "").lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        ["npm install express", "uv pip install flask", "cargo fetch"],
+    )
+    def test_accept_documented_dependency_operations(
+        self, manager: SFWManager, mock_popen, command: str
+    ) -> None:
+        _call(manager, {"action": "run", "command": command})
+        assert mock_popen.called
 
     def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
         """Null bytes in command should be rejected."""

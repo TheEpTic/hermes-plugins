@@ -32,6 +32,7 @@ def check_approval(command: str) -> dict[str, Any] | None:
         description = str(result.get("description") or "command flagged")
         return {
             **result,
+            "approved": False,
             "message": (
                 f"approval required: {description}. the user must reply with /approve or /deny.\n\n"
                 f"command:\n```\n{command}\n```"

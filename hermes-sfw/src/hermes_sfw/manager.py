@@ -27,31 +27,45 @@ _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
 _MAX_LIST_ENTRIES = 50
 
 # ---------------------------------------------------------------------------
-# Command prefix allowlist
 # ---------------------------------------------------------------------------
-
-_ALLOWED_PREFIXES = frozenset(
-    {
-        "npm",
-        "yarn",
-        "pnpm",
-        "pip",
-        "pip3",
-        "uv",
-        "cargo",
-        "rustup",
-    }
-)
-
-# Command runners are not dependency operations. Allowing these would turn the
-# package-manager prefix allowlist into arbitrary shell execution.
-_EXECUTION_SUBCOMMANDS = {
-    "npm": {"exec", "run", "run-script"},
-    "pnpm": {"dlx", "exec", "run"},
-    "yarn": {"dlx", "exec", "run"},
-    "uv": {"run", "tool"},
-    "cargo": {"run"},
-    "rustup": {"run"},
+# Dependency-operation grammar
+# ---------------------------------------------------------------------------
+# The command is passed to sfw as an argv list, never through a shell. Still,
+# allowing a package-manager binary alone is not enough: several managers have
+# subcommands that execute arbitrary programs. Require the command verb in its
+# canonical position, before any options. This deliberately rejects convenient
+# global-option forms such as ``npm --prefix x run`` rather than trying to
+# parse every manager's option grammar and missing a runner behind an argument.
+_ALLOWED_COMMAND_PREFIXES: dict[str, frozenset[tuple[str, ...]]] = {
+    "npm": frozenset({("install",), ("uninstall",), ("update",), ("ci",), ("dedupe",)}),
+    "yarn": frozenset({("add",), ("remove",), ("install",), ("upgrade",), ("up",)}),
+    "pnpm": frozenset({("add",), ("remove",), ("install",), ("update",), ("up",)}),
+    "pip": frozenset({("install",), ("uninstall",), ("download",)}),
+    "pip3": frozenset({("install",), ("uninstall",), ("download",)}),
+    "uv": frozenset(
+        {
+            ("add",),
+            ("remove",),
+            ("sync",),
+            ("lock",),
+            ("export",),
+            ("pip", "install"),
+            ("pip", "uninstall"),
+            ("pip", "compile"),
+            ("pip", "sync"),
+        }
+    ),
+    "cargo": frozenset(
+        {
+            ("add",),
+            ("remove",),
+            ("fetch",),
+            ("update",),
+            ("install",),
+            ("uninstall",),
+            ("vendor",),
+        }
+    ),
 }
 
 # ---------------------------------------------------------------------------
@@ -147,15 +161,20 @@ def _validate_command(command: str) -> str | None:
             "Use bare command name (e.g. 'pip install foo', not '/usr/bin/pip install foo')"
         )
 
-    if program not in _ALLOWED_PREFIXES:
+    if program not in _ALLOWED_COMMAND_PREFIXES:
         return (
             f"Command prefix '{program}' is not allowed. "
-            f"Allowed: {', '.join(sorted(_ALLOWED_PREFIXES))}"
+            f"Allowed: {', '.join(sorted(_ALLOWED_COMMAND_PREFIXES))}"
         )
 
-    subcommand = next((part for part in parts[1:] if not part.startswith("-")), "")
-    if subcommand in _EXECUTION_SUBCOMMANDS.get(program, set()):
-        return f"Execution subcommand '{program} {subcommand}' is not allowed"
+    command_parts = parts[1:]
+    allowed_prefixes = _ALLOWED_COMMAND_PREFIXES[program]
+    if not any(tuple(command_parts[: len(prefix)]) == prefix for prefix in allowed_prefixes):
+        allowed = ", ".join(" ".join(prefix) for prefix in sorted(allowed_prefixes))
+        return (
+            f"Command is not allowed for '{program}': it is not a dependency operation. "
+            f"Allowed forms: {allowed}"
+        )
 
     return None
 
