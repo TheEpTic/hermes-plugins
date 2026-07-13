@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "hermes-ssh"
 version = "0.3.0"
 description = "SSH remote execution plugin for Hermes Agent"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = ["cryptography >= 48.0.1, < 49"]

@@ -1,0 +1,71 @@
+name: publish to pypi
+
+"on":
+  push:
+    tags:
+      - "hermes-*-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      plugin: ${{ steps.release.outputs.plugin }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: release
+        name: validate tag and package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            hermes-ssh-v*) plugin="hermes-ssh"; version="${tag#hermes-ssh-v}" ;;
+            hermes-sfw-v*) plugin="hermes-sfw"; version="${tag#hermes-sfw-v}" ;;
+            *) echo "unsupported release tag: $tag" >&2; exit 1 ;;
+          esac
+          test -n "$version"
+          package_version=$(python -c "import tomllib; print(tomllib.load(open('$plugin/pyproject.toml', 'rb'))['project']['version'])")
+          test "$version" = "$package_version" || {
+            echo "tag version $version does not match $plugin version $package_version" >&2
+            exit 1
+          }
+          echo "plugin=$plugin" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ needs.prepare.outputs.plugin }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ needs.prepare.outputs.plugin }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: build distributions
+        run: uv build --out-dir ../dist
+      - name: verify distributions
+        run: uvx twine check ../dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.plugin }}-dist
+          path: ${{ needs.prepare.outputs.plugin }}/dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish ${{ needs.prepare.outputs.plugin }}
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.plugin }}-dist
+          path: dist
+      - name: publish package distributions to pypi
+        uses: pypa/gh-action-pypi-publish@release/v1
