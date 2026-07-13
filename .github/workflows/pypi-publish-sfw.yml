@@ -37,10 +37,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
       - name: build distributions
-        run: uv build --out-dir ../dist
+        run: uv build --out-dir dist
       - name: verify distributions
-        run: uvx twine check ../dist/*
-      - uses: actions/upload-artifact@v4
+        run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v6
         with:
           name: hermes-sfw-dist
           path: hermes-sfw/dist/
@@ -54,7 +54,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: hermes-sfw-dist
           path: dist

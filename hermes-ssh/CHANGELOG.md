@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.3.1] - 2026-07-13
+
+- Fix the release artifact path so the tagged build can reach PyPI.
+
 ## [0.3.0] - 2026-07-13
 
 - Fail closed when Hermes command approvals are unavailable.

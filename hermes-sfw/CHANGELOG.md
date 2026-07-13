@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1] - 2026-07-13
+
+- Fix the release artifact path so the tagged build can reach PyPI.
+
 ## [0.2.0] - 2026-07-13
 
 - Route package-manager commands through Hermes dangerous-command approval checks.
