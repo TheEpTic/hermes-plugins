@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.2] - 2026-07-13
+
+- Align the packaged Hermes manifest with the release version.
+
 ## [0.2.1] - 2026-07-13
 
 - Fix the release artifact path so the tagged build can reach PyPI.

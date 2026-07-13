@@ -219,7 +219,7 @@ wheels = [
 
 [[package]]
 name = "hermes-ssh"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
