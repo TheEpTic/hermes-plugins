@@ -32,7 +32,7 @@ For source installs, development, and full tool references, use the package docu
 
 `hermes-sfw` is a dependency guard, not a sandbox. It sends supported dependency operations through Socket Firewall Free and rejects runner-style package-manager commands, but package managers can still execute lifecycle scripts and build backends. Run Hermes with least privilege and treat untrusted dependencies as host code.
 
-`hermes-ssh` executes remote commands with the permissions and credentials available to the Hermes process. Keep the machine registry tight, use non-root accounts, and review the package [security policies](hermes-sfw/SECURITY.md) before deploying either plugin broadly.
+`hermes-ssh` executes remote commands with the permissions and credentials available to the Hermes process. Keep the machine registry tight, use non-root accounts, and review the repository [security policy](SECURITY.md) plus the...[truncated]
 
 ## compatibility and release discipline
 
