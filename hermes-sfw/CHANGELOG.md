@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.3] - 2026-07-24
+
+- Update development dependencies to mypy 2.3.0 and pytest 9.1.1.
+
 ## [0.2.2] - 2026-07-13
 
 - Align the packaged Hermes manifest with the release version.
