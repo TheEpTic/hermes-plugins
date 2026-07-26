@@ -45,7 +45,7 @@ def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
                     Machine(
                         name=params["name"],
                         host=params["host"],
-                        user=params.get("user", "root"),
+                        user=params.get("user") or manager.config.default_user,
                         port=params.get("port", 22),
                         key=params.get("key", ""),
                         aliases=params.get("aliases", []),

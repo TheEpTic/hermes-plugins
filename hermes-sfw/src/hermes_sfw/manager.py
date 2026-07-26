@@ -179,6 +179,11 @@ def _validate_command(command: str) -> str | None:
     return None
 
 
+def is_dependency_operation(command: str) -> bool:
+    """Return True only for an operation the sfw tool itself would accept."""
+    return isinstance(command, str) and _validate_command(command) is None
+
+
 def _validate_workdir(workdir: str | None) -> str | None:
     """Resolve and validate the working directory.
 

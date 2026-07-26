@@ -7,6 +7,7 @@ No module-level mutable state — everything lives on the instance.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .config import DEFAULT_CONFIG, SSHConfig
 from .models import Machine, Session
@@ -32,6 +33,35 @@ logger = logging.getLogger(__name__)
 _HOST_RE = re.compile(r"[A-Za-z0-9_.:-]{1,253}")
 _USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_OUTPUT_RETURN_CHARS = 500_000
+_AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+_SENSITIVE_NAME = (
+    r"(?:[a-z0-9]+[_-])*"
+    r"(?:password|passwd|token|api[_-]?key|secret|authorization)"
+    r"(?:[_-][a-z0-9]+)*"
+)
+_SECRET_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)"""
+_AUDIT_ASSIGNMENT_RE = re.compile(rf"(?i)\b({_SENSITIVE_NAME})(\s*=\s*)({_SECRET_VALUE})")
+_AUDIT_FLAG_RE = re.compile(rf"(?i)(--{_SENSITIVE_NAME}(?:=|\s+))({_SECRET_VALUE})")
+_AUDIT_URL_RE = re.compile(r"(?i)(https?://[^:/\s]+:)([^@\s]+)(@)")
+_AUDIT_HEADER_RE = re.compile(
+    r"(?i)([\"']?(?:[a-z0-9]+[-_])*(?:authorization|api[-_]?key|token|secret)\s*:\s*)"
+    r"(?:(?:bearer|basic)\s+)?([^\"'\s;&|]+)([\"']?)"
+)
+
+
+def _redact_command(command: str) -> str:
+    """Remove common inline credentials before persisting command text."""
+    redacted = _AUDIT_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>", command
+    )
+    redacted = _AUDIT_FLAG_RE.sub(lambda match: f"{match.group(1)}<redacted>", redacted)
+    redacted = _AUDIT_URL_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}", redacted
+    )
+    redacted = _AUDIT_HEADER_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}", redacted
+    )
+    return redacted
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +81,7 @@ class SSHManager:
         self._checker_thread: threading.Thread | None = None
         self._checker_event = threading.Event()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._background_outputs: dict[str, tuple[Path, Path, int]] = {}
         self._process_lock = threading.Lock()
         self._config.ensure_dirs()
         self._store = EncryptedStore(self._config.data_dir)
@@ -336,10 +367,12 @@ class SSHManager:
         except OSError:
             pass
 
-    def close_session(self, session_id: str) -> None:
-        self._cleanup_output_files(session_id)
+    def close_session(self, session_id: str, *, cleanup_output_files: bool = True) -> None:
+        if cleanup_output_files:
+            self._cleanup_output_files(session_id)
         with self._process_lock:
             self._processes.pop(session_id, None)
+            self._background_outputs.pop(session_id, None)
         with self._lock:
             sessions = self._load_sessions()
             if session_id in sessions:
@@ -347,6 +380,7 @@ class SSHManager:
                 self._save_sessions(sessions)
 
     def remove_session(self, session_id: str) -> None:
+        self._cleanup_output_files(session_id)
         with self._lock:
             sessions = self._load_sessions()
             sessions.pop(session_id, None)
@@ -565,14 +599,25 @@ class SSHManager:
 
         # ---- background path ----
         if background:
+            stdout_path: Path | None = None
+            stderr_path: Path | None = None
+            stdout_handle: BinaryIO | None = None
+            stderr_handle: BinaryIO | None = None
+            proc: subprocess.Popen[bytes] | None = None
             try:
+                stdout_path, stdout_handle = self._open_background_output(session_id, "stdout")
+                stderr_path, stderr_handle = self._open_background_output(session_id, "stderr")
                 proc = subprocess.Popen(
                     ssh_args,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
                     start_new_session=True,
                 )
-                # Register session first so kill_session can find it
+                stdout_handle.close()
+                stderr_handle.close()
+                stdout_handle = None
+                stderr_handle = None
+
                 self.register_session(
                     Session(
                         id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
@@ -580,6 +625,11 @@ class SSHManager:
                 )
                 with self._process_lock:
                     self._processes[session_id] = proc
+                    self._background_outputs[session_id] = (
+                        stdout_path,
+                        stderr_path,
+                        max_output_chars,
+                    )
                 elapsed = round(time.monotonic() - start_time, 2)
                 self._log_command(
                     canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
@@ -592,6 +642,17 @@ class SSHManager:
                     "session_id": session_id,
                 }
             except Exception as e:
+                if stdout_handle is not None:
+                    stdout_handle.close()
+                if stderr_handle is not None:
+                    stderr_handle.close()
+                if proc is not None and proc.poll() is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                for path in (stdout_path, stderr_path):
+                    if path is not None:
+                        with contextlib.suppress(OSError):
+                            path.unlink()
                 logger.debug("run_command (bg) failed for %s: %s", canonical, e, exc_info=True)
                 return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
 
@@ -677,53 +738,92 @@ class SSHManager:
         )
         return summary, str(path)
 
-    # ----- Background process helpers -----
+    def _open_background_output(self, session_id: str, stream: str) -> tuple[Path, BinaryIO]:
+        """Open a restricted spool file so background processes cannot fill a pipe."""
+        path = self._config.output_dir / f"ssh_output_{session_id}_{stream}.txt"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
+        return path, os.fdopen(fd, "wb")
 
-    def poll_session(self, session_id: str) -> dict[str, Any]:
-        """Check if a background process is still running.
+    def _collect_background_output(
+        self, path: Path, fallback_stream: Any, max_chars: int
+    ) -> tuple[str, str | None]:
+        """Read a completed spool, deleting short output and retaining large output."""
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = b""
 
-        Returns a dict with ``running`` (bool) and, when the process has
-        finished, the collected stdout/stderr plus the exit code.
-        """
+        if not raw and fallback_stream is not None and hasattr(fallback_stream, "read"):
+            with contextlib.suppress(Exception):
+                fallback = fallback_stream.read()
+                if isinstance(fallback, str):
+                    raw = fallback.encode()
+                elif isinstance(fallback, bytes):
+                    raw = fallback
+
+        text = raw.decode("utf-8", errors="replace")
+        if len(text) <= max_chars:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            return text, None
+
+        summary = (
+            f"[output saved to {path} — {len(text):,} chars total, "
+            f"first {max_chars:,} shown below]\n{text[:max_chars]}"
+        )
+        return summary, str(path)
+
+    def _take_finished_background_process(
+        self, session_id: str
+    ) -> tuple[subprocess.Popen[bytes], Path, Path, int] | None:
+        """Atomically detach a finished process and its output spools."""
         with self._process_lock:
             proc = self._processes.get(session_id)
-            if proc is None:
-                return {
-                    "success": False,
-                    "error": f"No background process for session '{session_id}'",
-                }
-            exit_code = proc.poll()
-            if exit_code is None:
-                return {"success": True, "session_id": session_id, "running": True}
+            if proc is None or proc.poll() is None:
+                return None
+            outputs = self._background_outputs.get(session_id)
+            if outputs is None:
+                outputs = (
+                    self._config.output_dir / f"ssh_output_{session_id}_stdout.txt",
+                    self._config.output_dir / f"ssh_output_{session_id}_stderr.txt",
+                    self._config.max_output_chars,
+                )
             self._processes.pop(session_id, None)
-        # Process finished — collect output
-        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
-        max_chars = self._config.max_output_chars
-        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
-        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self.close_session(session_id)
-        resp: dict[str, Any] = {
+            self._background_outputs.pop(session_id, None)
+        return proc, *outputs
+
+    def _finish_background_process(
+        self,
+        session_id: str,
+        proc: subprocess.Popen[bytes],
+        stdout_path: Path,
+        stderr_path: Path,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        stdout, stdout_file = self._collect_background_output(stdout_path, proc.stdout, max_chars)
+        stderr, stderr_file = self._collect_background_output(stderr_path, proc.stderr, max_chars)
+        self.close_session(session_id, cleanup_output_files=False)
+        response: dict[str, Any] = {
             "success": True,
             "session_id": session_id,
             "running": False,
             "stdout": stdout,
             "stderr": stderr,
-            "exit_code": exit_code,
+            "exit_code": proc.returncode if proc.returncode is not None else proc.poll(),
         }
         if stdout_file:
-            resp["stdout_file"] = stdout_file
+            response["stdout_file"] = stdout_file
         if stderr_file:
-            resp["stderr_file"] = stderr_file
-        return resp
+            response["stderr_file"] = stderr_file
+        return response
 
-    def read_output(self, session_id: str) -> dict[str, Any]:
-        """Read stdout/stderr from a completed background process.
+    # ----- Background process helpers -----
 
-        Unlike :meth:`poll_session` this does **not** check whether the
-        process is still running — it is intended for callers who already
-        know the process has finished.
-        """
+    def poll_session(self, session_id: str) -> dict[str, Any]:
+        """Check whether a background process is running and collect it when complete."""
         with self._process_lock:
             proc = self._processes.get(session_id)
             if proc is None:
@@ -731,31 +831,44 @@ class SSHManager:
                     "success": False,
                     "error": f"No background process for session '{session_id}'",
                 }
-            exit_code = proc.poll()
-            if exit_code is None:
+            if proc.poll() is None:
+                return {"success": True, "session_id": session_id, "running": True}
+
+        finished = self._take_finished_background_process(session_id)
+        if finished is None:
+            return {"success": True, "session_id": session_id, "running": True}
+        proc, stdout_path, stderr_path, max_chars = finished
+        return self._finish_background_process(
+            session_id, proc, stdout_path, stderr_path, max_chars
+        )
+
+    def read_output(self, session_id: str) -> dict[str, Any]:
+        """Read output from a completed background process."""
+        with self._process_lock:
+            proc = self._processes.get(session_id)
+            if proc is None:
+                return {
+                    "success": False,
+                    "error": f"No background process for session '{session_id}'",
+                }
+            if proc.poll() is None:
                 return {
                     "success": False,
                     "error": f"Process for session '{session_id}' is still running",
                 }
-            self._processes.pop(session_id, None)
-        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
-        max_chars = self._config.max_output_chars
-        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
-        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self.close_session(session_id)
-        resp2: dict[str, Any] = {
-            "success": True,
-            "session_id": session_id,
-            "stdout": stdout,
-            "stderr": stderr,
-            "exit_code": exit_code,
-        }
-        if stdout_file:
-            resp2["stdout_file"] = stdout_file
-        if stderr_file:
-            resp2["stderr_file"] = stderr_file
-        return resp2
+
+        finished = self._take_finished_background_process(session_id)
+        if finished is None:
+            return {
+                "success": False,
+                "error": f"No background process for session '{session_id}'",
+            }
+        proc, stdout_path, stderr_path, max_chars = finished
+        result = self._finish_background_process(
+            session_id, proc, stdout_path, stderr_path, max_chars
+        )
+        result.pop("running", None)
+        return result
 
     # ----- Audit log -----
 
@@ -767,15 +880,26 @@ class SSHManager:
         elapsed: float,
         session_id: str,
     ) -> None:
-        """Append a single JSONL line to the command audit log."""
+        """Append a redacted or metadata-only JSONL audit entry."""
+        mode = self._config.audit_log_mode.strip().lower()
+        if mode not in _AUDIT_MODES:
+            logger.warning("Unknown audit_log_mode %r; using redacted", mode)
+            mode = "redacted"
+        if mode == "off":
+            return
+
+        redacted_command = _redact_command(command)
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
             "machine": machine,
-            "command": command,
+            "command_sha256": hashlib.sha256(redacted_command.encode()).hexdigest(),
+            "command_length": len(redacted_command),
             "exit_code": exit_code,
             "elapsed_secs": elapsed,
             "session_id": session_id,
         }
+        if mode == "redacted":
+            entry["command"] = redacted_command
         try:
             self._config.data_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(

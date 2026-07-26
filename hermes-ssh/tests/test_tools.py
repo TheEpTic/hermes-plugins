@@ -626,3 +626,12 @@ def test_approval_does_not_block_poll(tmp_path: Path) -> None:
         result = json.loads(handler({"read_output": "nonexistent"}))
         assert result["success"] is False
         mock_check.assert_not_called()
+
+
+def test_machines_add_uses_local_user_by_default(tmp_path: Path) -> None:
+    import getpass
+
+    handler = handle_ssh_machines(_make_manager(tmp_path))
+    result = json.loads(handler({"action": "add", "name": "host1", "host": "10.0.0.1"}))
+    assert result["success"] is True
+    assert result["machine"]["user"] == getpass.getuser()
