@@ -1,0 +1,42 @@
+# hermes-plugins
+
+Practical third-party plugins for Hermes Agent.
+
+Repository: https://github.com/TheEpTic/hermes-plugins
+
+## packages
+
+- `hermes-ssh`: named multi-host SSH inventory, command execution, reusable connections, sessions, and audit history
+- `hermes-sfw`: restricted dependency operations through Socket Firewall Free
+
+## installation contract
+
+Install the selected PyPI distribution into the exact Python environment that launches `hermes`, then explicitly enable the matching plugin.
+
+```bash
+/path/to/hermes-python -m pip install hermes-ssh
+hermes plugins enable hermes-ssh --no-allow-tool-override
+
+npm i -g sfw
+sfw --version
+/path/to/hermes-python -m pip install hermes-sfw
+hermes plugins enable hermes-sfw --no-allow-tool-override
+```
+
+Verify with:
+
+```bash
+hermes plugins list --enabled --plain
+```
+
+Run `/reset` or restart Hermes after installation or upgrade.
+
+Do not use `hermes plugins install TheEpTic/hermes-plugins`; this repository contains two independent packages. Read `AGENTS.md` for deterministic environment detection and safety rules.
+
+## safety
+
+- Never guess SSH credentials or register root access.
+- Do not connect to a host without user approval.
+- Do not install a dependency merely to test `hermes-sfw`; use `sfw action=status`.
+- `hermes-sfw` is a dependency guard, not a sandbox.
+- Run Hermes with least privilege.
