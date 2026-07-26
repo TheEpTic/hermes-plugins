@@ -5,6 +5,8 @@ author: TheEpTic
 kind: standalone
 provides_tools:
   - sfw
+provides_hooks:
+  - pre_tool_call
 platforms:
   - linux
   - macos

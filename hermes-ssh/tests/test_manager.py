@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import json
 import signal
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,7 +35,7 @@ def test_machine_to_dict_roundtrip() -> None:
 
 def test_machine_defaults() -> None:
     m = Machine(name="x", host="1.2.3.4")
-    assert m.user == "root"
+    assert m.user == getpass.getuser()
     assert m.port == 22
     assert m.key == ""
     assert m.aliases is None
@@ -594,6 +596,7 @@ def test_start_idle_checker_idempotent(tmp_path: Path) -> None:
 
 from unittest.mock import MagicMock, patch
 
+from ssh_tools.config import SSHConfig
 from ssh_tools.manager import SSHManager
 
 # ---------------------------------------------------------------------------
@@ -1223,3 +1226,117 @@ def test_background_session_registered_before_process(tmp_path: Path) -> None:
         assert session is not None
         assert session.pid == 99999
         assert sid in mgr._processes
+
+
+def test_background_process_uses_spool_files(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc) as popen:
+        result = mgr.run_command("h", "verbose command", background=True)
+    assert popen.call_args.kwargs["stdout"] is not subprocess.PIPE
+    assert popen.call_args.kwargs["stderr"] is not subprocess.PIPE
+    assert result["session_id"] in mgr._background_outputs
+
+
+def test_background_large_output_file_survives_poll(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        started = mgr.run_command("h", "verbose command", background=True, max_output_chars=10)
+    sid = started["session_id"]
+    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
+    stdout_path.write_text("x" * 100)
+    stderr_path.write_text("")
+    fake_proc.poll.return_value = 0
+    fake_proc.returncode = 0
+    result = mgr.poll_session(sid)
+    assert result["running"] is False
+    assert Path(result["stdout_file"]).exists()
+    assert Path(result["stdout_file"]).read_text() == "x" * 100
+    assert not stderr_path.exists()
+
+
+def test_background_short_output_spool_is_removed(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        started = mgr.run_command("h", "small command", background=True)
+    sid = started["session_id"]
+    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
+    stdout_path.write_text("done")
+    stderr_path.write_text("")
+    fake_proc.poll.return_value = 0
+    fake_proc.returncode = 0
+    result = mgr.poll_session(sid)
+    assert result["stdout"] == "done"
+    assert "stdout_file" not in result
+    assert not stdout_path.exists()
+    assert not stderr_path.exists()
+
+
+def test_audit_log_redacts_common_inline_secrets(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "TOKEN=super-secret deploy --password hunter2")
+    entry = mgr.list_command_log()[-1]
+    assert "super-secret" not in entry["command"]
+    assert "hunter2" not in entry["command"]
+    assert "<redacted>" in entry["command"]
+    assert len(entry["command_sha256"]) == 64
+
+
+def test_audit_log_metadata_mode_omits_command(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "echo private")
+    entry = mgr.list_command_log()[-1]
+    assert "command" not in entry
+    assert entry["command_length"] == len("echo private")
+
+
+def test_audit_log_can_be_disabled(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="off"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "echo private")
+    assert not (tmp_path / "command_log.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "secret"),
+    [
+        ("GITHUB_TOKEN=ghp_leak deploy", "ghp_leak"),
+        ("AWS_SECRET_ACCESS_KEY='secret with spaces' deploy", "secret with spaces"),
+        ('tool --api-key "flag secret value"', "flag secret value"),
+        ('curl -H "Authorization: Bearer bearer-leak" https://example.com', "bearer-leak"),
+        ('curl -H "X-Api-Key: header-leak" https://example.com', "header-leak"),
+        ("curl https://user:url-password@example.com", "url-password"),
+    ],
+)
+def test_redact_command_handles_prefixed_and_quoted_secrets(command: str, secret: str) -> None:
+    from ssh_tools.manager import _redact_command
+
+    redacted = _redact_command(command)
+    assert secret not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_audit_hash_is_based_on_redacted_command(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "GITHUB_TOKEN=short deploy")
+        mgr.run_command("h", "GITHUB_TOKEN=a-much-longer-secret deploy")
+
+    first, second = mgr.list_command_log(limit=2)
+    assert first["command_sha256"] == second["command_sha256"]
+    assert first["command_length"] == second["command_length"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,13 +20,14 @@ class SSHConfig:
 
     # SSH defaults
     default_port: int = 22
-    default_user: str = "root"
+    default_user: str = field(default_factory=getpass.getuser)
     connect_timeout: int = 5
     command_timeout: int = 30
     strict_host_key_checking: str = "accept-new"
 
     # Output
     max_output_chars: int = 50_000  # save to output_dir if exceeded
+    audit_log_mode: str = "redacted"  # redacted, metadata, or off
 
     # Session management
     idle_check_interval: int = 60  # seconds between idle checks

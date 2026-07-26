@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Spool background stdout and stderr to restricted files so verbose commands cannot deadlock.
+- Keep returned large-output files available after completed sessions are closed.
+- Redact common inline secrets from audit logs, with metadata-only and disabled modes.
+- Default new machine registrations to the current local user instead of root.
+- Resolve `__version__` from installed package metadata.
+
 ## [0.3.3] - 2026-07-24
 
 - Update development dependencies to mypy 2.3.0 and pytest 9.1.1.

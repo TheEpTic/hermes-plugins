@@ -585,3 +585,29 @@ class TestUnicodeHandling:
         result = mgr.run_command("npm install express")
         # Should not raise UnicodeDecodeError
         assert isinstance(result.stdout, str)
+
+
+def test_direct_dependency_guard_blocks_terminal_installs() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
+    assert result is not None
+    assert result["action"] == "block"
+    assert "sfw" in result["message"]
+
+
+def test_direct_dependency_guard_ignores_non_dependency_commands() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    assert _guard_direct_dependency_operation("terminal", {"command": "npm run build"}) is None
+    assert _guard_direct_dependency_operation("terminal", {"command": "git status"}) is None
+    assert _guard_direct_dependency_operation("read_file", {"command": "npm install x"}) is None
+
+
+def test_direct_dependency_guard_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    monkeypatch.setenv("HERMES_SFW_ENFORCE_DIRECT", "off")
+    assert (
+        _guard_direct_dependency_operation("terminal", {"command": "pip install requests"}) is None
+    )

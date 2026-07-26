@@ -10,6 +10,7 @@ Provides:
 from __future__ import annotations
 
 import logging
+from importlib.metadata import PackageNotFoundError, version as distribution_version
 from typing import Any
 
 from .handlers import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
@@ -17,7 +18,10 @@ from .handlers.slash import create_slash_handler
 from .manager import SSHManager
 from .schemas import SSH_MACHINES_SCHEMA, SSH_SESSIONS_SCHEMA, SSH_TERMINAL_SCHEMA
 
-__version__ = "0.2.0"
+try:
+    __version__ = distribution_version("hermes-ssh")
+except PackageNotFoundError:
+    __version__ = "0.0.0+local"
 __all__ = [
     "SSH_MACHINES_SCHEMA",
     "SSH_SESSIONS_SCHEMA",

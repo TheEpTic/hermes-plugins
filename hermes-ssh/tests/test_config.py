@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -29,13 +30,14 @@ def test_ensure_dirs_creates_directories(tmp_path: Path) -> None:
 def test_config_defaults() -> None:
     config = SSHConfig()
     assert config.default_port == 22
-    assert config.default_user == "root"
+    assert config.default_user == getpass.getuser()
     assert config.connect_timeout == 5
     assert config.command_timeout == 30
     assert config.idle_check_interval == 60
     assert config.idle_timeout_minutes == 30
     assert config.closed_prune_hours == 24
     assert config.strict_host_key_checking == "accept-new"
+    assert config.audit_log_mode == "redacted"
 
 
 def test_config_is_frozen() -> None:

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Block supported dependency operations sent directly through the terminal and route agents to `sfw`.
+- Allow the direct-terminal guard to be disabled with `HERMES_SFW_ENFORCE_DIRECT=off`.
+- Resolve `__version__` from installed package metadata.
+
 ## [0.2.3] - 2026-07-24
 
 - Update development dependencies to mypy 2.3.0 and pytest 9.1.1.
