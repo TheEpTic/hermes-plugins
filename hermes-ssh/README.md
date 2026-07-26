@@ -8,46 +8,44 @@ SSH remote execution plugin for [Hermes Agent](https://github.com/NousResearch/h
 
 Run commands on remote servers, track sessions, reuse connections — all from inside Hermes.
 
-```
+```text
 /ssh web1 uptime
-ssh_machines add name=web1 host=192.168.1.50
-ssh_sessions list
+ssh_machines action=add name=web1 host=192.168.1.50 user=deploy
+ssh_sessions action=list
 ```
 
-## Quick Start
+## quick start
 
-> **Requires Python 3.11+** and an OpenSSH client (`ssh`) on the host system.
+`hermes-ssh` is for **named multi-host operations**. Hermes's core SSH backend is useful for one configured remote terminal; this plugin adds a reusable machine inventory, aliases, per-command targeting, background sessions, and audit history.
 
-### Option 1: Deploy script (recommended)
+> Requires Python 3.11+, Hermes Agent, and an OpenSSH client named `ssh`.
+
+Install the package into the same Python environment that runs Hermes:
+
+```bash
+python -m pip install hermes-ssh
+hermes plugins enable hermes-ssh --no-allow-tool-override
+```
+
+Run `/reset` or restart Hermes, then verify:
+
+```bash
+python -m pip show hermes-ssh
+hermes plugins list --enabled --plain
+```
+
+If Hermes cannot see the package, the `python` command above was not Hermes's Python. Follow the environment procedure in the repository [AGENTS.md](../AGENTS.md).
+
+For source development:
 
 ```bash
 git clone https://github.com/TheEpTic/hermes-plugins.git
 cd hermes-plugins/hermes-ssh
 ./deploy.sh
+hermes plugins enable hermes-ssh --no-allow-tool-override
 ```
 
-Then restart Hermes with `/reset`.
-
-### Option 2: Manual symlink
-
-```bash
-git clone https://github.com/TheEpTic/hermes-plugins.git
-ln -s "$(pwd)/hermes-plugins/hermes-ssh/src/ssh_tools" ~/.hermes/plugins/hermes-ssh
-```
-
-Then `/reset` in Hermes. The symlink points at the source tree, but Python modules are imported once, so code changes still require `/reset` or a Hermes process restart before they load.
-
-### Option 3: As a Python package
-
-```bash
-pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-ssh
-```
-
-Then enable it and restart Hermes:
-
-```bash
-hermes plugins enable hermes-ssh
-```
+Run `/reset` or restart Hermes after changing the source tree.
 
 ## Features
 
@@ -55,7 +53,7 @@ hermes plugins enable hermes-ssh
 
 Execute any command on a remote machine. Commands run through `bash -c` with `pipefail`, so pipelines work correctly.
 
-```bash
+```text
 # Synchronous (waits for completion)
 ssh_terminal machine=web1 command="df -h"
 
@@ -68,9 +66,9 @@ ssh_terminal machine=web1 command="make -j4" timeout=300
 
 **Output truncation:** When output exceeds `max_output_chars` (default: 50,000), the full output is saved under the plugin's restricted output directory and a summary with the file path is returned. The LLM can then use `read_file` to access the complete output.
 
-**Background commands:** Long-running commands can be backgrounded. The plugin tracks the process and lets you poll for status or retrieve output later.
+**Background commands:** Long-running commands spool stdout and stderr to restricted files, avoiding pipe-buffer deadlocks. The plugin tracks the process and lets you poll for status or retrieve output later.
 
-```bash
+```text
 # Check if still running
 ssh_terminal poll=<session_id>
 
@@ -86,7 +84,7 @@ ssh_sessions action=read_output session_id=<session_id>
 
 Register servers once, refer to them by name or alias.
 
-```bash
+```text
 # Add a server
 ssh_machines action=add name=web1 host=192.168.1.50 user=deploy key=~/.ssh/id_ed25519
 
@@ -109,7 +107,7 @@ Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 char
 
 Every command creates a session. Sessions track the PID, machine, command count, and idle time.
 
-```bash
+```text
 # List active sessions
 ssh_sessions action=list
 
@@ -146,10 +144,11 @@ All settings live in `src/ssh_tools/config.py` as an `SSHConfig` dataclass:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `default_port` | 22 | SSH port for new machines |
-| `default_user` | root | SSH user for new machines |
+| `default_user` | current local user | SSH user for new machines |
 | `connect_timeout` | 5s | SSH handshake timeout |
 | `command_timeout` | 30s | Command execution timeout |
 | `max_output_chars` | 50,000 | Output truncation threshold |
+| `audit_log_mode` | redacted | `redacted`, `metadata`, or `off` |
 | `idle_check_interval` | 60s | Seconds between idle checks |
 | `idle_timeout_minutes` | 30m | Auto-kill after this idle time |
 | `closed_prune_hours` | 24h | Remove closed sessions after this |
@@ -190,6 +189,7 @@ See [SECURITY.md](SECURITY.md) for the full picture.
 
 - `StrictHostKeyChecking=accept-new` — accepts first-seen host keys but rejects changed keys. Set to `yes` for strict production hosts.
 - Machine credentials are encrypted at rest in `~/.hermes/ssh-tools/machines.json`. Data directory is 0o700.
+- Audit logs redact common inline credentials by default. Use metadata mode when command text must not be stored.
 - All commands execute with the permissions of the Hermes agent process.
 
 **Hardening applied:**

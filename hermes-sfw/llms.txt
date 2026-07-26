@@ -1,120 +1,44 @@
 # hermes-sfw
 
-> Socket Firewall Free plugin for Hermes Agent. Block malicious dependencies at install time.
+Restricted dependency operations through Socket Firewall Free for Hermes Agent.
 
-hermes-sfw gives Hermes one tool (`sfw`) with two actions (`run`, `status`) for running package manager commands through the Socket Firewall Free CLI. It validates command prefixes, parses output for blocked/installed packages, and returns structured JSON.
+## install
 
-## Installation
-
-### For Hermes Agent users (recommended)
-
-Clone and symlink into the Hermes plugins directory:
+Install the `sfw` prerequisite and place the Python package in the exact environment that launches `hermes`:
 
 ```bash
-git clone https://github.com/TheEpTic/hermes-plugins.git
-ln -s "$(pwd)/hermes-plugins/hermes-sfw/src/hermes_sfw" ~/.hermes/plugins/hermes-sfw
+npm i -g sfw
+/path/to/hermes-python -m pip install hermes-sfw
+hermes plugins enable hermes-sfw --no-allow-tool-override
+hermes plugins list --enabled --plain
 ```
 
-Then restart Hermes with `/reset` or restart the process. The symlink points at source, but plugin modules are imported once, so code changes still need a reload before they take effect.
+Run `/reset` or restart Hermes. Do not use the monorepo URL with `hermes plugins install`.
 
-Or use the deploy script:
+Verify without changing a project:
 
-```bash
-git clone https://github.com/TheEpTic/hermes-plugins.git
-cd hermes-plugins/hermes-sfw
-./deploy.sh
-```
-
-### As a Python package
-
-```bash
-pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-sfw
-```
-
-Enable it and restart Hermes:
-
-```bash
-hermes plugins enable hermes-sfw
-```
-
-### Requirements
-
-- Python 3.11+
-- sfw CLI installed (`npm i -g sfw`)
-- Hermes Agent (the plugin registers tools via the Hermes plugin API)
-
-## Usage
-
-### Running commands
-
-```
-sfw action=run command="npm install express"
-```
-
-Commands are validated against a prefix allowlist before execution. Only package manager commands are accepted.
-
-Supported prefixes: npm, yarn, pnpm, pip, pip3, uv, cargo, rustup. npx is intentionally blocked because it can execute arbitrary package code.
-
-Options:
-- `workdir` (optional): working directory for the command
-- `verbose` (default: false): enable verbose sfw output
-
-### Checking installation
-
-```
+```text
 sfw action=status
 ```
 
-Returns: `installed` (bool), `version` (string or null), `binary` (path or null).
+## use
 
-### Blocked packages
-
-When sfw detects a malicious package, the response includes a `blocked` array with the package names. Safe packages appear in an `installed` array.
-
-### Output handling
-
-Output exceeding 10,000 characters is truncated with a size note. Commands timeout after 300 seconds (5 minutes) by default.
-
-## Configuration
-
-The plugin is configured via `SFWConfig` dataclass in `src/hermes_sfw/manager.py`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `sfw_bin` | `sfw` | Path to the sfw binary |
-| `timeout` | 300s | Max seconds per command |
-
-## Data storage
-
-hermes-sfw does not store any persistent data. All state is in-memory for the duration of the tool call.
-
-## Security notes
-
-- Only package manager commands are accepted (prefix allowlist)
-- Commands execute with the Hermes agent's permissions
-- Working directories validated with os.path.realpath() to prevent path traversal
-- Output truncated to prevent context overflow
-- Timeout protection prevents hanging processes
-
-## Project structure
-
-```
-src/hermes_sfw/
-├── __init__.py          # Plugin registration (register() function)
-├── manager.py           # SFWManager — command execution, validation, parsing
-├── schemas.py           # Tool schema (LLM-facing)
-├── utils.py             # ok(), err(), require() helpers
-└── handlers/
-    └── sfw.py           # sfw tool handler
+```text
+sfw action=run command="npm install express" workdir="/project"
+sfw action=run command="uv pip install requests" workdir="/project"
+sfw action=run command="cargo fetch" workdir="/project"
 ```
 
-## Development
+Accepted ecosystems:
 
-```bash
-pip install -e '.[dev]'
-black --check src/hermes_sfw/ tests/
-mypy src/hermes_sfw/
-pytest
-```
+- JavaScript/TypeScript: npm, yarn, pnpm
+- Python: pip, pip3, uv
+- Rust: cargo
 
-CI runs on Python 3.11, 3.12, and 3.13 with black, mypy, and pytest.
+`npx`, `rustup`, runner subcommands, arbitrary shell commands, and hidden runner forms are rejected.
+
+The plugin's pre-tool hook blocks accepted dependency operations sent directly through Hermes `terminal` and tells the agent to use `sfw`. Set `HERMES_SFW_ENFORCE_DIRECT=off` only when the user explicitly wants direct terminal installs.
+
+Output beyond 10,000 characters is discarded after a truncation notice. Commands time out after 300 seconds by default.
+
+This is a dependency guard, not a sandbox. Package lifecycle scripts and build backends still run with the Hermes process's permissions.
