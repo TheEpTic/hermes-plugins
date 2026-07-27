@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Relax the `cryptography` lower bound to support Hermes Agent 0.19.0's pinned 46.0.7 runtime dependency.
 - Spool background stdout and stderr to restricted files so verbose commands cannot deadlock.
 - Keep returned large-output files available after completed sessions are closed.
 - Redact common inline secrets from audit logs, with metadata-only and disabled modes.
