@@ -51,6 +51,65 @@ SSH_TERMINAL_SCHEMA = {
     },
 }
 
+SSH_TRANSFER_SCHEMA = {
+    "name": "ssh_transfer",
+    "description": (
+        "Upload or download a file or directory using a registered SSH machine and OpenSSH "
+        "SFTP. Transfers default to no overwrite. Credential paths and symbolic links are blocked."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["upload", "download"],
+                "description": "Transfer direction from the Hermes host's perspective",
+            },
+            "machine": {
+                "type": "string",
+                "description": "Machine name or alias",
+            },
+            "source": {
+                "type": "string",
+                "description": (
+                    "Upload: local source path. Download: absolute remote source path or a path "
+                    "starting with '~/'."
+                ),
+            },
+            "destination": {
+                "type": "string",
+                "description": (
+                    "Upload: absolute remote destination path or a path starting with '~/'. "
+                    "Download: local destination path."
+                ),
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Required for directory transfers (default: false)",
+                "default": False,
+            },
+            "preserve": {
+                "type": "boolean",
+                "description": "Preserve file times and modes where supported (default: false)",
+                "default": False,
+            },
+            "overwrite": {
+                "type": "boolean",
+                "description": "Allow replacing an existing regular file (default: false)",
+                "default": False,
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Seconds before cancelling the transfer (default: 300)",
+                "default": 300,
+                "minimum": 1,
+                "maximum": 3600,
+            },
+        },
+        "required": ["action", "machine", "source", "destination"],
+    },
+}
+
 SSH_MACHINES_SCHEMA = {
     "name": "ssh_machines",
     "description": "Manage the SSH machine registry. Add, remove, list, test, or inspect machines.",
