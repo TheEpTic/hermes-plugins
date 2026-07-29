@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.4.0] - 2026-07-29
+
 - Default to strict SSH host-key verification so a first connection cannot silently trust a network attacker.
 - Report failed background commands as failures when they finish instead of returning a false success result.
 - Align the machine-registration schema with runtime behavior: omitted users default to the current local user, never `root`.
