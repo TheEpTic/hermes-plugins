@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from typing import TYPE_CHECKING, Any
 
 from .models import TransferAction, TransferRequest, TransferValidationError
@@ -13,6 +12,7 @@ from .transport import sftp_args, sftp_batch
 if TYPE_CHECKING:
     from ..manager import SSHManager
 
+# Private aliases retained for focused tests and internal callers.
 _prepare_upload_source = prepare_upload_source
 _remote_path = remote_path
 _sftp_args = sftp_args
