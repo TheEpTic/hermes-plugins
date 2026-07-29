@@ -54,10 +54,7 @@ def execute_transfer(
             raise TransferValidationError("action must be 'upload' or 'download'")
         if not isinstance(machine_name, str) or not machine_name:
             raise TransferValidationError("machine must be a non-empty string")
-        if not all(
-            isinstance(flag, bool)
-            for flag in (recursive, preserve, overwrite)
-        ):
+        if not all(isinstance(flag, bool) for flag in (recursive, preserve, overwrite)):
             raise TransferValidationError(
                 "recursive, preserve, and overwrite must be booleans"
             )
