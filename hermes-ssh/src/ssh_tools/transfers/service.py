@@ -85,7 +85,7 @@ class TransferService:
         error = result.get("error") or result.get("stderr") or "remote probe failed"
         return None, str(error)
 
-    def _tree_has_symlink(
+    def _tree_has_unsafe_entry(
         self,
         machine: str,
         path: str,
@@ -93,9 +93,22 @@ class TransferService:
     ) -> tuple[bool | None, str | None]:
         target = remote_shell_path(path)
         command = (
-            f"link=$(find {target} -type l -print -quit 2>/dev/null); status=$?; "
+            f"entry=$(find {target} \\( "
+            "-type l -o "
+            "\\( -type d \\( -name .ssh -o -name .gnupg -o -name .aws -o -name .kube "
+            "-o -name .docker -o -name .azure -o -name .hermes -o -name mcp-tokens "
+            "-o -name pairing \\) \\) -o "
+            "\\( -type f \\( -name .netrc -o -name .npmrc -o -name .pypirc -o -name .pgpass "
+            "-o -name .git-credentials -o -name .anthropic_oauth.json -o -name auth.json "
+            "-o -name auth.lock -o -name webhook_subscriptions.json -o -name google_oauth.json "
+            "-o -name bws_cache.json -o -name bws_cache.enc.json -o -name credentials "
+            "-o -name id_rsa -o -name id_dsa -o -name id_ecdsa -o -name id_ed25519 "
+            "-o \\( -name '.env*' ! -name .env.example ! -name .env.sample ! -name .env.template \\) \\) \\) "
+            "-o -path '*/.config/gh' -o -path '*/.config/gh/*' "
+            "-o -path '*/.config/gcloud' -o -path '*/.config/gcloud/*' \\) "
+            "-print -quit 2>/dev/null); status=$?; "
             "if [ $status -ne 0 ]; then exit 9; "
-            'elif [ -n "$link" ]; then printf "%s" "$link"; exit 7; else exit 0; fi'
+            'elif [ -n "$entry" ]; then printf "%s" "$entry"; exit 7; else exit 0; fi'
         )
         result = self.manager.run_command(
             machine,
@@ -106,7 +119,7 @@ class TransferService:
         if result.get("exit_code") == 0:
             return False, None
         if result.get("exit_code") == 7:
-            return True, str(result.get("stdout") or "symbolic link")
+            return True, str(result.get("stdout") or "unsafe entry")
         error = result.get("error") or result.get("stderr") or "remote scan failed"
         return None, str(error)
 
@@ -288,20 +301,21 @@ class TransferService:
                 "recursive=true is required to download a directory",
             )
         if is_directory:
-            has_symlink, scan_error = self._tree_has_symlink(
+            has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(
                 machine.name,
                 source,
                 request.timeout,
             )
+            if has_unsafe_entry:
+                return self._error(
+                    machine.name,
+                    "remote directory contains a symbolic link or credential path; "
+                    "refusing recursive download",
+                )
             if scan_error:
                 return self._error(
                     machine.name,
                     f"Could not safely scan remote directory: {scan_error}",
-                )
-            if has_symlink:
-                return self._error(
-                    machine.name,
-                    "remote directory contains a symbolic link; refusing recursive download",
                 )
 
         if destination.exists():

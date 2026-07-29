@@ -211,6 +211,59 @@ def test_download_blocks_remote_credentials(tmp_path: Path) -> None:
     assert "credential" in result["error"]
 
 
+def test_recursive_download_rejects_nested_sensitive_remote_entry(tmp_path: Path) -> None:
+    manager = cast(Any, StubManager(tmp_path))
+    with (
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
+        patch.object(TransferService, "_probe", return_value=("directory", None)),
+        patch.object(
+            TransferService,
+            "_tree_has_unsafe_entry",
+            return_value=(True, "/srv/export/.ssh/id_ed25519"),
+        ),
+        patch.object(TransferService, "_run_sftp") as run_sftp,
+    ):
+        result = execute_transfer(
+            manager,
+            action="download",
+            machine_name="web1",
+            source="/srv/export",
+            destination=str(tmp_path / "export"),
+            recursive=True,
+        )
+
+    assert result["success"] is False
+    assert "credential path" in result["error"]
+    run_sftp.assert_not_called()
+
+
+def test_remote_tree_scan_detects_nested_credential_directory(tmp_path: Path) -> None:
+    source = tmp_path / "export"
+    (source / ".ssh").mkdir(parents=True)
+    (source / ".ssh" / "id_ed25519").write_text("private key")
+
+    class LocalScanManager(StubManager):
+        def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
+            del machine_name, kwargs
+            self.commands.append(command)
+            completed = subprocess.run(
+                ["bash", "-c", command], capture_output=True, text=True, check=False
+            )
+            return {
+                "success": completed.returncode == 0,
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+
+    manager = cast(Any, LocalScanManager(tmp_path))
+    unsafe, detail = TransferService(manager)._tree_has_unsafe_entry("web1", str(source), 30)
+
+    assert unsafe is True
+    assert detail is not None
+    assert ".ssh" in detail
+
+
 def test_failed_download_removes_partial_temp(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     destination = tmp_path / "app.log"
