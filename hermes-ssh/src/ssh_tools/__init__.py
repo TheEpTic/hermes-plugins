@@ -1,7 +1,8 @@
-"""hermes-ssh — SSH remote execution plugin for Hermes Agent.
+"""hermes-ssh — SSH remote operations plugin for Hermes Agent.
 
 Provides:
   - ssh_terminal: Run commands on remote machines via SSH
+  - ssh_transfer: Upload or download files via SFTP
   - ssh_machines: Machine registry (add/list/remove/test/inspect)
   - ssh_sessions: Active session tracking (list/kill/cleanup)
   - /ssh slash command for quick access
@@ -13,10 +14,20 @@ import logging
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 from typing import Any
 
-from .handlers import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
+from .handlers import (
+    handle_ssh_machines,
+    handle_ssh_sessions,
+    handle_ssh_terminal,
+    handle_ssh_transfer,
+)
 from .handlers.slash import create_slash_handler
 from .manager import SSHManager
-from .schemas import SSH_MACHINES_SCHEMA, SSH_SESSIONS_SCHEMA, SSH_TERMINAL_SCHEMA
+from .schemas import (
+    SSH_MACHINES_SCHEMA,
+    SSH_SESSIONS_SCHEMA,
+    SSH_TERMINAL_SCHEMA,
+    SSH_TRANSFER_SCHEMA,
+)
 
 try:
     __version__ = distribution_version("hermes-ssh")
@@ -26,10 +37,12 @@ __all__ = [
     "SSH_MACHINES_SCHEMA",
     "SSH_SESSIONS_SCHEMA",
     "SSH_TERMINAL_SCHEMA",
+    "SSH_TRANSFER_SCHEMA",
     "SSHManager",
     "handle_ssh_machines",
     "handle_ssh_sessions",
     "handle_ssh_terminal",
+    "handle_ssh_transfer",
     "register",
 ]
 
@@ -66,6 +79,13 @@ def register(ctx: Any) -> None:
         schema=SSH_TERMINAL_SCHEMA,
         handler=handle_ssh_terminal(_manager),
         description="Run a command on a remote machine via SSH.",
+    )
+    ctx.register_tool(
+        name="ssh_transfer",
+        toolset="ssh_tools",
+        schema=SSH_TRANSFER_SCHEMA,
+        handler=handle_ssh_transfer(_manager),
+        description="Upload or download files using a registered SSH machine.",
     )
     ctx.register_tool(
         name="ssh_machines",
