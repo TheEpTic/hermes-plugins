@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Default to strict SSH host-key verification so a first connection cannot silently trust a network attacker.
+- Report failed background commands as failures when they finish instead of returning a false success result.
+- Align the machine-registration schema with runtime behavior: omitted users default to the current local user, never `root`.
 - Add `ssh_transfer` for audited uploads and downloads over OpenSSH SFTP, with staged finalisation, no-overwrite defaults, recursive directory support, and credential/symlink protections.
 - Relax the `cryptography` lower bound to support Hermes Agent 0.19.0's pinned 46.0.7 runtime dependency.
 - Spool background stdout and stderr to restricted files so verbose commands cannot deadlock.

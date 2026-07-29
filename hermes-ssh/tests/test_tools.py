@@ -10,6 +10,7 @@ import ssh_tools
 from ssh_tools.handlers import handle_ssh_machines, handle_ssh_sessions, handle_ssh_terminal
 from ssh_tools.handlers.slash import create_slash_handler
 from ssh_tools.models import Machine, Session
+from ssh_tools.schemas import SSH_MACHINES_SCHEMA
 
 from .conftest import _make_manager
 
@@ -104,6 +105,13 @@ def test_machines_add(tmp_path: Path) -> None:
     )
     assert result["success"] is True
     assert result["machine"]["host"] == "10.0.0.1"
+
+
+def test_machines_schema_does_not_advertise_root_as_the_default_user() -> None:
+    user = SSH_MACHINES_SCHEMA["parameters"]["properties"]["user"]
+
+    assert "default" not in user
+    assert "current local user" in user["description"]
 
 
 def test_machines_add_missing_fields(tmp_path: Path) -> None:

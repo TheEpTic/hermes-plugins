@@ -36,7 +36,7 @@ def test_config_defaults() -> None:
     assert config.idle_check_interval == 60
     assert config.idle_timeout_minutes == 30
     assert config.closed_prune_hours == 24
-    assert config.strict_host_key_checking == "accept-new"
+    assert config.strict_host_key_checking == "yes"
     assert config.audit_log_mode == "redacted"
 
 
