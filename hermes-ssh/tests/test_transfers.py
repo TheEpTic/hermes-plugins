@@ -109,7 +109,7 @@ def test_upload_uses_temp_then_remote_rename(tmp_path: Path) -> None:
 
     completed = subprocess.CompletedProcess(["sftp"], 0, "", "")
     with (
-        patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"),
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
         patch.object(TransferService, "_probe", return_value=("missing", None)),
         patch.object(TransferService, "_run_sftp", return_value=completed) as run_sftp,
     ):
@@ -135,7 +135,7 @@ def test_upload_refuses_existing_destination_without_overwrite(tmp_path: Path) -
     source.write_bytes(b"payload")
 
     with (
-        patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"),
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
         patch.object(TransferService, "_probe", return_value=("file", None)),
         patch.object(TransferService, "_run_sftp") as run_sftp,
     ):
@@ -161,7 +161,7 @@ def test_download_is_staged_and_atomically_replaced(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(["sftp"], 0, "", "")
 
     with (
-        patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"),
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
         patch.object(TransferService, "_probe", return_value=("file", None)),
         patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
     ):
@@ -183,7 +183,7 @@ def test_download_is_staged_and_atomically_replaced(tmp_path: Path) -> None:
 def test_download_directory_requires_recursive(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     with (
-        patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"),
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
         patch.object(TransferService, "_probe", return_value=("directory", None)),
     ):
         result = execute_transfer(
@@ -199,7 +199,7 @@ def test_download_directory_requires_recursive(tmp_path: Path) -> None:
 
 def test_download_blocks_remote_credentials(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
-    with patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"):
+    with patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"):
         result = execute_transfer(
             manager,
             action="download",
@@ -220,7 +220,7 @@ def test_failed_download_removes_partial_temp(tmp_path: Path) -> None:
         return subprocess.CompletedProcess(["sftp"], 1, "", "network failed")
 
     with (
-        patch("ssh_tools.transfers.shutil.which", return_value="/usr/bin/sftp"),
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
         patch.object(TransferService, "_probe", return_value=("file", None)),
         patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
     ):
@@ -264,3 +264,17 @@ def test_metadata_audit_does_not_store_paths(tmp_path: Path) -> None:
     assert "destination" not in entry
     assert entry["source_sha256"]
     assert entry["destination_sha256"]
+
+
+def test_env_example_upload_is_allowed(tmp_path: Path) -> None:
+    source = tmp_path / ".env.example"
+    source.write_text("TOKEN=")
+    prepared = _prepare_upload_source(str(source), recursive=False)
+    assert prepared.path == source.resolve()
+
+
+def test_git_credentials_upload_is_blocked(tmp_path: Path) -> None:
+    source = tmp_path / ".git-credentials"
+    source.write_text("https://token@example.test")
+    with pytest.raises(ValueError, match="credential file"):
+        _prepare_upload_source(str(source), recursive=False)
