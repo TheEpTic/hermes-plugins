@@ -207,20 +207,22 @@ class TransferService:
                 f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
                 f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
             )
-            move_flag = "-f"
+            move_command = f"mv -f -- {temporary_arg} {destination_arg} || exit $?; "
+            no_clobber_check = ""
         else:
             precondition = (
                 f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
             )
-            move_flag = "-n"
-        no_clobber_check = (
-            f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then exit 3; fi; "
-            if not can_replace
-            else ""
-        )
+            move_command = f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; "
+            no_clobber_check = (
+                f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
+                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+                "exit $move_status; fi; "
+                "if [ $move_status -ne 0 ]; then exit $move_status; fi; "
+            )
         command = (
-            f"{precondition}mv {move_flag} -- {temporary_arg} {destination_arg} || exit $?; "
-            f"{no_clobber_check}if {expected} && [ ! -L {destination_arg} ] && "
+            f"{precondition}{move_command}{no_clobber_check}"
+            f"if {expected} && [ ! -L {destination_arg} ] && "
             f"[ ! -e {nested_temporary_arg} ] && [ ! -L {nested_temporary_arg} ]; then exit 0; fi; "
             f"if [ -d {destination_arg} ]; then rm -rf -- {nested_temporary_arg}; fi; exit 4"
         )

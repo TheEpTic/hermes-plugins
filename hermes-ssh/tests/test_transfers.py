@@ -241,7 +241,8 @@ def test_upload_refuses_file_created_during_transfer(
         "for destination; do :; done\n"
         '/usr/bin/mkdir -p -- "$(/usr/bin/dirname -- "$destination")"\n'
         '/usr/bin/printf concurrent > "$destination"\n'
-        'exec /usr/bin/mv "$@"\n'
+        '/usr/bin/mv "$@"\n'
+        "exit 1\n"
     )
     fake_mv.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
