@@ -70,3 +70,45 @@ def test_handler_dispatches_transfer() -> None:
     assert result["success"] is True
     execute.assert_called_once()
     assert execute.call_args.kwargs["overwrite"] is True
+
+
+def test_handler_rejects_control_characters_before_approval() -> None:
+    handler = handle_ssh_transfer(cast(Any, StubManager()))
+    with patch("ssh_tools.handlers.transfer.check_approval") as approval:
+        result = json.loads(
+            handler(
+                {
+                    "action": "upload",
+                    "machine": "web1",
+                    "source": "./release\nnext",
+                    "destination": "/srv/release",
+                }
+            )
+        )
+    assert result["success"] is False
+    assert "control characters" in result["error"]
+    approval.assert_not_called()
+
+
+def test_handler_uses_copy_shape_for_sensitive_destination_approval() -> None:
+    handler = handle_ssh_transfer(cast(Any, StubManager()))
+    with (
+        patch(
+            "ssh_tools.handlers.transfer.check_approval",
+            return_value={"approved": False, "message": "approval required"},
+        ) as approval,
+        patch("ssh_tools.handlers.transfer.execute_transfer") as execute,
+    ):
+        result = json.loads(
+            handler(
+                {
+                    "action": "upload",
+                    "machine": "web1",
+                    "source": "./sshd_config",
+                    "destination": "/etc/ssh/sshd_config",
+                }
+            )
+        )
+    assert result == {"success": False, "error": "approval required"}
+    approval.assert_called_once_with("cp -- ./sshd_config /etc/ssh/sshd_config")
+    execute.assert_not_called()
