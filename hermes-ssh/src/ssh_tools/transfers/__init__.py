@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 from typing import TYPE_CHECKING, Any
 
 from .models import TransferAction, TransferRequest, TransferValidationError
 from .policy import normalise_timeout, path_text, prepare_upload_source, remote_path
-from .service import TransferService, shutil
+from .service import TransferService
 from .transport import sftp_args, sftp_batch
 
 if TYPE_CHECKING:
