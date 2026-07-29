@@ -31,6 +31,6 @@ jobs:
       - name: tests
         run: uv run pytest
       - name: formatting
-        run: uv run black --check src tests
+        run: uv run black --diff --check src tests
       - name: types
         run: uv run mypy src
