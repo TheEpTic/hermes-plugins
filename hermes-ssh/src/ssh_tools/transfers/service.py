@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,6 +34,45 @@ if TYPE_CHECKING:
     from ..models import Machine
 
 _AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+
+
+def _move_local_no_replace(temporary: Path, destination: Path) -> None:
+    """Atomically install a staged download without replacing a new destination."""
+    if sys.platform.startswith("linux"):
+        libc = ctypes.CDLL(None, use_errno=True)
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise OSError(errno.ENOTSUP, "renameat2 is unavailable") from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            -100,
+            os.fsencode(temporary),
+            -100,
+            os.fsencode(destination),
+            1,
+        )
+        if result == 0:
+            return
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+    if temporary.is_file():
+        os.link(temporary, destination)
+        temporary.unlink()
+        return
+    raise OSError(
+        errno.ENOTSUP,
+        "atomic no-replace finalisation for directories is unsupported on this platform",
+        destination,
+    )
 
 
 class TransferService:
@@ -154,17 +196,36 @@ class TransferService:
     ) -> dict[str, Any]:
         temporary_arg = remote_shell_path(temporary)
         destination_arg = remote_shell_path(request.destination)
-        if request.overwrite and not is_directory:
-            command = (
+        temporary_name = temporary.rsplit("/", 1)[-1]
+        nested_temporary_arg = remote_shell_path(
+            f"{request.destination.rstrip('/')}/{temporary_name}"
+        )
+        expected = f"[ -d {destination_arg} ]" if is_directory else f"[ -f {destination_arg} ]"
+        can_replace = request.overwrite and not is_directory
+        if can_replace:
+            precondition = (
                 f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
                 f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
-                f"mv -f -- {temporary_arg} {destination_arg}"
             )
+            move_command = f"mv -f -- {temporary_arg} {destination_arg} || exit $?; "
+            no_clobber_check = ""
         else:
-            command = (
+            precondition = (
                 f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
-                f"mv -- {temporary_arg} {destination_arg}"
             )
+            move_command = f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; "
+            no_clobber_check = (
+                f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
+                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+                "exit $move_status; fi; "
+                "if [ $move_status -ne 0 ]; then exit $move_status; fi; "
+            )
+        command = (
+            f"{precondition}{move_command}{no_clobber_check}"
+            f"if {expected} && [ ! -L {destination_arg} ] && "
+            f"[ ! -e {nested_temporary_arg} ] && [ ! -L {nested_temporary_arg} ]; then exit 0; fi; "
+            f"if [ -d {destination_arg} ]; then rm -rf -- {nested_temporary_arg}; fi; exit 4"
+        )
         return self.manager.run_command(
             machine,
             command,
@@ -373,7 +434,21 @@ class TransferService:
                 message,
             )
         try:
-            os.replace(temporary, destination)
+            if request.overwrite:
+                os.replace(temporary, destination)
+            else:
+                _move_local_no_replace(temporary, destination)
+        except FileExistsError:
+            cleanup_local(temporary)
+            return self._audited_error(
+                request,
+                machine.name,
+                source,
+                destination,
+                started,
+                -1,
+                "download destination appeared during transfer; refusing to overwrite it",
+            )
         except OSError as exc:
             cleanup_local(temporary)
             return self._audited_error(
