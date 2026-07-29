@@ -17,13 +17,23 @@ from .models import LocalSource, TransferValidationError
 MAX_TIMEOUT = 3600
 MAX_SCAN_ENTRIES = 100_000
 _GLOB_RE = re.compile(r"[*?\[\]{}]")
-_SENSITIVE_PARTS = frozenset({".ssh", ".gnupg", ".aws", ".kube", ".docker", ".hermes"})
+_SENSITIVE_PARTS = frozenset(
+    {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure", ".hermes"}
+)
 _SENSITIVE_NAMES = frozenset(
     {
         ".netrc",
         ".npmrc",
         ".pypirc",
         ".pgpass",
+        ".git-credentials",
+        ".anthropic_oauth.json",
+        "auth.json",
+        "auth.lock",
+        "webhook_subscriptions.json",
+        "google_oauth.json",
+        "bws_cache.json",
+        "bws_cache.enc.json",
         "credentials",
         "id_rsa",
         "id_dsa",
@@ -86,11 +96,19 @@ def remote_path(value: object, label: str) -> str:
 
 def _is_env_file(name: str) -> bool:
     lowered = name.casefold()
-    return lowered == ".env" or lowered.startswith(".env.")
+    if lowered in {".env.example", ".env.sample", ".env.template"}:
+        return False
+    return lowered == ".env" or lowered == ".envrc" or lowered.startswith(".env.")
 
 
 def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
-    if {part.casefold() for part in parts}.intersection(_SENSITIVE_PARTS):
+    folded = tuple(part.casefold() for part in parts)
+    if set(folded).intersection(_SENSITIVE_PARTS):
+        return "credential directory"
+    for index, part in enumerate(folded[:-1]):
+        if part == ".config" and folded[index + 1] in {"gh", "gcloud"}:
+            return "credential directory"
+    if set(folded).intersection({"mcp-tokens", "pairing"}):
         return "credential directory"
     lowered = name.casefold()
     if lowered in _SENSITIVE_NAMES or _is_env_file(lowered):
@@ -112,6 +130,17 @@ def remote_sensitive_reason(path: str) -> str | None:
     if lowered in _REMOTE_SECRET_PATHS or lowered.startswith("/etc/sudoers.d/"):
         return "system credential file"
     return None
+
+
+def _hermes_read_denied(path: Path) -> bool:
+    try:
+        module = importlib.import_module("agent.file_safety")
+        checker = getattr(module, "get_read_block_error", None)
+        return bool(checker(str(path))) if callable(checker) else False
+    except ImportError:
+        return False
+    except Exception:
+        return True
 
 
 def _hermes_write_denied(path: Path) -> bool:
@@ -153,6 +182,8 @@ def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
     reason = local_sensitive_reason(source)
     if reason:
         raise TransferValidationError(f"upload source is blocked because it is a {reason}")
+    if _hermes_read_denied(source):
+        raise TransferValidationError("upload source is blocked by Hermes read policy")
 
     mode = source.stat().st_mode
     if stat.S_ISREG(mode):
@@ -182,6 +213,10 @@ def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
             if reason:
                 raise TransferValidationError(
                     f"recursive upload contains a blocked {reason}: {relative}"
+                )
+            if _hermes_read_denied(child):
+                raise TransferValidationError(
+                    f"recursive upload contains a Hermes read-protected path: {relative}"
                 )
             if child.is_file():
                 size += child.stat().st_size
