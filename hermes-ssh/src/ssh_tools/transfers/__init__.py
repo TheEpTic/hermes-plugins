@@ -11,7 +11,7 @@ from .policy import (
     prepare_upload_source,
     remote_path,
 )
-from .service import TransferService
+from .service import TransferService, shutil
 from .transport import sftp_args, sftp_batch
 
 if TYPE_CHECKING:
