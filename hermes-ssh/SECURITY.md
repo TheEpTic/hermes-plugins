@@ -2,16 +2,17 @@
 
 ## Scope
 
-hermes-ssh executes commands on remote machines via SSH. This carries inherent risk — the plugin is designed for trusted environments where the operator controls both the local agent and the remote hosts.
+hermes-ssh executes commands and transfers files on remote machines via SSH. This carries inherent risk — the plugin is designed for trusted environments where the operator controls both the local agent and the remote hosts.
 
 ## What hermes-ssh does
 
 - Stores machine credentials (host, user, SSH key path) encrypted at rest in `~/.hermes/ssh-tools/machines.json`
 - Executes arbitrary commands on remote hosts via `ssh`
+- Transfers files through the OpenSSH `sftp` client
 - Runs commands through `bash -c` with `pipefail` enabled
 - Uses `ControlMaster` for connection reuse (5-minute persist)
 - Defaults to `StrictHostKeyChecking=accept-new`
-- Logs every command to `~/.hermes/ssh-tools/command_log.jsonl` with timestamps and exit codes
+- Logs commands and transfer metadata to `~/.hermes/ssh-tools/command_log.jsonl`
 
 ## Security considerations
 
@@ -24,6 +25,9 @@ Machine configs are encrypted at rest with Fernet in `~/.hermes/ssh-tools/machin
 **Command execution**
 The `ssh_terminal` tool runs arbitrary commands on remote hosts. Anyone with access to the Hermes agent can execute commands on registered machines. Ensure your Hermes instance is appropriately access-controlled.
 
+**File transfers**
+The `ssh_transfer` tool can move data between the Hermes host and registered machines. It blocks common local and remote credential paths, symbolic links, special files, wildcard remote paths, and recursive trees containing links. Existing files are not replaced unless `overwrite=true`, and directory merging/replacement is not supported. These controls reduce accidental secret movement but do not make untrusted prompts safe; keep the machine registry and Hermes access boundary tight.
+
 **Output files**
 When command output exceeds the truncation threshold, it is saved under `~/.hermes/ssh-tools/outputs/` with 0o600 permissions (owner-only read/write). These files are automatically cleaned up when the session is closed or killed.
 
@@ -33,6 +37,9 @@ Persistent SSH connections are stored as Unix sockets in `~/.hermes/ssh-tools/so
 ## Hardening applied
 
 - **Machine field validation** — names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`; hosts, users, ports, aliases, tags, and key paths are also validated before persistence. Slashes, spaces, glob characters, and other unsafe characters are rejected where they can affect local paths or SSH argument parsing.
+- **Transfer path validation** — remote paths must be absolute or home-relative, glob/control characters and traversal segments are rejected, and local paths are resolved before policy checks.
+- **Transfer staging** — uploads and downloads use generated temporary paths before final rename; failed transfers clean their temporary paths where possible.
+- **Credential and symlink protection** — common credential directories/files and symlinked transfer trees are rejected before data movement.
 - **Restricted file permissions** — data directory (0o700), audit log (0o600), output files (0o600).
 - **Atomic JSON writes** — writes go through a temp file + `os.replace()` with `fsync` to prevent corruption on crash.
 - **Glob injection prevention** — output file cleanup uses `iterdir()` + prefix matching instead of `Path.glob()` with user-controlled input.
@@ -49,5 +56,5 @@ If you discover a security issue, please open a private security advisory on Git
 3. Consider `StrictHostKeyChecking=yes` for production hosts
 4. Run the Hermes agent as a non-root user where possible
 5. Review `~/.hermes/ssh-tools/machines.json` periodically to remove stale entries
-6. Set `command_timeout` appropriately — very long timeouts can tie up resources
-7. Monitor `~/.hermes/ssh-tools/command_log.jsonl` for unexpected command patterns
+6. Set command and transfer timeouts appropriately — very long timeouts can tie up resources
+7. Monitor `~/.hermes/ssh-tools/command_log.jsonl` for unexpected commands or transfers
