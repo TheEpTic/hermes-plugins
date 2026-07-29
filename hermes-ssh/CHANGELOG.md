@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add `ssh_transfer` for audited uploads and downloads over OpenSSH SFTP, with staged finalisation, no-overwrite defaults, recursive directory support, and credential/symlink protections.
 - Relax the `cryptography` lower bound to support Hermes Agent 0.19.0's pinned 46.0.7 runtime dependency.
 - Spool background stdout and stderr to restricted files so verbose commands cannot deadlock.
 - Keep returned large-output files available after completed sessions are closed.
@@ -53,7 +54,7 @@
 - `_log_command` uses single `os.open` instead of double open TOCTOU
 - `prune_closed` handles sessions with naive (non-timezone) timestamps
 - `_load_machines`/`_load_sessions` validate JSON structure (dict check)
-- Startup cleans orphaned `.tmp` files from data directory
+- Startup cleans orphaned `.tmp` files from previous crashes are cleaned on plugin initialization
 - Background sessions registered in JSON before process reference stored
 - `timeout` parameter coerced to int (string input no longer crashes)
 - Tool schemas updated: poll/read_output descriptions mention session_id
