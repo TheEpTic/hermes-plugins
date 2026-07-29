@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from typing import TYPE_CHECKING, Any
 
 from ..approval import check_approval
@@ -35,6 +36,8 @@ def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             return err("source must be a non-empty string")
         if not isinstance(destination, str) or not destination:
             return err("destination must be a non-empty string")
+        if any(ord(char) < 32 or ord(char) == 127 for char in source + destination):
+            return err("source and destination must not contain control characters")
 
         recursive = params.get("recursive", False)
         preserve = params.get("preserve", False)
@@ -47,7 +50,9 @@ def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             if not isinstance(value, bool):
                 return err(f"{name} must be a boolean, got {type(value).__name__}")
 
-        approval_command = f"sftp {action} {source!r} {machine}:{destination!r}"
+        # Use a synthetic copy command so Hermes's existing sensitive write-target
+        # approval patterns also cover transfer destinations such as /etc.
+        approval_command = f"cp -- {shlex.quote(source)} {shlex.quote(destination)}"
         approval = check_approval(approval_command)
         if approval is not None and not approval.get("approved", True):
             return err(str(approval.get("message", "Transfer blocked by approval system")))
