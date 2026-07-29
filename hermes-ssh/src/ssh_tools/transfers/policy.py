@@ -17,9 +17,7 @@ from .models import LocalSource, TransferValidationError
 MAX_TIMEOUT = 3600
 MAX_SCAN_ENTRIES = 100_000
 _GLOB_RE = re.compile(r"[*?\[\]{}]")
-_SENSITIVE_PARTS = frozenset(
-    {".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure", ".hermes"}
-)
+_SENSITIVE_PARTS = frozenset({".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure", ".hermes"})
 _SENSITIVE_NAMES = frozenset(
     {
         ".netrc",
