@@ -177,7 +177,12 @@ src/ssh_tools/
 ├── models.py            # Machine and Session dataclasses
 ├── schemas.py           # LLM-facing tool schemas
 ├── storage.py           # encrypted machine registry
-├── transfers.py         # SFTP transfer policy and execution
+├── transfers/           # SFTP policy, transport, staging, and audit
+│   ├── __init__.py      # validated transfer entry point
+│   ├── models.py        # transfer request and result models
+│   ├── policy.py        # local and remote path safety
+│   ├── service.py       # transfer orchestration and finalisation
+│   └── transport.py     # OpenSSH SFTP argv and batch construction
 ├── utils.py             # handler response helpers
 ├── py.typed             # PEP 561 marker
 └── handlers/
