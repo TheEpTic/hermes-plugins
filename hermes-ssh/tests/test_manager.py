@@ -808,6 +808,28 @@ def test_poll_session_finished(tmp_path: Path) -> None:
     assert s.status == "closed"
 
 
+def test_poll_session_reports_nonzero_background_exit_as_failure(tmp_path: Path) -> None:
+    """A finished background command must not be reported as successful when it fails."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        background = mgr.run_command("h", "false", background=True)
+
+    fake_proc.poll.return_value = 1
+    fake_proc.returncode = 1
+    fake_proc.stdout.read.return_value = b""
+    fake_proc.stderr.read.return_value = b"command failed\n"
+
+    result = mgr.poll_session(background["session_id"])
+
+    assert result["success"] is False
+    assert result["running"] is False
+    assert result["exit_code"] == 1
+    assert result["stderr"] == "command failed\n"
+
+
 def test_poll_session_nonexistent(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     result = mgr.poll_session("no_such_session")
@@ -816,7 +838,7 @@ def test_poll_session_nonexistent(tmp_path: Path) -> None:
 
 
 def test_read_output_finished(tmp_path: Path) -> None:
-    """read_output returns output from a finished background process."""
+    """read_output preserves output and exit status from a finished background process."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
 
@@ -831,7 +853,7 @@ def test_read_output_finished(tmp_path: Path) -> None:
     fake_proc.stderr.read.return_value = b"err msg"
 
     out = mgr.read_output(sid)
-    assert out["success"] is True
+    assert out["success"] is False
     assert out["stdout"] == "some output"
     assert out["stderr"] == "err msg"
     assert out["exit_code"] == 1

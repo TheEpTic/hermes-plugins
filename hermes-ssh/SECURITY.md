@@ -11,13 +11,13 @@ hermes-ssh executes commands and transfers files on remote machines via SSH. Thi
 - Transfers files through the OpenSSH `sftp` client
 - Runs commands through `bash -c` with `pipefail` enabled
 - Uses `ControlMaster` for connection reuse (5-minute persist)
-- Defaults to `StrictHostKeyChecking=accept-new`
+- Defaults to `StrictHostKeyChecking=yes`
 - Logs commands and transfer metadata to `~/.hermes/ssh-tools/command_log.jsonl`
 
 ## Security considerations
 
-**`StrictHostKeyChecking=accept-new` (default)**
-The plugin accepts first-seen SSH host keys but rejects changed host keys. For high-trust production hosts, set `StrictHostKeyChecking=yes` in your SSH config.
+**`StrictHostKeyChecking=yes` (default)**
+The plugin rejects unverified and changed host keys. Verify the host fingerprint through an independent channel, then add it to the Hermes user's OpenSSH `known_hosts` before registering the machine. `accept-new` is available only as an explicit compatibility override and must not be used for sensitive hosts.
 
 **Credential storage**
 Machine configs are encrypted at rest with Fernet in `~/.hermes/ssh-tools/machines.json`. The data directory is created with 0o700 permissions (owner-only access), and plaintext legacy files are migrated automatically on startup.
@@ -53,7 +53,7 @@ If you discover a security issue, please open a private security advisory on Git
 
 1. Use SSH key authentication (not passwords) for remote hosts
 2. Restrict which machines can be registered via your Hermes access controls
-3. Consider `StrictHostKeyChecking=yes` for production hosts
+3. Keep `StrictHostKeyChecking=yes`; do not accept an unverified first-seen host key for sensitive hosts
 4. Run the Hermes agent as a non-root user where possible
 5. Review `~/.hermes/ssh-tools/machines.json` periodically to remove stale entries
 6. Set command and transfer timeouts appropriately — very long timeouts can tie up resources

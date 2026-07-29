@@ -131,8 +131,7 @@ SSH_MACHINES_SCHEMA = {
             },
             "user": {
                 "type": "string",
-                "description": "SSH username (default: root)",
-                "default": "root",
+                "description": "SSH username (defaults to the current local user when omitted)",
             },
             "port": {
                 "type": "integer",

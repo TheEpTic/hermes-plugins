@@ -806,13 +806,14 @@ class SSHManager:
         stdout, stdout_file = self._collect_background_output(stdout_path, proc.stdout, max_chars)
         stderr, stderr_file = self._collect_background_output(stderr_path, proc.stderr, max_chars)
         self.close_session(session_id, cleanup_output_files=False)
+        exit_code = proc.returncode if proc.returncode is not None else proc.poll()
         response: dict[str, Any] = {
-            "success": True,
+            "success": exit_code == 0,
             "session_id": session_id,
             "running": False,
             "stdout": stdout,
             "stderr": stderr,
-            "exit_code": proc.returncode if proc.returncode is not None else proc.poll(),
+            "exit_code": exit_code,
         }
         if stdout_file:
             response["stdout_file"] = stdout_file

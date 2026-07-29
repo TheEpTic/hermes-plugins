@@ -162,7 +162,7 @@ Settings live in `src/ssh_tools/config.py` as an `SSHConfig` dataclass:
 | `idle_check_interval` | 60s | seconds between idle checks |
 | `idle_timeout_minutes` | 30m | auto-kill after this idle time |
 | `closed_prune_hours` | 24h | remove closed sessions after this |
-| `strict_host_key_checking` | accept-new | SSH host key verification |
+| `strict_host_key_checking` | yes | SSH host key verification |
 
 `ssh_transfer` has a 300-second default timeout and a 3,600-second maximum supplied through its tool schema.
 
@@ -211,7 +211,7 @@ See [SECURITY.md](SECURITY.md) for the full boundary.
 
 Defaults and limitations worth knowing:
 
-- `StrictHostKeyChecking=accept-new` accepts first-seen keys and rejects changed keys. Use `yes` for strict production hosts.
+- `StrictHostKeyChecking=yes` is the default. Add a verified host key to OpenSSH `known_hosts` before registering a machine. `accept-new` remains available only for an explicit compatibility override.
 - Machine credentials are encrypted at rest under `~/.hermes/ssh-tools/`.
 - Audit logs redact common inline command credentials by default. Metadata mode stores hashes and lengths instead of transfer paths.
 - Commands and transfers run with the registered remote user's permissions.

@@ -23,7 +23,7 @@ class SSHConfig:
     default_user: str = field(default_factory=getpass.getuser)
     connect_timeout: int = 5
     command_timeout: int = 30
-    strict_host_key_checking: str = "accept-new"
+    strict_host_key_checking: str = "yes"
 
     # Output
     max_output_chars: int = 50_000  # save to output_dir if exceeded
