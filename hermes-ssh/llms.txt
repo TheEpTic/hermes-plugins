@@ -14,7 +14,7 @@ hermes plugins list --enabled --plain
 
 Run `/reset` or restart Hermes. Do not use the monorepo URL with `hermes plugins install`.
 
-Requirements: Python 3.11+, Hermes Agent, and OpenSSH `ssh`.
+Requirements: Python 3.11+, Hermes Agent, and OpenSSH clients named `ssh` and `sftp`.
 
 ## safe setup
 
@@ -33,6 +33,10 @@ ssh_terminal machine=web1 command="make -j4" background=true
 ssh_terminal poll=<session_id>
 ssh_terminal read_output=<session_id>
 
+ssh_transfer action=upload machine=web1 source="./dist/app.tar.gz" destination="/srv/releases/app.tar.gz"
+ssh_transfer action=download machine=web1 source="/var/log/app.log" destination="./app.log"
+ssh_transfer action=upload machine=web1 source="./public" destination="/srv/app/public" recursive=true
+
 ssh_machines action=list
 ssh_machines action=inspect name=web1
 ssh_machines action=test name=web1
@@ -44,6 +48,8 @@ ssh_sessions action=cleanup
 ssh_sessions action=prune
 ```
 
+Transfers use SFTP over the registered machine connection. They do not overwrite existing files unless `overwrite=true`. Directory transfers require `recursive=true`; recursive directory replacement/merging is intentionally unsupported. Local and remote credential paths, wildcard remote paths, special files, and symbolic links are blocked. Uploads and downloads stage to temporary paths before final rename, and transfer metadata is written to the existing audit log.
+
 Slash command:
 
 ```text
@@ -54,6 +60,6 @@ Slash command:
 /ssh cleanup
 ```
 
-Large outputs are retained under the restricted output directory and returned by path. Background output is spooled to files rather than pipes. Machine records are encrypted at rest. Audit logs redact common inline credentials by default; configuration supports `redacted`, `metadata`, and `off`.
+Large command outputs are retained under the restricted output directory and returned by path. Background output is spooled to files rather than pipes. Machine records are encrypted at rest. Audit logs redact common inline credentials by default; configuration supports `redacted`, `metadata`, and `off`.
 
-Commands run with the remote user's permissions. Use dedicated non-root accounts and least privilege.
+Commands and transfers run with the registered remote user's permissions. Use dedicated non-root accounts and least privilege.
