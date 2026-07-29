@@ -5,19 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .models import TransferAction, TransferRequest, TransferValidationError
-from .policy import (
-    normalise_timeout,
-    path_text,
-    prepare_upload_source,
-    remote_path,
-)
+from .policy import normalise_timeout, path_text, prepare_upload_source, remote_path
 from .service import TransferService, shutil
 from .transport import sftp_args, sftp_batch
 
 if TYPE_CHECKING:
     from ..manager import SSHManager
 
-# Private aliases retained for focused tests and internal callers.
 _prepare_upload_source = prepare_upload_source
 _remote_path = remote_path
 _sftp_args = sftp_args
@@ -55,9 +49,7 @@ def execute_transfer(
         if not isinstance(machine_name, str) or not machine_name:
             raise TransferValidationError("machine must be a non-empty string")
         if not all(isinstance(flag, bool) for flag in (recursive, preserve, overwrite)):
-            raise TransferValidationError(
-                "recursive, preserve, and overwrite must be booleans"
-            )
+            raise TransferValidationError("recursive, preserve, and overwrite must be booleans")
         request = TransferRequest(
             action=action_value,
             machine_name=machine_name,
