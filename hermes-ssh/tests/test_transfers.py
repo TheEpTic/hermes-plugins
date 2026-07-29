@@ -127,7 +127,7 @@ def test_upload_uses_temp_then_remote_rename(tmp_path: Path) -> None:
     assert result["bytes"] == len(b"payload")
     remote_temporary = run_sftp.call_args.args[3]
     assert ".release.tar.gz.hermes-upload-" in remote_temporary
-    assert any("mv --" in command for command in manager.commands)
+    assert any("mv -n --" in command for command in manager.commands)
 
 
 def test_upload_refuses_existing_destination_without_overwrite(tmp_path: Path) -> None:
@@ -210,6 +210,65 @@ def test_upload_refuses_directory_created_during_transfer(
     assert "unsupported type" in result["error"]
     assert destination.is_dir()
     assert not list(destination.glob(".release.tar.gz.hermes-upload-*"))
+
+
+def test_upload_refuses_file_created_during_transfer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class LocalFinaliseManager(StubManager):
+        def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
+            del machine_name, kwargs
+            self.commands.append(command)
+            completed = subprocess.run(
+                ["bash", "-c", command], capture_output=True, text=True, check=False
+            )
+            return {
+                "success": completed.returncode == 0,
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            }
+
+    manager = cast(Any, LocalFinaliseManager(tmp_path))
+    source = tmp_path / "release.tar.gz"
+    source.write_bytes(b"payload")
+    destination = tmp_path / "remote" / "release.tar.gz"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_mv = fake_bin / "mv"
+    fake_mv.write_text(
+        "#!/bin/sh\n"
+        "for destination; do :; done\n"
+        '/usr/bin/mkdir -p -- "$(/usr/bin/dirname -- "$destination")"\n'
+        '/usr/bin/printf concurrent > "$destination"\n'
+        'exec /usr/bin/mv "$@"\n'
+    )
+    fake_mv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, request, local_path
+        temporary = Path(remote_path)
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(b"payload")
+        return subprocess.CompletedProcess(["sftp"], 0, "", "")
+
+    with (
+        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
+        patch.object(TransferService, "_probe", return_value=("missing", None)),
+        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
+    ):
+        result = execute_transfer(
+            manager,
+            action="upload",
+            machine_name="web1",
+            source=str(source),
+            destination=str(destination),
+        )
+
+    assert result["success"] is False
+    assert "appeared during transfer" in result["error"]
+    assert destination.read_bytes() == b"concurrent"
 
 
 def test_download_is_staged_and_atomically_replaced(tmp_path: Path) -> None:

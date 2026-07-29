@@ -201,19 +201,26 @@ class TransferService:
             f"{request.destination.rstrip('/')}/{temporary_name}"
         )
         expected = f"[ -d {destination_arg} ]" if is_directory else f"[ -f {destination_arg} ]"
-        if request.overwrite and not is_directory:
+        can_replace = request.overwrite and not is_directory
+        if can_replace:
             precondition = (
                 f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
                 f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
             )
+            move_flag = "-f"
         else:
             precondition = (
                 f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
             )
+            move_flag = "-n"
+        no_clobber_check = (
+            f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then exit 3; fi; "
+            if not can_replace
+            else ""
+        )
         command = (
-            f"{precondition}mv {'-f ' if request.overwrite and not is_directory else ''}"
-            f"-- {temporary_arg} {destination_arg} || exit $?; "
-            f"if {expected} && [ ! -L {destination_arg} ] && "
+            f"{precondition}mv {move_flag} -- {temporary_arg} {destination_arg} || exit $?; "
+            f"{no_clobber_check}if {expected} && [ ! -L {destination_arg} ] && "
             f"[ ! -e {nested_temporary_arg} ] && [ ! -L {nested_temporary_arg} ]; then exit 0; fi; "
             f"if [ -d {destination_arg} ]; then rm -rf -- {nested_temporary_arg}; fi; exit 4"
         )
