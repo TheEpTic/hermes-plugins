@@ -15,7 +15,7 @@ try:
     __version__ = distribution_version("hermes-sfw")
 except PackageNotFoundError:
     __version__ = "0.0.0+local"
-__all__ = ["register"]
+__all__ = ["get_manager", "register"]
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +43,30 @@ def _guard_direct_dependency_operation(
 
 
 _manager: SFWManager | None = None
+_registered = False
+
+
+def get_manager() -> SFWManager:
+    """Return the shared manager, creating it for dashboard discovery if needed."""
+    global _manager
+    if _manager is None:
+        _manager = SFWManager()
+    return _manager
 
 
 def register(ctx: Any) -> None:
     """Register tools with Hermes."""
-    global _manager
-    if _manager is not None:
+    global _registered
+    if _registered:
         logger.debug("hermes-sfw: already registered, skipping")
         return
-    _manager = SFWManager()
+    manager = get_manager()
 
     ctx.register_tool(
         name="sfw",
         toolset="sfw",
         schema=SFW_TOOL_SCHEMA,
-        handler=handle_sfw(_manager),
+        handler=handle_sfw(manager),
     )
 
     register_hook = getattr(ctx, "register_hook", None)
@@ -69,3 +78,4 @@ def register(ctx: Any) -> None:
         )
 
     logger.info("hermes-sfw loaded")
+    _registered = True

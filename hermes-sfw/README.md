@@ -197,6 +197,24 @@ pytest
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## Hermes Desktop integration
+
+`deploy.sh` installs two symlinks without restarting any service:
+
+- `~/.hermes/plugins/hermes-sfw` for the Python plugin and dashboard API
+- `~/.hermes/desktop-plugins/hermes-sfw` for the native Desktop plugin
+
+The Desktop contribution is disabled by default. Enable **SFW Dependency
+Guard** in Desktop Settings → Plugins to expose the health chip and guarded
+run page. Every operation requires a second confirmation in the UI, then the
+existing dependency-operation allowlist and approval checks run again on the
+backend. A workdir is an explicit input, not an implicit execution context.
+
+The surface calls this a dependency guard, not a sandbox. Accepted package
+manager commands may still run lifecycle scripts and build backends. Responses
+omit the submitted command and local workdir, bound output, and redact common
+secret-shaped values before they cross the dashboard boundary.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

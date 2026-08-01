@@ -1,0 +1,8 @@
+{
+  "name": "hermes-ssh",
+  "label": "SSH Operations",
+  "description": "Shared SSH machine inventory, session state, and explicitly confirmed remote operations.",
+  "icon": "Server",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

@@ -274,6 +274,26 @@ pytest
 
 CI runs those gates on Python 3.11, 3.12, and 3.13.
 
+## Hermes Desktop integration
+
+`deploy.sh` installs two symlinks without restarting any service:
+
+- `~/.hermes/plugins/hermes-ssh` for the Python plugin and dashboard API
+- `~/.hermes/desktop-plugins/hermes-ssh` for the native Desktop plugin
+
+The Desktop contribution is disabled by default. Enable **SSH Operations** in
+Desktop Settings → Plugins, then open its sidebar page or the `ssh` status
+chip. The first slice provides shared machine/session inventory, bounded output
+polling, machine connectivity tests, kill/poll controls, audit metadata, and a
+confirmed terminal form. It deliberately does not expose transfer controls yet.
+
+All dashboard responses are projections: keys, control paths, output-file paths,
+and command text are not returned. The SSH registry remains the shared global
+`~/.hermes/ssh-tools` store used by the backend; the Desktop surface does not
+pretend it is profile-local. The gateway dashboard route is mounted only when
+the Python plugin is enabled at gateway startup; Desktop enable/disable is a
+separate live setting.
+
 ## license
 
 MIT — see [LICENSE](LICENSE).
