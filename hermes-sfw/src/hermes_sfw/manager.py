@@ -208,11 +208,12 @@ def _validate_workdir(workdir: str | None) -> str | None:
             for root in configured_roots.split(os.pathsep)
             if root.strip()
         )
-    try:
-        allowed = any(os.path.commonpath((resolved, root)) == root for root in roots)
-    except ValueError:
-        allowed = False
-    if not allowed:
+    allowed_root: str | None = None
+    for root in roots:
+        if resolved == root or resolved.startswith(root + os.sep):
+            allowed_root = root
+            break
+    if allowed_root is None:
         raise ValueError("Working directory is outside the allowed roots")
 
     resolved_path = Path(resolved)

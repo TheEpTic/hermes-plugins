@@ -291,8 +291,8 @@ def add_machine(payload: MachineRequest) -> dict[str, Any]:
     )
     try:
         stored = get_manager().add_machine(machine)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="machine validation failed") from exc
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="machine validation failed") from None
     return {"machine": _machine_view(stored.name, stored)}
 
 
