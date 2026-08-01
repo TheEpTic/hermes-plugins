@@ -208,20 +208,15 @@ def _validate_workdir(workdir: str | None) -> str | None:
             for root in configured_roots.split(os.pathsep)
             if root.strip()
         )
-    allowed_root: str | None = None
     for root in roots:
         if resolved == root or resolved.startswith(root + os.sep):
-            allowed_root = root
-            break
-    if allowed_root is None:
-        raise ValueError("Working directory is outside the allowed roots")
-
-    resolved_path = Path(resolved)
-    if not resolved_path.exists():
-        raise ValueError(f"Working directory does not exist: {workdir}")
-    if not resolved_path.is_dir():
-        raise ValueError(f"Working directory is not a directory: {workdir}")
-    return resolved
+            resolved_path = Path(resolved)
+            if not resolved_path.exists():
+                raise ValueError(f"Working directory does not exist: {workdir}")
+            if not resolved_path.is_dir():
+                raise ValueError(f"Working directory is not a directory: {workdir}")
+            return resolved
+    raise ValueError("Working directory is outside the allowed roots")
 
 
 def _sanitize_output(text: str, max_len: int = 10_000) -> str:

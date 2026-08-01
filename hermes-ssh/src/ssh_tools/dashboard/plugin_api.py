@@ -205,7 +205,7 @@ def _safe_result(result: dict[str, Any]) -> dict[str, Any]:
         else:
             output[key] = value
     if "error" in result:
-        output["error"] = _redact_text(result["error"])
+        output["error"] = "SSH operation failed"
     return output
 
 
@@ -353,12 +353,15 @@ def audit(limit: int = Query(50, ge=1, le=100)) -> dict[str, Any]:
 def terminal(payload: TerminalRequest) -> dict[str, Any]:
     _require_confirmation(payload)
     _require_approval(payload.command)
-    result = get_manager().run_command(
-        machine_name=payload.machine,
-        command=payload.command,
-        timeout=payload.timeout,
-        new_session=payload.new_session,
-        background=payload.background,
-        max_output_chars=payload.max_output_chars,
-    )
+    try:
+        result = get_manager().run_command(
+            machine_name=payload.machine,
+            command=payload.command,
+            timeout=payload.timeout,
+            new_session=payload.new_session,
+            background=payload.background,
+            max_output_chars=payload.max_output_chars,
+        )
+    except Exception:
+        raise HTTPException(status_code=502, detail="SSH command failed") from None
     return _safe_result(result)
