@@ -9,6 +9,7 @@ description = "Socket Firewall Free wrapper for Hermes — block malicious depen
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
+dependencies = ["fastapi >= 0.115, < 1"]
 authors = [
     { name = "TheEpTic", email = "nexus@eptic.me" },
 ]
@@ -35,12 +36,14 @@ Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-sfw/CHA
 [project.optional-dependencies]
 dev = [
     "black==26.5.1",
+    "httpx2>=2.9,<3",
     "mypy==2.3.0",
     "pytest==9.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hermes_sfw"]
+force-include = { "desktop-plugins/hermes-sfw/plugin.js" = "hermes_sfw/desktop/hermes-sfw/plugin.js" }
 
 [project.entry-points."hermes_agent.plugins"]
 hermes-sfw = "hermes_sfw"

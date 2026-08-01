@@ -566,6 +566,12 @@ class TestWorkdirValidation:
         # Should not fail — ~ resolves to home dir
         assert mock_popen.called
 
+    def test_workdir_outside_allowed_roots_is_rejected(self, manager: SFWManager) -> None:
+        result = manager.run_command("npm install express", workdir="/etc")
+
+        assert result.success is False
+        assert "allowed roots" in result.stderr.lower()
+
 
 # ---------------------------------------------------------------------------
 # Unicode handling

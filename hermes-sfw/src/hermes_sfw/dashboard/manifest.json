@@ -1,0 +1,8 @@
+{
+  "name": "hermes-sfw",
+  "label": "SFW Dependency Guard",
+  "description": "Dependency-guard health and explicitly confirmed package-manager operations.",
+  "icon": "Shield",
+  "version": "0.1.0",
+  "api": "plugin_api.py"
+}

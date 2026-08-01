@@ -114,6 +114,24 @@ sfw action=run command="cargo fetch" workdir="/path/to/project"
 
 See [SECURITY.md](SECURITY.md) before exposing either plugin to untrusted prompts or repositories.
 
+## Hermes Desktop integrations
+
+Both plugins ship opt-in native Desktop surfaces and thin gateway dashboard
+adapters. Run the package-local `deploy.sh` to install the Python plugin and
+the matching `~/.hermes/desktop-plugins/<name>/plugin.js` symlink. The scripts
+never restart Hermes or remove a non-symlink destination.
+
+- **hermes-ssh:** shared machine/session status, bounded session polling, audit
+  metadata, and explicitly confirmed remote operations.
+- **hermes-sfw:** dependency-guard health and explicitly confirmed package
+  operations. It is not a sandbox.
+
+Desktop enable/disable is live, while gateway API mounting and the
+`plugins.enabled` runtime gate are startup/config concerns. The SSH inventory
+is currently global under `~/.hermes/ssh-tools`; the UI labels it as shared.
+Neither surface returns credentials, private keys, control paths, or local
+output-file paths.
+
 ## development
 
 ```bash
