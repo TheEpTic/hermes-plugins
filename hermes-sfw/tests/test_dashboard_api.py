@@ -117,3 +117,11 @@ def test_run_returns_redacted_bounded_result(monkeypatch: Any) -> None:
             "verbose": True,
         }
     ]
+
+
+def test_private_key_blocks_are_redacted_without_regex_backtracking() -> None:
+    value = "before -----BEGIN RSA PRIVATE KEY-----secret-----END RSA PRIVATE KEY----- after"
+
+    redacted = plugin_api._redact_text(value)
+
+    assert redacted == "before [REDACTED PRIVATE KEY] after"

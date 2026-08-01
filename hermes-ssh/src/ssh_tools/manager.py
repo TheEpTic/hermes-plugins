@@ -42,7 +42,7 @@ _SENSITIVE_NAME = (
 _SECRET_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)"""
 _AUDIT_ASSIGNMENT_RE = re.compile(rf"(?i)\b({_SENSITIVE_NAME})(\s*=\s*)({_SECRET_VALUE})")
 _AUDIT_FLAG_RE = re.compile(rf"(?i)(--{_SENSITIVE_NAME}(?:=|\s+))({_SECRET_VALUE})")
-_AUDIT_URL_RE = re.compile(r"(?i)(https?://[^:/\s]+:)([^@\s]+)(@)")
+_AUDIT_URL_RE = re.compile(r"(?i)(https?://[^:/\s@]+:)([^@\s]+)(@)")
 _AUDIT_HEADER_RE = re.compile(
     r"(?i)([\"']?(?:[a-z0-9]+[-_])*(?:authorization|api[-_]?key|token|secret)\s*:\s*)"
     r"(?:(?:bearer|basic)\s+)?([^\"'\s;&|]+)([\"']?)"

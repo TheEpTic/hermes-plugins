@@ -208,3 +208,11 @@ def test_machine_write_requires_confirmation_and_never_echoes_key(monkeypatch: A
     assert body["name"] == "staging"
     assert "key" not in body
     assert "description" not in body
+
+
+def test_private_key_blocks_are_redacted_without_regex_backtracking() -> None:
+    value = "before -----BEGIN RSA PRIVATE KEY-----secret-----END RSA PRIVATE KEY----- after"
+
+    redacted = plugin_api._redact_text(value)
+
+    assert redacted == "before [REDACTED PRIVATE KEY] after"

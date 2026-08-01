@@ -29,7 +29,39 @@ _SECRET_VALUE = re.compile(
     r"(?i)(\b(?:api[_-]?key|authorization|password|passwd|private[_-]?key|secret|token)\b\s*[:=]\s*)([^\s,;]+)"
 )
 _URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)([^/@\s]+)@")
-_PRIVATE_KEY = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----(?s:.*?)-----END [^-]*PRIVATE KEY-----")
+
+
+def _redact_private_key_blocks(text: str) -> str:
+    """Redact PEM private-key blocks with a linear marker scan."""
+    begin_marker = "-----BEGIN "
+    key_marker = " PRIVATE KEY-----"
+    end_marker = "-----END "
+    cursor = 0
+    pieces: list[str] = []
+    while True:
+        start = text.find(begin_marker, cursor)
+        if start < 0:
+            pieces.append(text[cursor:])
+            break
+        header_end = text.find(key_marker, start + len(begin_marker))
+        if header_end < 0:
+            pieces.append(text[cursor:start])
+            pieces.append("[REDACTED PRIVATE KEY]")
+            break
+        end_start = text.find(end_marker, header_end + len(key_marker))
+        if end_start < 0:
+            pieces.append(text[cursor:start])
+            pieces.append("[REDACTED PRIVATE KEY]")
+            break
+        end_end = text.find(key_marker, end_start + len(end_marker))
+        if end_end < 0:
+            pieces.append(text[cursor:start])
+            pieces.append("[REDACTED PRIVATE KEY]")
+            break
+        pieces.append(text[cursor:start])
+        pieces.append("[REDACTED PRIVATE KEY]")
+        cursor = end_end + len(key_marker)
+    return "".join(pieces)
 
 
 class ConfirmedAction(BaseModel):
@@ -63,7 +95,7 @@ class TerminalRequest(ConfirmedAction):
 def _redact_text(value: object, *, limit: int = _MAX_TEXT_CHARS) -> str:
     """Redact common secret-shaped values and cap text crossing the UI boundary."""
     text = str(value or "")
-    text = _PRIVATE_KEY.sub("[REDACTED PRIVATE KEY]", text)
+    text = _redact_private_key_blocks(text)
     text = _URL_USERINFO.sub(r"\1[REDACTED]@", text)
     text = _SECRET_VALUE.sub(r"\1[REDACTED]", text)
     if len(text) > limit:
@@ -260,7 +292,7 @@ def add_machine(payload: MachineRequest) -> dict[str, Any]:
     try:
         stored = get_manager().add_machine(machine)
     except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=_redact_text(exc)) from exc
+        raise HTTPException(status_code=400, detail="machine validation failed") from exc
     return {"machine": _machine_view(stored.name, stored)}
 
 

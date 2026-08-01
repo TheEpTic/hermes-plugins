@@ -209,6 +209,9 @@ Guard** in Desktop Settings → Plugins to expose the health chip and guarded
 run page. Every operation requires a second confirmation in the UI, then the
 existing dependency-operation allowlist and approval checks run again on the
 backend. A workdir is an explicit input, not an implicit execution context.
+Workdirs must resolve under the current directory, the Hermes user's home, or
+the system temporary directory by default. Operators can add an
+`os.pathsep`-separated allowlist with `HERMES_SFW_WORKDIR_ROOTS`.
 
 The surface calls this a dependency guard, not a sandbox. Accepted package
 manager commands may still run lifecycle scripts and build backends. Responses

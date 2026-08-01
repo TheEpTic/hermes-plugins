@@ -10,6 +10,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -193,14 +194,31 @@ def _validate_workdir(workdir: str | None) -> str | None:
     if workdir is None:
         return None
 
+    expanded = os.path.expanduser(workdir)
+    resolved = os.path.realpath(expanded)
+    roots = [
+        os.path.realpath(os.getcwd()),
+        os.path.realpath(os.path.expanduser("~")),
+        os.path.realpath(tempfile.gettempdir()),
+    ]
+    configured_roots = os.getenv("HERMES_SFW_WORKDIR_ROOTS", "")
+    if configured_roots:
+        roots.extend(
+            os.path.realpath(os.path.expanduser(root))
+            for root in configured_roots.split(os.pathsep)
+            if root.strip()
+        )
     try:
-        resolved = str(Path(workdir).expanduser().resolve())
-    except (ValueError, RuntimeError) as exc:
-        raise ValueError(f"Invalid working directory: {workdir}") from exc
+        allowed = any(os.path.commonpath((resolved, root)) == root for root in roots)
+    except ValueError:
+        allowed = False
+    if not allowed:
+        raise ValueError("Working directory is outside the allowed roots")
 
-    if not Path(resolved).exists():
+    resolved_path = Path(resolved)
+    if not resolved_path.exists():
         raise ValueError(f"Working directory does not exist: {workdir}")
-    if not Path(resolved).is_dir():
+    if not resolved_path.is_dir():
         raise ValueError(f"Working directory is not a directory: {workdir}")
     return resolved
 
