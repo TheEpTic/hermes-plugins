@@ -6,7 +6,7 @@
 - Add the `~/.local/share/pnpm/sfw` shim location to binary discovery.
 - Refresh transitive development dependencies (packaging, platformdirs).
 
-## Unreleased
+## [0.2.3] - 2026-07-26
 
 - Block supported dependency operations sent directly through the terminal and route agents to `sfw`.
 - Allow the direct-terminal guard to be disabled with `HERMES_SFW_ENFORCE_DIRECT=off`.
