@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.5] - 2026-08-15
+
+- Add `SFWManager.diagnose()` returning structured health: which binary was found, which layer it lives in (npm shim vs real binary), the resolved target, and exactly why an install is unhealthy (missing binary, broken shim, version query failure).
+- Label version reporting by layer so the npm-package/binary version mismatch is explicit.
+- Make the direct-terminal guard message self-explanatory: exact `sfw action=run` invocation, deferred-tool discovery via tool_search/tool_describe, and the resolved binary path for PATH-independent use.
+- Include invocation guidance (tool, tool shape, binary path, background-shell shape) in the `status` action response.
+- Public-friendly docs parity with hermes-ssh: expanded README (installation, usage, binary discovery, troubleshooting, security framing), CONTRIBUTING, LICENSE, SECURITY cleanup.
+
 ## [0.2.4] - 2026-08-15
 
 - Re-resolve the sfw binary on demand instead of caching the path at manager construction, so installs after registration are detected.

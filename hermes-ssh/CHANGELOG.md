@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2] - 2026-08-15
+
+- Surface actionable remediation when host-key verification fails on first connect (ssh-keyscan seeding or accept-new) without changing the strict verification policy.
+- Remember the working key per host after successful authentication and report which keys were attempted on failure, so agents stop brute-forcing default identities.
+- Warn when `ssh_machines add` registers a host+user that already exists under a different name (non-blocking, with a hint pointing at the existing registration).
+- Document `ssh_transfer` as the audited replacement for raw `scp`/`ssh -i`, and the shared-inventory boundary (`~/.hermes/ssh-tools` global across profiles).
+
 ## [0.4.1] - 2026-08-15
 
 - Refresh development and transitive dependencies (cryptography 50.0.0, librt, packaging, platformdirs).
