@@ -37,9 +37,21 @@ def _guard_direct_dependency_operation(
         "message": (
             "dependency operation blocked by hermes-sfw. "
             "run it with the sfw tool instead: "
-            f"sfw action=run command={command!r}"
+            f"sfw action=run command={command!r}. "
+            "sfw is a deferred tool, so first load it with tool_search('sfw') "
+            "and tool_describe('sfw'), or call the resolved binary path directly "
+            f"({_resolved_sfw_path()}) if sfw is not on PATH in this shell."
         ),
     }
+
+
+def _resolved_sfw_path() -> str:
+    """Return the resolved sfw binary path for PATH-independent invocation."""
+    global _manager
+    if _manager is None:
+        _manager = SFWManager()
+    path = _manager.sfw_path
+    return path if path is not None else "sfw (not installed)"
 
 
 _manager: SFWManager | None = None

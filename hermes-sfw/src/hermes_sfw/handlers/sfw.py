@@ -13,6 +13,28 @@ from ..approval import check_approval
 from ..utils import err, ok, require
 
 
+def _invocation_guidance(binary: str | None) -> dict[str, str | None]:
+    """Describe exactly how to invoke sfw, including from background/pty shells.
+
+    ``sfw`` is a deferred tool (discoverable via tool_search/tool_describe) and
+    may not be on PATH in background/pty shells. The resolved binary path from
+    ``manager.sfw_path`` is PATH-independent and can be called directly.
+    """
+    if binary is None:
+        return {
+            "tool": "sfw",
+            "tool_shape": "sfw action=run command=<package manager command>",
+            "binary_path": None,
+            "bg_shell_shape": None,
+        }
+    return {
+        "tool": "sfw",
+        "tool_shape": "sfw action=run command=<package manager command>",
+        "binary_path": binary,
+        "bg_shell_shape": f"{binary} <package manager command>",
+    }
+
+
 def handle_sfw(manager: SFWManager) -> Callable[..., str]:
     """Return a handler with manager injected via closure."""
 
@@ -26,10 +48,12 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
         if action == "status":
             installed = manager.is_installed()
             version = manager.get_version() if installed else None
+            binary = manager.sfw_path
             return ok(
                 installed=installed,
                 version=version,
-                binary=manager.sfw_path,
+                binary=binary,
+                invocation=_invocation_guidance(binary),
             )
 
         if action == "run":
