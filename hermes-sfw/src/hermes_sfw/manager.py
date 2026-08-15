@@ -75,6 +75,30 @@ _ALLOWED_COMMAND_PREFIXES: dict[str, frozenset[tuple[str, ...]]] = {
 _MAX_COMMAND_LENGTH = 1024
 
 # ---------------------------------------------------------------------------
+# Binary discovery (SFW-2 / SFW-5)
+# ---------------------------------------------------------------------------
+# pnpm-style wrapper shims exec a real JS entry point (a cmd-shim or shell
+# shim). The shim layer must be reported separately from the binary version.
+_IS_NPM_SHIM_RE = re.compile(r"(?:^|/)(?:pnpm|npm-global)/")
+# npm's cmd-shim writes the real target into the shim in two forms:
+#   exec node "$basedir/../global/.../node_modules/sfw/dist/sfw.mjs" "$@"
+#   # cmd-shim-target=/absolute/path/to/sfw.mjs
+# The cmd-shim-target marker is the canonical absolute form and is preferred.
+_CMD_SHIM_TARGET_RE = re.compile(r"cmd-shim-target=(\S+)")
+_SHIM_EXEC_TARGET_RE = re.compile(r'exec\s+(?:\S+\s+)?["\']?([^\s"\']+?\.mjs)["\']?\s+"\$@"')
+
+# Common npm/pnpm shim and binary locations, walked in order. A shim is only
+# usable if its real target resolves; broken shims are skipped and reported.
+_KNOWN_BINARY_CANDIDATES = (
+    ".local/share/pnpm/sfw",
+    ".local/share/pnpm/bin/sfw",
+    ".local/bin/sfw",
+    ".npm-global/bin/sfw",
+    ".cargo/bin/sfw",
+    "/usr/local/bin/sfw",
+)
+
+# ---------------------------------------------------------------------------
 # OSError errno → generic message mapping
 # ---------------------------------------------------------------------------
 
@@ -123,6 +147,53 @@ class SFWResult:
         if self.installed:
             d["installed"] = self.installed
         return d
+
+
+@dataclass(frozen=True)
+class SFWBinaryInfo:
+    """Where the sfw binary was found and which layer it lives in.
+
+    ``binary_kind`` distinguishes npm-installed wrapper shims (``npm-shim``,
+    a tiny launcher that execs a real JS entry point) from genuine binaries,
+    so an npm-package/binary version mismatch is not confusing. ``target`` is
+    the resolved real entry point for shims and None for real binaries.
+    """
+
+    binary: str | None
+    binary_kind: str | None
+    target: str | None
+
+
+@dataclass(frozen=True)
+class SFWDiagnosis:
+    """Structured result of :meth:`SFWManager.diagnose`.
+
+    ``healthy`` is True only when a binary was found and its version query
+    succeeded. ``why`` is a human-readable explanation of exactly what is
+    broken when the install is not healthy. ``checked`` lists every candidate
+    location that was walked during discovery.
+    """
+
+    healthy: bool
+    binary: str | None
+    binary_kind: str | None
+    version: str | None
+    why: str
+    target: str | None = None
+    checked: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "healthy": self.healthy,
+            "binary": self.binary,
+            "binary_kind": self.binary_kind,
+            "version": self.version,
+            "why": self.why,
+            "target": self.target,
+            "checked": self.checked,
+            "errors": self.errors,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +309,56 @@ class SFWManager:
     def __init__(self, config: SFWConfig | None = None) -> None:
         self._config = config or SFWConfig()
 
+    def _classify_binary(self, binary: str) -> SFWBinaryInfo:
+        """Classify a resolved binary path by layer.
+
+        Returns which layer the binary lives in (``npm-shim`` for pnpm/npm
+        wrapper shims, ``binary`` for real executables) and, for shims, the
+        resolved real target entry point.
+        """
+        target = self._resolve_shim_target(binary)
+        if target is not None:
+            return SFWBinaryInfo(binary=binary, binary_kind="npm-shim", target=target)
+        return SFWBinaryInfo(binary=binary, binary_kind="binary", target=None)
+
+    @staticmethod
+    def _resolve_shim_target(binary: str) -> str | None:
+        """Resolve the real target of an npm-style shim, or None if not one.
+
+        Reads the shim script and extracts the real entry point it execs,
+        preferring the canonical ``cmd-shim-target`` marker over the
+        ``exec ... sfw.mjs`` line. Symlinks are resolved first so a link into
+        a pnpm shim (e.g. ``/usr/local/bin/sfw`` -> pnpm shim) is still
+        detected. Returns None for real binaries or shims whose target cannot
+        be determined.
+        """
+        binary_path = Path(binary)
+        try:
+            resolved = str(binary_path.resolve())
+        except (OSError, RuntimeError):
+            resolved = binary
+        if not _IS_NPM_SHIM_RE.search(resolved):
+            return None
+        try:
+            content = binary_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        marker = _CMD_SHIM_TARGET_RE.search(content)
+        if marker is not None:
+            return str(Path(marker.group(1)).expanduser())
+        exec_match = _SHIM_EXEC_TARGET_RE.search(content)
+        if exec_match is None:
+            return None
+        raw = exec_match.group(1)
+        # The exec form is written relative to the shim's own directory and
+        # may reference $basedir (resolved by the shim at runtime).
+        if raw.startswith("$basedir/"):
+            raw = str(binary_path.parent / raw[len("$basedir/") :])
+        target_path = Path(raw)
+        if not target_path.is_absolute():
+            target_path = binary_path.parent / target_path
+        return str(target_path.expanduser())
+
     def _find_sfw(self) -> str | None:
         """Locate the sfw binary.
 
@@ -245,28 +366,31 @@ class SFWManager:
         during manager construction. The plugin manager can outlive changes to
         the process environment, and sfw may be installed after registration.
         """
-        # If config points to a specific binary, use it directly
+        # If config points to a specific binary, use it directly.
         if self._config.sfw_bin != "sfw":
             if Path(self._config.sfw_bin).exists():
                 return self._config.sfw_bin
             return None
 
-        # Default: search PATH and common locations
+        # Default: search PATH and common locations.
         path = shutil.which(self._config.sfw_bin)
         if path:
             return path
-        # Check common locations.
-        for candidate in [
-            Path.home() / ".local" / "share" / "pnpm" / "sfw",
-            Path.home() / ".local" / "share" / "pnpm" / "bin" / "sfw",
-            Path.home() / ".local" / "bin" / "sfw",
-            Path.home() / ".npm-global" / "bin" / "sfw",
-            Path.home() / ".cargo" / "bin" / "sfw",
-            Path("/usr/local/bin/sfw"),
-        ]:
+        # Check common locations. A candidate that exists but is a wrapper
+        # shim whose real target is missing is skipped, like the one that
+        # broke a machine even though ``npm ci`` succeeded.
+        for candidate in self._known_candidates():
             if candidate.exists() and os.access(candidate, os.X_OK):
-                return str(candidate)
+                target = self._resolve_shim_target(str(candidate))
+                if target is None or Path(target).exists():
+                    return str(candidate)
         return None
+
+    def _known_candidates(self) -> list[Path]:
+        """Known shim/binary locations, newest home-aware first."""
+        home = Path.home()
+        candidates = [home / rel for rel in _KNOWN_BINARY_CANDIDATES]
+        return candidates
 
     def is_installed(self) -> bool:
         """Check if sfw is available."""
@@ -278,10 +402,27 @@ class SFWManager:
         return self._find_sfw()
 
     def get_version(self) -> str | None:
-        """Get sfw version string."""
+        """Get the sfw binary version string, or None if unavailable."""
+        version = self.get_version_info()["version"]
+        assert version is None or isinstance(version, str)
+        return version
+
+    def get_version_info(self) -> dict[str, Any]:
+        """Report the binary version together with the layer it came from.
+
+        The npm package version (e.g. 2.0.6) and the binary version (e.g.
+        1.15.0) can differ, so the layer must be explicit: ``binary_kind``
+        says whether the resolved path is an npm/pnpm wrapper shim or a real
+        binary, and ``target`` names the real entry point for shims.
+
+        Returns:
+            Dict with keys ``version``, ``binary``, ``binary_kind`` and
+            ``target`` (all None when sfw is not installed).
+        """
         sfw_path = self.sfw_path
         if not sfw_path:
-            return None
+            return {"version": None, "binary": None, "binary_kind": None, "target": None}
+        info = self._classify_binary(sfw_path)
         try:
             proc = subprocess.run(
                 [sfw_path, "--version"],
@@ -291,9 +432,165 @@ class SFWManager:
             )
             stdout = proc.stdout.decode("utf-8", errors="replace").strip()
             stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-            return stdout or stderr or None
+            version = stdout or stderr or None
         except (subprocess.TimeoutExpired, OSError):
-            return None
+            version = None
+        return {
+            "version": version,
+            "binary": info.binary,
+            "binary_kind": info.binary_kind,
+            "target": info.target,
+        }
+
+    def diagnose(self) -> SFWDiagnosis:
+        """Self-diagnose the sfw install.
+
+        Walks every known shim/cache location, the PATH lookup and the
+        configured ``sfw_bin`` override and reports exactly what is broken:
+        no binary found anywhere, a shim that exists but points at a missing
+        target, or a binary whose version query fails.
+
+        Returns:
+            An :class:`SFWDiagnosis` with ``healthy``, the resolved
+            ``binary``/``binary_kind``/``target``, the queried ``version``, a
+            human-readable ``why``, the list of ``checked`` locations and any
+            discovery ``errors``.
+        """
+        checked: list[str] = []
+        errors: list[str] = []
+
+        # 1. Configured override.
+        if self._config.sfw_bin != "sfw":
+            override = Path(self._config.sfw_bin)
+            checked.append(str(override))
+            if not override.exists():
+                return SFWDiagnosis(
+                    healthy=False,
+                    binary=None,
+                    binary_kind=None,
+                    version=None,
+                    why=(
+                        f"configured sfw_bin override does not exist: {override}. "
+                        "Reinstall with: npm i -g sfw"
+                    ),
+                    checked=checked,
+                    errors=errors,
+                )
+            info = self._classify_binary(str(override))
+            version = self.get_version()
+            if version is None:
+                return SFWDiagnosis(
+                    healthy=False,
+                    binary=str(override),
+                    binary_kind=info.binary_kind,
+                    version=None,
+                    why="the binary exists but its --version query failed",
+                    target=info.target,
+                    checked=checked,
+                    errors=errors,
+                )
+            return SFWDiagnosis(
+                healthy=True,
+                binary=str(override),
+                binary_kind=info.binary_kind,
+                version=version,
+                why="ok",
+                target=info.target,
+                checked=checked,
+                errors=errors,
+            )
+
+        # 2. PATH lookup.
+        path = shutil.which(self._config.sfw_bin)
+        if path:
+            checked.append(path)
+            info = self._classify_binary(path)
+            version = self.get_version()
+            if version is None:
+                return SFWDiagnosis(
+                    healthy=False,
+                    binary=path,
+                    binary_kind=info.binary_kind,
+                    version=None,
+                    why="the binary was found on PATH but its --version query failed",
+                    target=info.target,
+                    checked=checked,
+                    errors=errors,
+                )
+            return SFWDiagnosis(
+                healthy=True,
+                binary=path,
+                binary_kind=info.binary_kind,
+                version=version,
+                why="ok",
+                target=info.target,
+                checked=checked,
+                errors=errors,
+            )
+
+        # 3. Known shim/cache locations.
+        for candidate in self._known_candidates():
+            checked.append(str(candidate))
+            if not candidate.exists():
+                continue
+            if not os.access(candidate, os.X_OK):
+                errors.append(f"{candidate} exists but is not executable")
+                continue
+            target = self._resolve_shim_target(str(candidate))
+            if target is not None and not Path(target).exists():
+                # Shim exists but its real target is missing -> broken.
+                return SFWDiagnosis(
+                    healthy=False,
+                    binary=str(candidate),
+                    binary_kind="npm-shim",
+                    version=None,
+                    why=(
+                        f"shim {candidate} points at missing target {target}. "
+                        "Reinstall with: npm i -g sfw"
+                    ),
+                    target=target,
+                    checked=checked,
+                    errors=errors,
+                )
+            # Candidate found; verify the version query works.
+            info = self._classify_binary(str(candidate))
+            version = self.get_version()
+            if version is None:
+                return SFWDiagnosis(
+                    healthy=False,
+                    binary=str(candidate),
+                    binary_kind=info.binary_kind,
+                    version=None,
+                    why=f"binary {candidate} exists but its --version query failed",
+                    target=info.target,
+                    checked=checked,
+                    errors=errors,
+                )
+            return SFWDiagnosis(
+                healthy=True,
+                binary=str(candidate),
+                binary_kind=info.binary_kind,
+                version=version,
+                why="ok",
+                target=info.target,
+                checked=checked,
+                errors=errors,
+            )
+
+        # 4. Nothing found anywhere.
+        return SFWDiagnosis(
+            healthy=False,
+            binary=None,
+            binary_kind=None,
+            version=None,
+            why=(
+                "sfw binary not found: checked PATH and "
+                + ", ".join(checked)
+                + ". Install with: npm i -g sfw"
+            ),
+            checked=checked,
+            errors=errors,
+        )
 
     def run_command(
         self,
