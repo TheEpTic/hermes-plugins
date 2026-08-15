@@ -80,6 +80,10 @@ ssh_sessions action=read_output session_id=<session_id>
 
 Transfer a regular file or directory between the Hermes host and a registered machine. The tool uses OpenSSH SFTP, reuses the same ControlMaster connection settings as `ssh_terminal`, and records transfer metadata in the existing audit log.
 
+**Use `ssh_transfer` instead of raw `scp` or `ssh -i ...` in the terminal.** It is the audited, policy-checked transfer surface: registered machines, no shell interpolation, staged finalisation, and approval coverage for sensitive destinations. If you reach for `scp` or a raw `sftp` pipeline, stop — `ssh_transfer` covers uploads, downloads, and recursive trees with explicit overwrite semantics.
+
+The LLM-facing tool schema and description live in `src/ssh_tools/schemas.py` as `SSH_TRANSFER_SCHEMA` (registered in `src/ssh_tools/__init__.py`; the handler is `handlers/transfer.py`). Its description: *"Upload or download a file or directory using a registered SSH machine and OpenSSH SFTP. Transfers default to no overwrite. Credential paths and symbolic links are blocked."*
+
 ```text
 # upload a release
 ssh_transfer action=upload machine=web1 source="./dist/app.tar.gz" destination="/srv/releases/app.tar.gz"
@@ -117,6 +121,17 @@ ssh_machines action=inspect name=web1
 ```
 
 Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 characters). Slashes, spaces, and glob characters are rejected.
+
+**Registry guard (check-before-create).** Adding a machine whose `host` and `user` already exist under a *different* name does not fail, but the response carries a non-blocking `warning` plus a `hint` naming the existing registration, so agents reuse it instead of creating throwaway aliases:
+
+```text
+ssh_machines action=add name=web1-staging host=192.168.1.50 user=deploy
+# -> success: true
+#    warning: "host 192.168.1.50 with user deploy already registered as name web1"
+#    hint:    "If you meant to reuse that host, use the existing registration (web1) ..."
+```
+
+Only re-adding the exact same name takes the update path (no warning). Diagnose collisions with `ssh_machines action=list` or `ssh_machines action=inspect name=<existing>`.
 
 ### `ssh_sessions` — session tracking
 
@@ -217,6 +232,15 @@ Defaults and limitations worth knowing:
 - Commands and transfers run with the registered remote user's permissions.
 - Transfer path blocks reduce accidental credential movement but are not a sandbox for untrusted prompts.
 - Use dedicated non-root accounts and expose Hermes only to trusted operators.
+
+### shared inventory
+
+The machine registry is a **shared inventory**: all data lives in `~/.hermes/ssh-tools/` (the `data_dir` in `src/ssh_tools/config.py`) and is **global across Hermes profiles**. A machine registered in one profile is visible to every other profile on the same host, and the desktop UI labels it "shared inventory" for exactly this reason. There is no per-profile scoping today.
+
+Two consequences worth knowing:
+
+- **Names must be unique across profiles.** If two profiles register the same `host`+`user` under different names, the registry guard (see `ssh_machines`) warns on the second add.
+- **The registry is per-machine, not per-user.** It follows the filesystem user that runs Hermes (`~/.hermes/ssh-tools/` expands for that user). The encrypted store's key and 0o700 permissions live alongside the data, so other OS users cannot read it.
 
 ## requirements
 
