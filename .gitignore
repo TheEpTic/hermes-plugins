@@ -38,3 +38,6 @@ Thumbs.db
 # Hermes runtime (if symlinked from install)
 *.log
 node_modules
+
+# Local Hermes session artifacts (never commit)
+.hermes/
