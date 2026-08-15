@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.1] - 2026-08-15
+
+- Refresh development and transitive dependencies (cryptography 50.0.0, librt, packaging, platformdirs).
+
 ## Unreleased
 
 ## [0.4.0] - 2026-07-29

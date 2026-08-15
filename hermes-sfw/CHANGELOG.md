@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4] - 2026-08-15
+
+- Re-resolve the sfw binary on demand instead of caching the path at manager construction, so installs after registration are detected.
+- Add the `~/.local/share/pnpm/sfw` shim location to binary discovery.
+- Refresh transitive development dependencies (packaging, platformdirs).
+
 ## Unreleased
 
 - Block supported dependency operations sent directly through the terminal and route agents to `sfw`.
