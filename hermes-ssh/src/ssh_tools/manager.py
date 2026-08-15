@@ -34,6 +34,14 @@ _HOST_RE = re.compile(r"[A-Za-z0-9_.:-]{1,253}")
 _USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_OUTPUT_RETURN_CHARS = 500_000
 _AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+_HOST_KEY_VERIFICATION_MARKERS = (
+    "host key verification failed",
+    "no hostkey alg",
+    "remote host identification has changed",
+    "host key mismatch",
+)
+# Key files ssh tries on its own when no -i option is given (in order).
+_DEFAULT_IDENTITY_PATHS = ("~/.ssh/id_ed25519", "~/.ssh/id_rsa")
 _SENSITIVE_NAME = (
     r"(?:[a-z0-9]+[_-])*"
     r"(?:password|passwd|token|api[_-]?key|secret|authorization)"
@@ -287,12 +295,19 @@ class SSHManager:
                 timeout=self._config.connect_timeout + 5,
             )
             if result.returncode == 0 and "ok" in result.stdout:
+                self._remember_working_key(machine)
                 return {"success": True, "status": "connected", "host": machine.host}
+            failure = self._machine_response(machine, result.returncode, result.stderr)
             return {
                 "success": False,
                 "status": "unreachable",
                 "host": machine.host,
-                "error": result.stderr.strip() or f"exit code {result.returncode}",
+                "error": (
+                    failure["error"]
+                    if failure is not None and "error" in failure
+                    else result.stderr.strip() or f"exit code {result.returncode}"
+                ),
+                **({} if failure is None else {k: v for k, v in failure.items() if k != "error"}),
             }
         except subprocess.TimeoutExpired:
             return {
@@ -528,6 +543,97 @@ class SSHManager:
         cmd.extend(["bash", "-c", shlex.quote(wrapped)])
         return cmd
 
+    @staticmethod
+    def _is_host_key_failure(stderr: str) -> bool:
+        """True when stderr indicates the host key could not be trusted."""
+        lowered = stderr.lower()
+        return any(marker in lowered for marker in _HOST_KEY_VERIFICATION_MARKERS)
+
+    @staticmethod
+    def _attempted_keys(machine: Machine) -> list[str]:
+        """Keys OpenSSH actually tried for this machine, in attempt order.
+
+        When the machine has an explicit key only that key is attempted
+        (``-i`` is passed). Without one, ssh falls back to its default
+        identities, which are reported so the agent does not brute-force
+        them one by one.
+        """
+        if machine.key:
+            return [machine.key]
+        return list(_DEFAULT_IDENTITY_PATHS)
+
+    def _host_key_remediation(self, machine: Machine) -> str:
+        """Actionable guidance for a failed host key verification.
+
+        Strict verification is the default (config.strict_host_key_checking
+        is "yes"); a new host must be pre-seeded or explicitly accepted
+        before the first connect can succeed. This never changes the
+        verification policy — it only tells the agent how to satisfy it.
+        """
+        return (
+            f"Host key verification failed for {machine.user}@{machine.host}:"
+            f" the host key is not trusted yet. Seed it first, e.g.\n"
+            f"  ssh-keyscan -p {machine.port} {machine.host} >> ~/.ssh/known_hosts\n"
+            f"or accept it interactively once (ssh -o StrictHostKeyChecking=accept-new "
+            f"{machine.user}@{machine.host}) and retry this command."
+        )
+
+    def _remember_working_key(self, machine: Machine) -> None:
+        """Persist the key that just authenticated as this machine's key.
+
+        The machine's existing stored config is updated through the
+        manager's storage accessors; no new state files are introduced.
+        """
+        if machine.key:
+            with self._lock:
+                machines = self._load_machines()
+                if machine.name in machines and machines[machine.name].get("key") != machine.key:
+                    machines[machine.name]["key"] = machine.key
+                    self._save_machines(machines)
+
+    def _machine_response(
+        self,
+        machine: Machine,
+        exit_code: int | None,
+        stderr: str,
+    ) -> dict[str, Any] | None:
+        """Attach SSH-1 remediation / SSH-2 attempted-keys context to a failure.
+
+        Returns a response dict when the failure is connection-level (exit
+        code 255), or None when the remote command itself failed (the raw
+        stderr is the accurate signal then).
+        """
+        if exit_code != 255:
+            return None
+        if self._is_host_key_failure(stderr):
+            return {"error": self._host_key_remediation(machine)}
+        if "permission denied" in stderr.lower():
+            return {"keys_attempted": self._attempted_keys(machine)}
+        return None
+
+    def _finish_response(
+        self,
+        resp: dict[str, Any],
+        machine: Machine,
+        exit_code: int | None,
+        stderr: str,
+        *,
+        success: bool,
+    ) -> dict[str, Any]:
+        """Apply SSH-1/SSH-2 context to a completed (sync or background) command.
+
+        On success the working key is remembered per machine; on failure the
+        response gains remediation or attempted-keys guidance.
+        """
+        if success:
+            self._remember_working_key(machine)
+            resp["key_used"] = machine.key
+            return resp
+        failure = self._machine_response(machine, exit_code, stderr)
+        if failure is not None:
+            resp.update(failure)
+        return resp
+
     def _normalize_timeout(self, timeout: object | None) -> int:
         """Normalize a caller-supplied timeout, falling back to the configured default."""
         if timeout is None:
@@ -687,7 +793,13 @@ class SSHManager:
                 resp["stdout_file"] = stdout_file
             if stderr_file:
                 resp["stderr_file"] = stderr_file
-            return resp
+            return self._finish_response(
+                resp,
+                machine,
+                result.returncode,
+                result.stderr,
+                success=result.returncode == 0,
+            )
 
         except subprocess.TimeoutExpired:
             elapsed = round(time.monotonic() - start_time, 2)
@@ -819,6 +931,16 @@ class SSHManager:
             response["stdout_file"] = stdout_file
         if stderr_file:
             response["stderr_file"] = stderr_file
+        session = self.get_session(session_id)
+        machine = self.get_machine(session.machine) if session is not None else None
+        if machine is not None:
+            return self._finish_response(
+                response,
+                machine,
+                exit_code,
+                stderr,
+                success=exit_code == 0,
+            )
         return response
 
     # ----- Background process helpers -----
