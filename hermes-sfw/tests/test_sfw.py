@@ -488,6 +488,44 @@ class TestFindSfw:
             mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
             assert mgr.is_installed()
 
+    def test_default_search_finds_pnpm_root_shim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pnpm global shim can live directly under the pnpm home."""
+        sfw_bin = tmp_path / ".local" / "share" / "pnpm" / "sfw"
+        sfw_bin.parent.mkdir(parents=True)
+        sfw_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        sfw_bin.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch("hermes_sfw.manager.shutil.which", return_value=None):
+            mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
+            assert mgr.is_installed()
+            assert mgr.sfw_path == str(sfw_bin)
+
+    def test_manager_rechecks_configured_path_after_initial_miss(self, tmp_path: Path) -> None:
+        """All manager operations must see a binary installed after construction."""
+        sfw_bin = tmp_path / "sfw"
+        mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin), timeout=5))
+        assert not mgr.is_installed()
+
+        sfw_bin.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then\n'
+            '  printf "Socket Firewall Free, version 1.15.0\\n"\n'
+            "else\n"
+            '  printf "🟢 installed express\\n"\n'
+            "fi\n",
+            encoding="utf-8",
+        )
+        sfw_bin.chmod(0o755)
+
+        assert mgr.is_installed()
+        assert mgr.get_version() == "Socket Firewall Free, version 1.15.0"
+        result = mgr.run_command("npm install express")
+        assert result.success
+        assert result.installed == ["express"]
+
     def test_default_search_not_found(self) -> None:
         with patch("hermes_sfw.manager.shutil.which", return_value=None):
             with patch("hermes_sfw.manager.Path") as MockPath:

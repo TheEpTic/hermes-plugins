@@ -237,10 +237,14 @@ class SFWManager:
 
     def __init__(self, config: SFWConfig | None = None) -> None:
         self._config = config or SFWConfig()
-        self._sfw_path = self._find_sfw()
 
     def _find_sfw(self) -> str | None:
-        """Locate the sfw binary."""
+        """Locate the sfw binary.
+
+        Discovery is intentionally performed on demand instead of being cached
+        during manager construction. The plugin manager can outlive changes to
+        the process environment, and sfw may be installed after registration.
+        """
         # If config points to a specific binary, use it directly
         if self._config.sfw_bin != "sfw":
             if Path(self._config.sfw_bin).exists():
@@ -253,6 +257,7 @@ class SFWManager:
             return path
         # Check common locations.
         for candidate in [
+            Path.home() / ".local" / "share" / "pnpm" / "sfw",
             Path.home() / ".local" / "share" / "pnpm" / "bin" / "sfw",
             Path.home() / ".local" / "bin" / "sfw",
             Path.home() / ".npm-global" / "bin" / "sfw",
@@ -265,20 +270,21 @@ class SFWManager:
 
     def is_installed(self) -> bool:
         """Check if sfw is available."""
-        return self._sfw_path is not None
+        return self._find_sfw() is not None
 
     @property
     def sfw_path(self) -> str | None:
-        """Return the path to the sfw binary."""
-        return self._sfw_path
+        """Return the current path to the sfw binary."""
+        return self._find_sfw()
 
     def get_version(self) -> str | None:
         """Get sfw version string."""
-        if not self._sfw_path:
+        sfw_path = self.sfw_path
+        if not sfw_path:
             return None
         try:
             proc = subprocess.run(
-                [self._sfw_path, "--version"],
+                [sfw_path, "--version"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=10,
@@ -305,7 +311,8 @@ class SFWManager:
         Returns:
             SFWResult with stdout, stderr, exit_code, and parsed blocked/installed.
         """
-        if not self._sfw_path:
+        sfw_path = self.sfw_path
+        if not sfw_path:
             return SFWResult(
                 success=False,
                 command=command,
@@ -340,7 +347,7 @@ class SFWManager:
                 exit_code=1,
             )
 
-        args = [self._sfw_path]
+        args = [sfw_path]
         if verbose:
             args.append("--verbose")
         args.extend(cmd_parts)
