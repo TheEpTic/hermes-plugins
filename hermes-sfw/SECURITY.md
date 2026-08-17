@@ -19,8 +19,8 @@ The `sfw run` tool executes package manager commands on the host. Anyone with ac
 **Prefix allowlist**
 Only commands starting with allowed prefixes (npm, yarn, pnpm, pip, pip3, uv, cargo) are accepted, and each manager is restricted to dependency operations (install/add/remove/update/ci/sync and the like). Non-package-manager commands are rejected. `npx` and runner-style subcommands are intentionally blocked because they can execute arbitrary package code even when the package is not known-malicious yet. This prevents misuse of the tool for arbitrary command execution, but the allowlist is not a security boundary — package managers themselves can execute arbitrary code (postinstall scripts, etc.).
 
-**Direct terminal guard**
-When Hermes exposes `pre_tool_call` hooks, supported dependency operations sent directly through the Hermes `terminal` tool are blocked and routed to the `sfw` tool. Set `HERMES_SFW_ENFORCE_DIRECT=off` in the Hermes process environment to disable this guard. If the hooks are unavailable, a warning is logged and direct terminal installs are not enforced.
+**Direct terminal enforcement**
+When Hermes exposes `pre_tool_call` hooks, supported dependency operations sent directly through the Hermes `terminal` tool are rewritten to the resolved `sfw` binary before execution. Unsupported package-manager forms, shell prefixes, malformed commands, and manager paths are blocked instead of falling through to raw execution. Set `HERMES_SFW_ENFORCE_DIRECT=off` in the Hermes process environment only when deliberately disabling this enforcement. If the hooks are unavailable, direct terminal dependency enforcement cannot be provided and the runtime should be upgraded before relying on this control.
 
 **Working directory**
 When a `workdir` is specified, it is resolved with `os.path.realpath()` to prevent symlink-based path traversal. The directory must exist and be a directory.

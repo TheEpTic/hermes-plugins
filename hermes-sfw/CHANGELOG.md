@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.6] - 2026-08-17
+
+- Force supported dependency operations sent through Hermes `terminal` to execute via the resolved `sfw` binary using Hermes pre-tool argument rewriting.
+- Block unsupported, shell-prefixed, malformed, and path-qualified package-manager commands instead of allowing raw terminal bypasses.
+- Add regression coverage for transparent routing, quoting, wrapper/path detection, fail-closed binary discovery, and compound commands.
+
 ## [0.2.5] - 2026-08-15
 
 - Add `SFWManager.diagnose()` returning structured health: which binary was found, which layer it lives in (npm shim vs real binary), the resolved target, and exactly why an install is unhealthy (missing binary, broken shim, version query failure).

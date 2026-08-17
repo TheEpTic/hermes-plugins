@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from pathlib import Path
 from typing import Any
 
 import hermes_sfw
+import pytest
 from hermes_sfw import SFW_TOOL_SCHEMA, _guard_direct_dependency_operation
 from hermes_sfw.handlers import handle_sfw
 from hermes_sfw.manager import SFWConfig, SFWManager
@@ -26,41 +28,124 @@ def _call(manager: SFWManager, params: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# SFW-4: block message must be self-explanatory
+# forced terminal routing
 # ---------------------------------------------------------------------------
 
 
-class TestBlockMessageGuidance:
-    """The pre_tool_call block must tell agents exactly how to invoke sfw."""
+class TestForcedTerminalRouting:
+    """Supported package-manager calls must execute through the sfw binary."""
 
-    def test_block_message_contains_exact_tool_invocation(self) -> None:
-        result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
-        assert result is not None
-        message = result["message"]
-        # Exact tool name and invocation shape, with the blocked command.
-        assert "sfw action=run command='npm install express'" in message
-
-    def test_block_message_explains_deferred_tool_discovery(self) -> None:
-        result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
-        assert result is not None
-        message = result["message"].lower()
-        # sfw is a deferred tool: the block message says how to discover it.
-        assert "deferred" in message
-        assert "tool_search" in message
-        assert "tool_describe" in message
-
-    def test_block_message_includes_resolved_binary_path(
-        self, tmp_path: Path, monkeypatch: Any
-    ) -> None:
+    @staticmethod
+    def _manager_for(tmp_path: Path) -> tuple[SFWManager, Path]:
         sfw_bin = tmp_path / "sfw"
         sfw_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         sfw_bin.chmod(0o755)
-        mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin)))
-        monkeypatch.setattr(hermes_sfw, "_manager", mgr)
+        return SFWManager(SFWConfig(sfw_bin=str(sfw_bin))), sfw_bin
+
+    def test_valid_dependency_operation_is_rewritten_to_sfw(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        manager, sfw_bin = self._manager_for(tmp_path)
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
 
         result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
+
+        assert result == {
+            "action": "modify",
+            "args": {
+                "command": shlex.join([str(sfw_bin), "npm", "install", "express"]),
+            },
+        }
+
+    def test_rewritten_command_preserves_quoted_arguments(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        manager, sfw_bin = self._manager_for(tmp_path)
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
+
+        result = _guard_direct_dependency_operation(
+            "terminal", {"command": 'npm install "@scope/package" --save-dev'}
+        )
+
         assert result is not None
+        assert result["action"] == "modify"
+        assert result["args"]["command"] == shlex.join(
+            [str(sfw_bin), "npm", "install", "@scope/package", "--save-dev"]
+        )
+
+    def test_unsupported_package_manager_operation_is_blocked(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        manager, sfw_bin = self._manager_for(tmp_path)
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
+
+        result = _guard_direct_dependency_operation("terminal", {"command": "npm run build"})
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "npm run build" in result["message"]
+        assert "sfw" in result["message"]
         assert str(sfw_bin) in result["message"]
+
+    def test_compound_package_manager_operation_is_blocked(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        manager, _ = self._manager_for(tmp_path)
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
+
+        result = _guard_direct_dependency_operation(
+            "terminal", {"command": "cd project && npm install express"}
+        )
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "sfw" in result["message"]
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sudo npm install express",
+            "env NODE_ENV=test npm install express",
+            "sudo bash -lc 'npm install express'",
+            "bash -c 'npm install express'",
+            "(npm install express)",
+            "cd project\nnpm install express",
+            "/usr/bin/npm install express",
+            'npm install "unterminated',
+        ],
+    )
+    def test_wrapped_path_or_malformed_package_command_is_blocked(
+        self, tmp_path: Path, monkeypatch: Any, command: str
+    ) -> None:
+        manager, _ = self._manager_for(tmp_path)
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
+
+        result = _guard_direct_dependency_operation("terminal", {"command": command})
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "sfw" in result["message"]
+
+    def test_valid_dependency_operation_fails_closed_without_sfw(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        manager = SFWManager(SFWConfig(sfw_bin=str(tmp_path / "missing" / "sfw")))
+        monkeypatch.setattr(hermes_sfw, "_manager", manager)
+
+        result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
+
+        assert result is not None
+        assert result["action"] == "block"
+        assert "unavailable" in result["message"]
+
+    def test_non_package_manager_terminal_command_is_ignored(self) -> None:
+        assert _guard_direct_dependency_operation("terminal", {"command": "git status"}) is None
+
+    def test_other_tools_are_ignored(self) -> None:
+        assert (
+            _guard_direct_dependency_operation("read_file", {"command": "npm install express"})
+            is None
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,16 @@ _ALLOWED_COMMAND_PREFIXES: dict[str, frozenset[tuple[str, ...]]] = {
 _MAX_COMMAND_LENGTH = 1024
 
 # ---------------------------------------------------------------------------
+# Package-manager command detection for the terminal hook
+# ---------------------------------------------------------------------------
+
+_PACKAGE_MANAGER_WRAPPERS = frozenset(
+    {"command", "env", "exec", "nice", "nohup", "sudo", "timeout"}
+)
+_SHELL_WRAPPERS = frozenset({"bash", "dash", "fish", "ksh", "sh", "zsh"})
+_SHELL_COMMAND_BOUNDARIES = frozenset({";", "&&", "||", "|", "&", "(", ")"})
+
+# ---------------------------------------------------------------------------
 # Binary discovery (SFW-2 / SFW-5)
 # ---------------------------------------------------------------------------
 # pnpm-style wrapper shims exec a real JS entry point (a cmd-shim or shell
@@ -253,6 +263,69 @@ def _validate_command(command: str) -> str | None:
 def is_dependency_operation(command: str) -> bool:
     """Return True only for an operation the sfw tool itself would accept."""
     return isinstance(command, str) and _validate_command(command) is None
+
+
+def _shell_command_tokens(command: str) -> list[str]:
+    """Tokenize shell syntax enough to identify nested command segments."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def contains_package_manager_command(command: str) -> bool:
+    """Return True when a shell command segment invokes a supported manager.
+
+    The terminal hook must not let a package-manager call escape through a
+    shell prefix (for example ``cd app && npm install``, ``sudo npm install``,
+    or ``bash -c 'npm install'``). This is deliberately a conservative
+    detector: false positives fail closed, while commands that do not invoke a
+    package manager are left alone.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False
+
+    try:
+        parts = _shell_command_tokens(command)
+    except ValueError:
+        # A malformed command beginning with a known manager still needs to be
+        # stopped before the terminal backend gets a chance to interpret it.
+        return bool(
+            re.search(
+                r"(?<![\w.-])(?:npm|yarn|pnpm|pip3?|uv|cargo)(?=\s|$)",
+                command,
+            )
+        )
+
+    segment_start = True
+    wrapper_mode: str | None = None
+    for token in parts:
+        if token in _SHELL_COMMAND_BOUNDARIES:
+            segment_start = True
+            wrapper_mode = None
+            continue
+
+        name = Path(token).name
+        if segment_start:
+            if name in _ALLOWED_COMMAND_PREFIXES:
+                return True
+            if name in _SHELL_WRAPPERS:
+                wrapper_mode = "shell"
+            elif name in _PACKAGE_MANAGER_WRAPPERS:
+                wrapper_mode = "generic"
+            else:
+                wrapper_mode = None
+            segment_start = False
+            continue
+
+        if wrapper_mode == "generic":
+            if name in _ALLOWED_COMMAND_PREFIXES:
+                return True
+            if name in _SHELL_WRAPPERS:
+                wrapper_mode = "shell"
+        elif wrapper_mode == "shell" and contains_package_manager_command(token):
+            return True
+
+    return False
 
 
 def _validate_workdir(workdir: str | None) -> str | None:

@@ -94,16 +94,18 @@ Non-package-manager commands (like `cat`, `rm`, `curl`) are rejected by the pref
 
 **Output truncation:** Output exceeding 10,000 characters is intentionally truncated with a size note. The discarded suffix is not returned in another field.
 
-### automatic terminal guard
+### automatic terminal enforcement
 
-When enabled, the plugin watches Hermes `terminal` calls. A supported dependency operation such as `npm install`, `uv pip install`, or `cargo fetch` is blocked before raw execution and the agent is directed to use the `sfw` tool instead:
+When enabled, the plugin watches Hermes `terminal` calls. A supported dependency operation such as `npm install`, `uv pip install`, or `cargo fetch` is rewritten before execution to invoke the resolved `sfw` binary:
 
 ```text
-dependency operation blocked by hermes-sfw. run it with the sfw tool instead:
-sfw action=run command='npm install express'
+terminal command: npm install express
+executed command: /home/user/.local/share/pnpm/bin/sfw npm install express
 ```
 
-The guard only intercepts operations the `sfw` tool itself would accept, and it only runs when Hermes exposes `pre_tool_call` hooks (if hooks are unavailable, a warning is logged and direct terminal installs are not enforced). Set `HERMES_SFW_ENFORCE_DIRECT=off` before starting Hermes only when you deliberately want direct terminal dependency operations.
+The model does not need to notice a block or issue a second tool call. Unsupported package-manager forms, shell-prefixed calls (`cd app && npm install`, `sudo npm install`), malformed commands, and manager paths are blocked before raw execution. Non-package-manager terminal commands are unaffected.
+
+The hook only runs when Hermes exposes `pre_tool_call` hooks. Set `HERMES_SFW_ENFORCE_DIRECT=off` before starting Hermes only when you deliberately want to bypass automatic terminal enforcement. The default is on.
 
 ### `sfw status` — check installation
 
@@ -119,13 +121,13 @@ Returns: `installed` (bool), `version` (string), `binary` (path). `version` is t
 
 hermes-sfw is a thin wrapper around the [sfw CLI](https://github.com/SocketDev/sfw-free). It:
 
-1. Validates the command starts with an allowed package manager prefix
+1. Validates commands against the strict package-manager operation grammar
 2. Resolves and validates the working directory (if specified)
 3. Executes the command through `sfw` with timeout protection
 4. Parses stdout/stderr for blocked and installed package indicators
 5. Returns structured JSON with success status, output, and parsed results
 
-Commands are executed as an argument vector — never through a shell — so quoting and special characters cannot reach a shell interpreter. Commands also pass through Hermes's dangerous-command approval system first and fail closed when that system is unavailable.
+The explicit `sfw` tool executes the manager as an argument vector — never through a shell — so quoting and special characters cannot reach a shell interpreter. Automatic terminal enforcement uses Hermes's `modify` hook to build a shell-quoted command for the resolved `sfw` binary, preserving the same manager arguments while preventing the raw package manager from running. Both paths pass through Hermes's dangerous-command approval system and fail closed when that system is unavailable.
 
 ### binary discovery
 
@@ -229,7 +231,7 @@ pnpm-style installs create a wrapper script at the shim path that points at the 
 
 **Command rejected with "not allowed"**
 
-Only the documented dependency operations are allowed. Runner-style commands and unsupported subcommands are intentionally rejected; use the regular Hermes terminal only when you deliberately do not want SFW protection.
+Only the documented dependency operations are allowed. Runner-style commands, unsupported subcommands, shell-prefixed calls, malformed commands, and manager paths are intentionally blocked so they cannot bypass SFW. Use a documented `sfw` operation, or set `HERMES_SFW_ENFORCE_DIRECT=off` only when you deliberately accept raw terminal dependency execution.
 
 **Command timeout**
 
