@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.8] - 2026-08-18
+
+- Refresh the package and lock metadata for the coordinated release after hermes-ssh raised its cryptography floor to `50.0.0`, removing stale pre-50 records from the combined dependency graph.
+
 ## [0.2.7] - 2026-08-18
 
 - Refresh release metadata and the lockfile so GitHub's dependency graph records the patched `pytest 9.1.1` development dependency instead of the stale vulnerable `9.0.2` snapshot (CVE-2025-71176 / GHSA-6w46-j5rx-g56g).
