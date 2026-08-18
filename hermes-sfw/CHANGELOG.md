@@ -2,7 +2,7 @@
 
 ## [0.2.8] - 2026-08-18
 
-- Refresh the package and lock metadata for the coordinated release after hermes-ssh raised its cryptography floor to `50.0.0`, removing stale pre-50 records from the combined dependency graph.
+- Refresh the package and lock metadata for the coordinated release after hermes-ssh pinned cryptography to `50.0.0`, removing stale pre-50 records from the combined dependency graph.
 
 ## [0.2.7] - 2026-08-18
 

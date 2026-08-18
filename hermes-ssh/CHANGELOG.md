@@ -2,7 +2,7 @@
 
 ## [0.4.4] - 2026-08-18
 
-- Raise the cryptography runtime floor to `50.0.0`, matching Hermes Agent 0.20.4 and excluding the vulnerable pre-50 release range reported by GitHub (CVE-2026-69248 and related advisories).
+- Pin cryptography to `50.0.0`, matching Hermes Agent 0.20.4 and excluding the vulnerable pre-50 release range reported by GitHub (CVE-2026-69248 and related advisories).
 
 ## [0.4.3] - 2026-08-18
 

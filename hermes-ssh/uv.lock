@@ -300,7 +300,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = "==26.5.1" },
-    { name = "cryptography", specifier = ">=50.0.0,<51" },
+    { name = "cryptography", specifier = "==50.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = "==2.3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.1.1" },
 ]
