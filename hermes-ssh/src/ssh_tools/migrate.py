@@ -104,10 +104,7 @@ def migrate(data_dir: Path) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        target = Path(sys.argv[1])
-    else:
-        target = DEFAULT_DATA_DIR
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DATA_DIR
 
     print("Migrating hermes-ssh data to encrypted storage")
     print(f"Target dir: {target}\n")

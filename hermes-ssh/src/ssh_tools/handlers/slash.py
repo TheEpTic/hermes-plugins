@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ..manager import SSHManager
+    from ..models import Machine
 
 _HELP = """\
 /ssh — SSH session management
@@ -30,6 +31,83 @@ Background commands:
 """
 
 
+def _handle_test(manager: SSHManager) -> str:
+    machines = manager.list_machines()
+    if not machines:
+        return "No machines registered. Use ssh_machines to add one."
+    lines = ["Testing connectivity:"]
+    for name, machine in machines.items():
+        result = manager.test_machine(name)
+        icon = "✓" if result["success"] else "✗"
+        error = f" — {result.get('error', '')}" if not result["success"] else ""
+        lines.append(f"  {icon} {name} ({machine.host}){error}")
+    return "\n".join(lines)
+
+
+def _handle_cleanup(manager: SSHManager) -> str:
+    result = manager.cleanup_idle()
+    if result["count"] == 0:
+        return "No idle sessions to clean up."
+    lines = [f"Killed {result['count']} idle session(s):"]
+    for item in result["killed"]:
+        lines.append(f"  - {item['session_id']} on {item.get('machine', '?')}")
+    return "\n".join(lines)
+
+
+def _handle_command(manager: SSHManager, name: str, args: list[str]) -> str:
+    background = args[1] == "-bg"
+    command_parts = args[2:] if background else args[1:]
+    command = " ".join(command_parts).strip()
+    if not command:
+        return "Command is required."
+    approval = check_approval(command)
+    if approval is not None and not approval.get("approved", True):
+        return str(approval.get("message", "Command blocked by approval system"))
+    result = manager.run_command(name, command, background=background)
+    if background and result.get("success"):
+        return (
+            f"started: {result.get('session_id')} "
+            f"pid={result.get('pid')} on {result.get('machine', name)}"
+        )
+    parts = []
+    if result.get("stdout"):
+        parts.append(result["stdout"].rstrip())
+    if result.get("stderr"):
+        parts.append(f"stderr: {result['stderr'].rstrip()}")
+    parts.append(f"exit: {result.get('exit_code', '?')} ({result.get('elapsed_secs', '?')}s)")
+    return "\n".join(parts)
+
+
+def _handle_inspect(manager: SSHManager, name: str, target: Machine) -> str:
+    canonical = manager.resolve_name(name)
+    if canonical is None:
+        return f"Machine '{name}' found but resolution failed"
+    lines = [
+        f"Machine: {canonical}",
+        f"  Host: {target.host}",
+        f"  User: {target.user}",
+        f"  Port: {target.port}",
+    ]
+    if target.key:
+        lines.append(f"  Key: {target.key}")
+    if target.aliases:
+        lines.append(f"  Aliases: {', '.join(target.aliases)}")
+    if target.tags:
+        lines.append(f"  Tags: {', '.join(target.tags)}")
+    if target.description:
+        lines.append(f"  Desc: {target.description}")
+
+    active = manager.list_sessions("active")
+    machine_sessions = {key: value for key, value in active.items() if value.machine == canonical}
+    if machine_sessions:
+        lines.append(f"  Active sessions: {len(machine_sessions)}")
+        for sid, session in machine_sessions.items():
+            lines.append(
+                f"    - {sid} (idle: {session.idle_human}, commands: {session.command_count})"
+            )
+    return "\n".join(lines)
+
+
 def create_slash_handler(
     get_manager: Callable[[], SSHManager],
 ) -> Callable[[str], str | None]:
@@ -42,88 +120,19 @@ def create_slash_handler(
     def _handle_slash(raw_args: str) -> str | None:
         manager = get_manager()
         args = raw_args.strip().split()
-
         if not args or args[0] in ("help", "-h", "--help"):
             return _HELP
-
         if args[0] == "test":
-            machines = manager.list_machines()
-            if not machines:
-                return "No machines registered. Use ssh_machines to add one."
-            lines = ["Testing connectivity:"]
-            for name, machine in machines.items():
-                result = manager.test_machine(name)
-                icon = "✓" if result["success"] else "✗"
-                error = f" — {result.get('error', '')}" if not result["success"] else ""
-                lines.append(f"  {icon} {name} ({machine.host}){error}")
-            return "\n".join(lines)
-
+            return _handle_test(manager)
         if args[0] == "cleanup":
-            result = manager.cleanup_idle()
-            if result["count"] == 0:
-                return "No idle sessions to clean up."
-            lines = [f"Killed {result['count']} idle session(s):"]
-            for item in result["killed"]:
-                lines.append(f"  - {item['session_id']} on {item.get('machine', '?')}")
-            return "\n".join(lines)
+            return _handle_cleanup(manager)
 
         name = args[0]
         target = manager.get_machine(name)
         if not target:
             return f"Machine '{name}' not found in registry."
-
-        # Run command if provided.
         if len(args) > 1:
-            background = args[1] == "-bg"
-            command_parts = args[2:] if background else args[1:]
-            command = " ".join(command_parts).strip()
-            if not command:
-                return "Command is required."
-            approval = check_approval(command)
-            if approval is not None and not approval.get("approved", True):
-                return str(approval.get("message", "Command blocked by approval system"))
-            result = manager.run_command(name, command, background=background)
-            if background and result.get("success"):
-                return (
-                    f"started: {result.get('session_id')} "
-                    f"pid={result.get('pid')} on {result.get('machine', name)}"
-                )
-            parts = []
-            if result.get("stdout"):
-                parts.append(result["stdout"].rstrip())
-            if result.get("stderr"):
-                parts.append(f"stderr: {result['stderr'].rstrip()}")
-            parts.append(
-                f"exit: {result.get('exit_code', '?')} ({result.get('elapsed_secs', '?')}s)"
-            )
-            return "\n".join(parts)
-
-        # Inspect machine
-        canonical = manager.resolve_name(name)
-        if canonical is None:
-            return f"Machine '{name}' found but resolution failed"
-        lines = [
-            f"Machine: {canonical}",
-            f"  Host: {target.host}",
-            f"  User: {target.user}",
-            f"  Port: {target.port}",
-        ]
-        if target.key:
-            lines.append(f"  Key: {target.key}")
-        if target.aliases:
-            lines.append(f"  Aliases: {', '.join(target.aliases)}")
-        if target.tags:
-            lines.append(f"  Tags: {', '.join(target.tags)}")
-        if target.description:
-            lines.append(f"  Desc: {target.description}")
-
-        active = manager.list_sessions("active")
-        machine_sessions = {k: v for k, v in active.items() if v.machine == canonical}
-        if machine_sessions:
-            lines.append(f"  Active sessions: {len(machine_sessions)}")
-            for sid, s in machine_sessions.items():
-                lines.append(f"    - {sid} (idle: {s.idle_human}, commands: {s.command_count})")
-
-        return "\n".join(lines)
+            return _handle_command(manager, name, args)
+        return _handle_inspect(manager, name, target)
 
     return _handle_slash

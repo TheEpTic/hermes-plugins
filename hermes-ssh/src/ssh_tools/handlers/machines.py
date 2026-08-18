@@ -38,96 +38,112 @@ def _registry_guard_warning(
     return warning, existing
 
 
+def _handle_list(manager: SSHManager) -> str:
+    machines = manager.list_machines()
+    return ok(
+        machines={
+            name: {
+                "host": machine.host,
+                "user": machine.user,
+                "port": machine.port,
+                "aliases": machine.aliases or [],
+                "tags": machine.tags or [],
+                "description": machine.description,
+            }
+            for name, machine in machines.items()
+        },
+        count=len(machines),
+    )
+
+
+def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
+    error = require(params, "name", "host")
+    if error:
+        return err(error)
+    try:
+        machine = manager.add_machine(
+            Machine(
+                name=params["name"],
+                host=params["host"],
+                user=params.get("user") or manager.config.default_user,
+                port=params.get("port", 22),
+                key=params.get("key", ""),
+                aliases=params.get("aliases", []),
+                tags=params.get("tags", []),
+                description=params.get("description", ""),
+            )
+        )
+    except ValueError as exc:
+        return err(str(exc))
+
+    response: dict[str, Any] = {"machine": machine.to_dict()}
+    guard = _registry_guard_warning(manager, machine.name, machine.host, machine.user)
+    if guard is None:
+        return ok(**response)
+    warning, existing = guard
+    response["warning"] = warning
+    response["hint"] = (
+        "If you meant to reuse that host, use the existing "
+        f"registration ({existing}) instead of a new alias: "
+        "ssh_machines action=inspect name=<existing> or "
+        "ssh_machines action=list"
+    )
+    return ok(**response)
+
+
+def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
+    error = require(params, "name")
+    if error:
+        return err(error)
+    name = params["name"]
+    if not isinstance(name, str):
+        return err("name must be a string")
+    removed = manager.remove_machine(name)
+    return ok(
+        success=removed,
+        message=f"Removed '{name}'" if removed else f"'{name}' not found",
+    )
+
+
+def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
+    error = require(params, "name")
+    if error:
+        return err(error)
+    name = params["name"]
+    if not isinstance(name, str):
+        return err("name must be a string")
+    inspected = manager.get_machine(name)
+    if not inspected:
+        return err(f"Machine '{name}' not found")
+    canonical = manager.resolve_name(name)
+    return ok(name=canonical, machine=inspected.to_dict())
+
+
+def _handle_test(manager: SSHManager, params: dict[str, Any]) -> str:
+    error = require(params, "name")
+    if error:
+        return err(error)
+    name = params["name"]
+    if not isinstance(name, str):
+        return err("name must be a string")
+    return ok(**manager.test_machine(name))
+
+
 def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_machines that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
         action = params.get("action", "list")
-
         if action == "list":
-            machines = manager.list_machines()
-            return ok(
-                machines={
-                    name: {
-                        "host": m.host,
-                        "user": m.user,
-                        "port": m.port,
-                        "aliases": m.aliases or [],
-                        "tags": m.tags or [],
-                        "description": m.description,
-                    }
-                    for name, m in machines.items()
-                },
-                count=len(machines),
-            )
-
+            return _handle_list(manager)
         if action == "add":
-            error = require(params, "name", "host")
-            if error:
-                return err(error)
-            try:
-                machine = manager.add_machine(
-                    Machine(
-                        name=params["name"],
-                        host=params["host"],
-                        user=params.get("user") or manager.config.default_user,
-                        port=params.get("port", 22),
-                        key=params.get("key", ""),
-                        aliases=params.get("aliases", []),
-                        tags=params.get("tags", []),
-                        description=params.get("description", ""),
-                    )
-                )
-            except ValueError as exc:
-                return err(str(exc))
-            response: dict[str, Any] = {"machine": machine.to_dict()}
-            guard = _registry_guard_warning(manager, machine.name, machine.host, machine.user)
-            if guard is not None:
-                warning, existing = guard
-                response["warning"] = warning
-                response["hint"] = (
-                    "If you meant to reuse that host, use the existing "
-                    f"registration ({existing}) instead of a new alias: "
-                    "ssh_machines action=inspect name=<existing> or "
-                    "ssh_machines action=list"
-                )
-            return ok(**response)
-
+            return _handle_add(manager, params)
         if action == "remove":
-            error = require(params, "name")
-            if error:
-                return err(error)
-            name = params["name"]
-            if not isinstance(name, str):
-                return err("name must be a string")
-            removed = manager.remove_machine(name)
-            return ok(
-                success=removed,
-                message=f"Removed '{name}'" if removed else f"'{name}' not found",
-            )
-
+            return _handle_remove(manager, params)
         if action == "inspect":
-            error = require(params, "name")
-            if error:
-                return err(error)
-            name = params["name"]
-            if not isinstance(name, str):
-                return err("name must be a string")
-            inspected = manager.get_machine(name)
-            if not inspected:
-                return err(f"Machine '{name}' not found")
-            canonical = manager.resolve_name(name)
-            return ok(name=canonical, machine=inspected.to_dict())
-
+            return _handle_inspect(manager, params)
         if action == "test":
-            error = require(params, "name")
-            if error:
-                return err(error)
-            name = params["name"]
-            if not isinstance(name, str):
-                return err("name must be a string")
-            return ok(**manager.test_machine(name))
-
+            return _handle_test(manager, params)
         return err(f"Unknown action: {action}")
 
     return _handle

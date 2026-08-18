@@ -41,6 +41,34 @@ def _direct_terminal_block_message(
     )
 
 
+def _rewrite_dependency_operation(command: str) -> dict[str, Any]:
+    sfw_path = _resolved_sfw_path()
+    if sfw_path is None:
+        return {
+            "action": "block",
+            "message": _direct_terminal_block_message(
+                command,
+                sfw_path,
+                "the sfw binary is unavailable",
+            ),
+        }
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:  # defensive: validation already parses it
+        return {
+            "action": "block",
+            "message": _direct_terminal_block_message(
+                command,
+                sfw_path,
+                f"the command could not be parsed: {exc}",
+            ),
+        }
+    return {
+        "action": "modify",
+        "args": {"command": shlex.join([sfw_path, *tokens])},
+    }
+
+
 def _guard_direct_dependency_operation(
     tool_name: str, args: dict[str, Any], **kwargs: Any
 ) -> dict[str, Any] | None:
@@ -61,31 +89,7 @@ def _guard_direct_dependency_operation(
         return None
 
     if is_dependency_operation(command):
-        sfw_path = _resolved_sfw_path()
-        if sfw_path is None:
-            return {
-                "action": "block",
-                "message": _direct_terminal_block_message(
-                    command,
-                    sfw_path,
-                    "the sfw binary is unavailable",
-                ),
-            }
-        try:
-            tokens = shlex.split(command)
-        except ValueError as exc:  # defensive: validation already parses it
-            return {
-                "action": "block",
-                "message": _direct_terminal_block_message(
-                    command,
-                    sfw_path,
-                    f"the command could not be parsed: {exc}",
-                ),
-            }
-        return {
-            "action": "modify",
-            "args": {"command": shlex.join([sfw_path, *tokens])},
-        }
+        return _rewrite_dependency_operation(command)
 
     if contains_package_manager_command(command):
         return {

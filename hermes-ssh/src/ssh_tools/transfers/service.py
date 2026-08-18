@@ -36,33 +36,38 @@ if TYPE_CHECKING:
 _AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
 
 
+def _renameat2_no_replace(temporary: Path, destination: Path) -> None:
+    """Install a staged file atomically on Linux without replacing a target."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, "renameat2 is unavailable") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(temporary),
+        -100,
+        os.fsencode(destination),
+        1,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
 def _move_local_no_replace(temporary: Path, destination: Path) -> None:
     """Atomically install a staged download without replacing a new destination."""
     if sys.platform.startswith("linux"):
-        libc = ctypes.CDLL(None, use_errno=True)
-        try:
-            renameat2 = libc.renameat2
-        except AttributeError as exc:
-            raise OSError(errno.ENOTSUP, "renameat2 is unavailable") from exc
-        renameat2.argtypes = [
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_int,
-            ctypes.c_char_p,
-            ctypes.c_uint,
-        ]
-        renameat2.restype = ctypes.c_int
-        result = renameat2(
-            -100,
-            os.fsencode(temporary),
-            -100,
-            os.fsencode(destination),
-            1,
-        )
-        if result == 0:
-            return
-        error = ctypes.get_errno()
-        raise OSError(error, os.strerror(error), destination)
+        _renameat2_no_replace(temporary, destination)
+        return
 
     if temporary.is_file():
         os.link(temporary, destination)
@@ -187,6 +192,41 @@ class TransferService:
             max_output_chars=1_000,
         )
 
+    def _validate_remote_directory(
+        self,
+        machine: str,
+        source: str,
+        timeout: int,
+        is_directory: bool,
+    ) -> str | None:
+        if not is_directory:
+            return None
+        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
+        if has_unsafe_entry:
+            return (
+                "remote directory contains a symbolic link or credential path; "
+                "refusing recursive download"
+            )
+        if scan_error:
+            return f"Could not safely scan remote directory: {scan_error}"
+        return None
+
+    @staticmethod
+    def _validate_download_destination(
+        destination: Path,
+        is_directory: bool,
+        overwrite: bool,
+    ) -> str | None:
+        if not destination.exists():
+            return None
+        if destination.is_dir() or destination.is_symlink():
+            return "download destination already exists as a directory or symbolic link"
+        if is_directory:
+            return "recursive directory downloads cannot replace an existing destination"
+        if not overwrite:
+            return "download destination already exists; set overwrite=true to replace it"
+        return None
+
     def _finalise_upload(
         self,
         request: TransferRequest,
@@ -232,6 +272,30 @@ class TransferService:
             timeout=min(request.timeout, 60),
             max_output_chars=2_000,
         )
+
+    @staticmethod
+    def _upload_finalise_error(finalise: dict[str, Any], overwrite: bool) -> tuple[int, str]:
+        raw_code = finalise.get("exit_code")
+        code = raw_code if isinstance(raw_code, int) else -1
+        if code == 3 and not overwrite:
+            return code, "remote destination appeared during transfer; refusing to overwrite it"
+        if code == 4:
+            return code, "remote destination changed to an unsupported type during transfer"
+        detail = finalise.get("error") or finalise.get("stderr")
+        return code, str(detail or "remote rename failed")
+
+    def _complete_upload(
+        self,
+        request: TransferRequest,
+        machine: str,
+        source: Path,
+        destination: str,
+        started: float,
+        size: int,
+    ) -> dict[str, Any]:
+        elapsed = round(time.monotonic() - started, 2)
+        self._audit(request, machine, str(source), destination, True, 0, elapsed, size)
+        return self._success(request, machine, str(source), destination, elapsed, size)
 
     def _upload(self, request: TransferRequest, machine: Machine) -> dict[str, Any]:
         try:
@@ -292,45 +356,25 @@ class TransferService:
             temporary,
             local.is_directory,
         )
-        if not finalise.get("success"):
-            self._cleanup_remote(machine.name, temporary, request.timeout)
-            raw_code = finalise.get("exit_code")
-            code = raw_code if isinstance(raw_code, int) else -1
-            if code == 3 and not request.overwrite:
-                message = "remote destination appeared during transfer; refusing to overwrite it"
-            elif code == 4:
-                message = "remote destination changed to an unsupported type during transfer"
-            else:
-                detail = finalise.get("error") or finalise.get("stderr")
-                message = str(detail or "remote rename failed")
-            return self._audited_error(
+        if finalise.get("success"):
+            return self._complete_upload(
                 request,
                 machine.name,
                 local.path,
                 destination,
                 started,
-                code,
-                message,
+                local.size,
             )
-
-        elapsed = round(time.monotonic() - started, 2)
-        self._audit(
+        self._cleanup_remote(machine.name, temporary, request.timeout)
+        code, message = self._upload_finalise_error(finalise, request.overwrite)
+        return self._audited_error(
             request,
             machine.name,
-            str(local.path),
+            local.path,
             destination,
-            True,
-            0,
-            elapsed,
-            local.size,
-        )
-        return self._success(
-            request,
-            machine.name,
-            str(local.path),
-            destination,
-            elapsed,
-            local.size,
+            started,
+            code,
+            message,
         )
 
     def _download(self, request: TransferRequest, machine: Machine) -> dict[str, Any]:
@@ -361,40 +405,22 @@ class TransferService:
                 machine.name,
                 "recursive=true is required to download a directory",
             )
-        if is_directory:
-            has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(
-                machine.name,
-                source,
-                request.timeout,
-            )
-            if has_unsafe_entry:
-                return self._error(
-                    machine.name,
-                    "remote directory contains a symbolic link or credential path; "
-                    "refusing recursive download",
-                )
-            if scan_error:
-                return self._error(
-                    machine.name,
-                    f"Could not safely scan remote directory: {scan_error}",
-                )
+        directory_error = self._validate_remote_directory(
+            machine.name,
+            source,
+            request.timeout,
+            is_directory,
+        )
+        if directory_error:
+            return self._error(machine.name, directory_error)
 
-        if destination.exists():
-            if destination.is_dir() or destination.is_symlink():
-                return self._error(
-                    machine.name,
-                    "download destination already exists as a directory or symbolic link",
-                )
-            if is_directory:
-                return self._error(
-                    machine.name,
-                    "recursive directory downloads cannot replace an existing destination",
-                )
-            if not request.overwrite:
-                return self._error(
-                    machine.name,
-                    "download destination already exists; set overwrite=true to replace it",
-                )
+        destination_error = self._validate_download_destination(
+            destination,
+            is_directory,
+            request.overwrite,
+        )
+        if destination_error:
+            return self._error(machine.name, destination_error)
 
         dirs_created = not destination.parent.exists()
         try:
@@ -540,6 +566,24 @@ class TransferService:
             "transport": "openssh-sftp",
         }
 
+    @staticmethod
+    def _audit_paths(
+        mode: str,
+        request: TransferRequest,
+        source: str,
+        destination: str,
+    ) -> dict[str, str | int]:
+        if mode == "metadata":
+            return {
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "source_length": len(source),
+                "destination_sha256": hashlib.sha256(destination.encode()).hexdigest(),
+                "destination_length": len(destination),
+            }
+        if request.action == "upload":
+            return {"source": TransferService._redact_local(source), "destination": destination}
+        return {"source": source, "destination": TransferService._redact_local(destination)}
+
     def _audit(
         self,
         request: TransferRequest,
@@ -570,22 +614,7 @@ class TransferService:
             "elapsed_secs": elapsed,
             "bytes": size,
         }
-        if mode == "metadata":
-            entry.update(
-                {
-                    "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
-                    "source_length": len(source),
-                    "destination_sha256": hashlib.sha256(destination.encode()).hexdigest(),
-                    "destination_length": len(destination),
-                }
-            )
-        else:
-            if request.action == "upload":
-                entry["source"] = self._redact_local(source)
-                entry["destination"] = destination
-            else:
-                entry["source"] = source
-                entry["destination"] = self._redact_local(destination)
+        entry.update(self._audit_paths(mode, request, source, destination))
 
         try:
             self.manager.config.data_dir.mkdir(parents=True, exist_ok=True)

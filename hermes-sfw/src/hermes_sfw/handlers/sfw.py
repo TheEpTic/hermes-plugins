@@ -35,6 +35,49 @@ def _invocation_guidance(binary: str | None) -> dict[str, str | None]:
     }
 
 
+def _handle_status(manager: SFWManager) -> str:
+    installed = manager.is_installed()
+    version = manager.get_version() if installed else None
+    binary = manager.sfw_path
+    return ok(
+        installed=installed,
+        version=version,
+        binary=binary,
+        invocation=_invocation_guidance(binary),
+    )
+
+
+def _handle_run(manager: SFWManager, params: dict[str, Any]) -> str:
+    error = require(params, "command")
+    if error:
+        return err(error)
+
+    command = params["command"]
+    if not isinstance(command, str):
+        return err(f"command must be a string, got {type(command).__name__}")
+
+    workdir = params.get("workdir")
+    if workdir is not None and not isinstance(workdir, str):
+        return err(f"workdir must be a string, got {type(workdir).__name__}")
+
+    verbose = params.get("verbose", False)
+    if not isinstance(verbose, bool):
+        return err(f"verbose must be a boolean, got {type(verbose).__name__}")
+
+    approval = check_approval(command)
+    if approval is not None and approval.get("approved") is not True:
+        return err(str(approval.get("message", "Command blocked by approval system")))
+
+    result = manager.run_command(command=command, workdir=workdir, verbose=verbose)
+    data = result.to_dict()
+    if result.success:
+        return ok(**data)
+    # failures: return raw JSON so success=False is never overridden
+    import json as _json
+
+    return _json.dumps(data)
+
+
 def handle_sfw(manager: SFWManager) -> Callable[..., str]:
     """Return a handler with manager injected via closure."""
 
@@ -44,55 +87,10 @@ def handle_sfw(manager: SFWManager) -> Callable[..., str]:
             return err(error)
 
         action = params["action"]
-
         if action == "status":
-            installed = manager.is_installed()
-            version = manager.get_version() if installed else None
-            binary = manager.sfw_path
-            return ok(
-                installed=installed,
-                version=version,
-                binary=binary,
-                invocation=_invocation_guidance(binary),
-            )
-
+            return _handle_status(manager)
         if action == "run":
-            error = require(params, "command")
-            if error:
-                return err(error)
-
-            command = params["command"]
-
-            # Type-check: reject non-string command values (LLM hallucination guard)
-            if not isinstance(command, str):
-                return err(f"command must be a string, got {type(command).__name__}")
-
-            workdir = params.get("workdir")
-            if workdir is not None and not isinstance(workdir, str):
-                return err(f"workdir must be a string, got {type(workdir).__name__}")
-
-            verbose = params.get("verbose", False)
-            if not isinstance(verbose, bool):
-                return err(f"verbose must be a boolean, got {type(verbose).__name__}")
-
-            approval = check_approval(command)
-            if approval is not None and approval.get("approved") is not True:
-                return err(str(approval.get("message", "Command blocked by approval system")))
-
-            result = manager.run_command(
-                command=command,
-                workdir=workdir,
-                verbose=verbose,
-            )
-            d = result.to_dict()
-            if result.success:
-                return ok(**d)
-            # failures: return raw JSON so success=False is never overridden
-            import json as _json
-
-            return _json.dumps(d)
-
-        else:
-            return err(f"Unknown action: {action}")
+            return _handle_run(manager, params)
+        return err(f"Unknown action: {action}")
 
     return _handle

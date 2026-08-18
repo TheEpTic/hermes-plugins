@@ -72,6 +72,19 @@ def _redact_command(command: str) -> str:
     return redacted
 
 
+def _session_is_old(sdata: dict[str, Any], now: datetime, hours: int) -> bool:
+    """Return whether a persisted non-active session is older than the limit."""
+    if sdata.get("status") == "active":
+        return False
+    try:
+        started = datetime.fromisoformat(sdata.get("started", ""))
+    except (ValueError, TypeError):
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (now - started).total_seconds() > hours * 3600
+
+
 # ---------------------------------------------------------------------------
 # SSH Manager
 # ---------------------------------------------------------------------------
@@ -415,11 +428,7 @@ class SSHManager:
         with self._process_lock:
             proc = self._processes.pop(session_id, None)
         if proc is None:
-            with self._lock:
-                sessions = self._load_sessions()
-                if session_id in sessions:
-                    sessions[session_id]["status"] = "orphaned"
-                    self._save_sessions(sessions)
+            self._mark_session_orphaned(session_id)
             return {
                 "success": False,
                 "error": "Session is not owned by this Hermes process; refusing to signal persisted PID",
@@ -441,6 +450,15 @@ class SSHManager:
 
         self.close_session(session_id)
         return {"success": True, "pid_killed": killed, "socket_closed": False}
+
+    def _mark_session_orphaned(self, session_id: str) -> None:
+        """Mark a persisted session orphaned when this process does not own it."""
+        with self._lock:
+            sessions = self._load_sessions()
+            if session_id not in sessions:
+                return
+            sessions[session_id]["status"] = "orphaned"
+            self._save_sessions(sessions)
 
     def cleanup_idle(self, max_idle_minutes: int | None = None) -> dict[str, Any]:
         """Kill all sessions idle for more than max_idle_minutes."""
@@ -482,15 +500,8 @@ class SSHManager:
             now = datetime.now(UTC)
             to_remove = []
             for sid, sdata in raw.items():
-                if sdata.get("status") != "active":
-                    try:
-                        started = datetime.fromisoformat(sdata.get("started", ""))
-                        if started.tzinfo is None:
-                            started = started.replace(tzinfo=UTC)
-                        if (now - started).total_seconds() > hours * 3600:
-                            to_remove.append(sid)
-                    except (ValueError, TypeError):
-                        pass
+                if _session_is_old(sdata, now, hours):
+                    to_remove.append(sid)
             for sid in to_remove:
                 del raw[sid]
             if to_remove:
@@ -584,12 +595,16 @@ class SSHManager:
         The machine's existing stored config is updated through the
         manager's storage accessors; no new state files are introduced.
         """
-        if machine.key:
-            with self._lock:
-                machines = self._load_machines()
-                if machine.name in machines and machines[machine.name].get("key") != machine.key:
-                    machines[machine.name]["key"] = machine.key
-                    self._save_machines(machines)
+        if not machine.key:
+            return
+        with self._lock:
+            machines = self._load_machines()
+            if machine.name not in machines:
+                return
+            if machines[machine.name].get("key") == machine.key:
+                return
+            machines[machine.name]["key"] = machine.key
+            self._save_machines(machines)
 
     def _machine_response(
         self,
@@ -748,17 +763,13 @@ class SSHManager:
                     "session_id": session_id,
                 }
             except Exception as e:
-                if stdout_handle is not None:
-                    stdout_handle.close()
-                if stderr_handle is not None:
-                    stderr_handle.close()
-                if proc is not None and proc.poll() is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(proc.pid, signal.SIGKILL)
-                for path in (stdout_path, stderr_path):
-                    if path is not None:
-                        with contextlib.suppress(OSError):
-                            path.unlink()
+                self._cleanup_failed_background_process(
+                    proc,
+                    stdout_handle,
+                    stderr_handle,
+                    stdout_path,
+                    stderr_path,
+                )
                 logger.debug("run_command (bg) failed for %s: %s", canonical, e, exc_info=True)
                 return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
 
@@ -859,6 +870,41 @@ class SSHManager:
         fd = os.open(str(path), flags, 0o600)
         return path, os.fdopen(fd, "wb")
 
+    @staticmethod
+    def _cleanup_failed_background_process(
+        proc: subprocess.Popen[bytes] | None,
+        stdout_handle: BinaryIO | None,
+        stderr_handle: BinaryIO | None,
+        stdout_path: Path | None,
+        stderr_path: Path | None,
+    ) -> None:
+        if stdout_handle is not None:
+            stdout_handle.close()
+        if stderr_handle is not None:
+            stderr_handle.close()
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        for path in (stdout_path, stderr_path):
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+
+    @staticmethod
+    def _read_fallback_output(fallback_stream: Any) -> bytes:
+        """Read a fallback stream, normalising supported values to bytes."""
+        if fallback_stream is None or not hasattr(fallback_stream, "read"):
+            return b""
+        try:
+            fallback = fallback_stream.read()
+        except Exception:
+            return b""
+        if isinstance(fallback, str):
+            return fallback.encode()
+        if isinstance(fallback, bytes):
+            return fallback
+        return b""
+
     def _collect_background_output(
         self, path: Path, fallback_stream: Any, max_chars: int
     ) -> tuple[str, str | None]:
@@ -869,12 +915,7 @@ class SSHManager:
             raw = b""
 
         if not raw and fallback_stream is not None and hasattr(fallback_stream, "read"):
-            with contextlib.suppress(Exception):
-                fallback = fallback_stream.read()
-                if isinstance(fallback, str):
-                    raw = fallback.encode()
-                elif isinstance(fallback, bytes):
-                    raw = fallback
+            raw = self._read_fallback_output(fallback_stream)
 
         text = raw.decode("utf-8", errors="replace")
         if len(text) <= max_chars:

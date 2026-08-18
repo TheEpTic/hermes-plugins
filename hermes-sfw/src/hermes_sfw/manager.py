@@ -272,6 +272,21 @@ def _shell_command_tokens(command: str) -> list[str]:
     return list(lexer)
 
 
+def _segment_start_state(name: str) -> tuple[bool, str | None]:
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, None
+    wrapper_mode = "shell" if name in _SHELL_WRAPPERS else None
+    return False, "generic" if name in _PACKAGE_MANAGER_WRAPPERS else wrapper_mode
+
+
+def _wrapped_command_state(name: str, wrapper_mode: str | None) -> tuple[bool, str | None]:
+    if wrapper_mode != "generic":
+        return wrapper_mode == "shell" and contains_package_manager_command(name), wrapper_mode
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, wrapper_mode
+    return False, "shell" if name in _SHELL_WRAPPERS else wrapper_mode
+
+
 def contains_package_manager_command(command: str) -> bool:
     """Return True when a shell command segment invokes a supported manager.
 
@@ -305,25 +320,16 @@ def contains_package_manager_command(command: str) -> bool:
             continue
 
         name = Path(token).name
-        if segment_start:
-            if name in _ALLOWED_COMMAND_PREFIXES:
-                return True
-            if name in _SHELL_WRAPPERS:
-                wrapper_mode = "shell"
-            elif name in _PACKAGE_MANAGER_WRAPPERS:
-                wrapper_mode = "generic"
-            else:
-                wrapper_mode = None
+        was_segment_start = segment_start
+        if was_segment_start:
+            matched, wrapper_mode = _segment_start_state(name)
             segment_start = False
-            continue
-
-        if wrapper_mode == "generic":
-            if name in _ALLOWED_COMMAND_PREFIXES:
-                return True
-            if name in _SHELL_WRAPPERS:
-                wrapper_mode = "shell"
-        elif wrapper_mode == "shell" and contains_package_manager_command(token):
+        else:
+            matched, wrapper_mode = _wrapped_command_state(name, wrapper_mode)
+        if matched:
             return True
+        if was_segment_start:
+            continue
 
     return False
 
@@ -432,6 +438,20 @@ class SFWManager:
             target_path = binary_path.parent / target_path
         return str(target_path.expanduser())
 
+    def _configured_sfw(self) -> str | None:
+        configured = Path(self._config.sfw_bin)
+        if not configured.exists():
+            return None
+        return self._config.sfw_bin
+
+    def _candidate_sfw(self, candidate: Path) -> str | None:
+        if not candidate.exists() or not os.access(candidate, os.X_OK):
+            return None
+        target = self._resolve_shim_target(str(candidate))
+        if target is not None and not Path(target).exists():
+            return None
+        return str(candidate)
+
     def _find_sfw(self) -> str | None:
         """Locate the sfw binary.
 
@@ -441,9 +461,7 @@ class SFWManager:
         """
         # If config points to a specific binary, use it directly.
         if self._config.sfw_bin != "sfw":
-            if Path(self._config.sfw_bin).exists():
-                return self._config.sfw_bin
-            return None
+            return self._configured_sfw()
 
         # Default: search PATH and common locations.
         path = shutil.which(self._config.sfw_bin)
@@ -453,10 +471,9 @@ class SFWManager:
         # shim whose real target is missing is skipped, like the one that
         # broke a machine even though ``npm ci`` succeeded.
         for candidate in self._known_candidates():
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                target = self._resolve_shim_target(str(candidate))
-                if target is None or Path(target).exists():
-                    return str(candidate)
+            path = self._candidate_sfw(candidate)
+            if path is not None:
+                return path
         return None
 
     def _known_candidates(self) -> list[Path]:
@@ -515,6 +532,114 @@ class SFWManager:
             "target": info.target,
         }
 
+    def _diagnose_binary(
+        self,
+        binary: str,
+        failure_reason: str,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis:
+        info = self._classify_binary(binary)
+        version = self.get_version()
+        if version is None:
+            return SFWDiagnosis(
+                healthy=False,
+                binary=binary,
+                binary_kind=info.binary_kind,
+                version=None,
+                why=failure_reason,
+                target=info.target,
+                checked=checked,
+                errors=errors,
+            )
+        return SFWDiagnosis(
+            healthy=True,
+            binary=binary,
+            binary_kind=info.binary_kind,
+            version=version,
+            why="ok",
+            target=info.target,
+            checked=checked,
+            errors=errors,
+        )
+
+    def _diagnose_override(
+        self,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis:
+        override = Path(self._config.sfw_bin)
+        checked.append(str(override))
+        if not override.exists():
+            return SFWDiagnosis(
+                healthy=False,
+                binary=None,
+                binary_kind=None,
+                version=None,
+                why=(
+                    f"configured sfw_bin override does not exist: {override}. "
+                    "Reinstall with: npm i -g sfw"
+                ),
+                checked=checked,
+                errors=errors,
+            )
+        return self._diagnose_binary(
+            str(override),
+            "the binary exists but its --version query failed",
+            checked,
+            errors,
+        )
+
+    def _diagnose_path(
+        self,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis | None:
+        path = shutil.which(self._config.sfw_bin)
+        if not path:
+            return None
+        checked.append(path)
+        return self._diagnose_binary(
+            path,
+            "the binary was found on PATH but its --version query failed",
+            checked,
+            errors,
+        )
+
+    def _diagnose_candidate(
+        self,
+        candidate: Path,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis | None:
+        checked.append(str(candidate))
+        if not candidate.exists():
+            return None
+        if not os.access(candidate, os.X_OK):
+            errors.append(f"{candidate} exists but is not executable")
+            return None
+        target = self._resolve_shim_target(str(candidate))
+        if target is not None and not Path(target).exists():
+            return SFWDiagnosis(
+                healthy=False,
+                binary=str(candidate),
+                binary_kind="npm-shim",
+                version=None,
+                why=(
+                    f"shim {candidate} points at missing target {target}. "
+                    "Reinstall with: npm i -g sfw"
+                ),
+                target=target,
+                checked=checked,
+                errors=errors,
+            )
+        return self._diagnose_binary(
+            str(candidate),
+            f"binary {candidate} exists but its --version query failed",
+            checked,
+            errors,
+        )
+
     def diagnose(self) -> SFWDiagnosis:
         """Self-diagnose the sfw install.
 
@@ -531,126 +656,18 @@ class SFWManager:
         """
         checked: list[str] = []
         errors: list[str] = []
-
-        # 1. Configured override.
         if self._config.sfw_bin != "sfw":
-            override = Path(self._config.sfw_bin)
-            checked.append(str(override))
-            if not override.exists():
-                return SFWDiagnosis(
-                    healthy=False,
-                    binary=None,
-                    binary_kind=None,
-                    version=None,
-                    why=(
-                        f"configured sfw_bin override does not exist: {override}. "
-                        "Reinstall with: npm i -g sfw"
-                    ),
-                    checked=checked,
-                    errors=errors,
-                )
-            info = self._classify_binary(str(override))
-            version = self.get_version()
-            if version is None:
-                return SFWDiagnosis(
-                    healthy=False,
-                    binary=str(override),
-                    binary_kind=info.binary_kind,
-                    version=None,
-                    why="the binary exists but its --version query failed",
-                    target=info.target,
-                    checked=checked,
-                    errors=errors,
-                )
-            return SFWDiagnosis(
-                healthy=True,
-                binary=str(override),
-                binary_kind=info.binary_kind,
-                version=version,
-                why="ok",
-                target=info.target,
-                checked=checked,
-                errors=errors,
-            )
+            return self._diagnose_override(checked, errors)
 
-        # 2. PATH lookup.
-        path = shutil.which(self._config.sfw_bin)
-        if path:
-            checked.append(path)
-            info = self._classify_binary(path)
-            version = self.get_version()
-            if version is None:
-                return SFWDiagnosis(
-                    healthy=False,
-                    binary=path,
-                    binary_kind=info.binary_kind,
-                    version=None,
-                    why="the binary was found on PATH but its --version query failed",
-                    target=info.target,
-                    checked=checked,
-                    errors=errors,
-                )
-            return SFWDiagnosis(
-                healthy=True,
-                binary=path,
-                binary_kind=info.binary_kind,
-                version=version,
-                why="ok",
-                target=info.target,
-                checked=checked,
-                errors=errors,
-            )
+        path_diagnosis = self._diagnose_path(checked, errors)
+        if path_diagnosis is not None:
+            return path_diagnosis
 
-        # 3. Known shim/cache locations.
         for candidate in self._known_candidates():
-            checked.append(str(candidate))
-            if not candidate.exists():
-                continue
-            if not os.access(candidate, os.X_OK):
-                errors.append(f"{candidate} exists but is not executable")
-                continue
-            target = self._resolve_shim_target(str(candidate))
-            if target is not None and not Path(target).exists():
-                # Shim exists but its real target is missing -> broken.
-                return SFWDiagnosis(
-                    healthy=False,
-                    binary=str(candidate),
-                    binary_kind="npm-shim",
-                    version=None,
-                    why=(
-                        f"shim {candidate} points at missing target {target}. "
-                        "Reinstall with: npm i -g sfw"
-                    ),
-                    target=target,
-                    checked=checked,
-                    errors=errors,
-                )
-            # Candidate found; verify the version query works.
-            info = self._classify_binary(str(candidate))
-            version = self.get_version()
-            if version is None:
-                return SFWDiagnosis(
-                    healthy=False,
-                    binary=str(candidate),
-                    binary_kind=info.binary_kind,
-                    version=None,
-                    why=f"binary {candidate} exists but its --version query failed",
-                    target=info.target,
-                    checked=checked,
-                    errors=errors,
-                )
-            return SFWDiagnosis(
-                healthy=True,
-                binary=str(candidate),
-                binary_kind=info.binary_kind,
-                version=version,
-                why="ok",
-                target=info.target,
-                checked=checked,
-                errors=errors,
-            )
+            candidate_diagnosis = self._diagnose_candidate(candidate, checked, errors)
+            if candidate_diagnosis is not None:
+                return candidate_diagnosis
 
-        # 4. Nothing found anywhere.
         return SFWDiagnosis(
             healthy=False,
             binary=None,
@@ -811,17 +828,19 @@ class SFWManager:
             # Find the keyword token, then take the first non-keyword token after it
             for i, part in enumerate(parts):
                 token = part.lower().strip(",:;")
-                if token in _ALL_KEYWORDS and i + 1 < len(parts):
-                    # Walk past any additional keyword tokens (e.g. 🔴 blocked)
-                    j = i + 1
-                    while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
-                        j += 1
-                    if j < len(parts):
-                        if token in _BLOCKED_KEYWORDS:
-                            blocked.append(parts[j])
-                        else:
-                            installed.append(parts[j])
+                if token not in _ALL_KEYWORDS or i + 1 >= len(parts):
+                    continue
+                # Walk past any additional keyword tokens (e.g. 🔴 blocked)
+                j = i + 1
+                while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
+                    j += 1
+                if j >= len(parts):
                     break
+                if token in _BLOCKED_KEYWORDS:
+                    blocked.append(parts[j])
+                else:
+                    installed.append(parts[j])
+                break
 
         # Deduplicate results while preserving order, then cap list size
         blocked = _truncate_list(list(dict.fromkeys(blocked)))
