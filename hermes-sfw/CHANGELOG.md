@@ -1,10 +1,11 @@
 # Changelog
 
-## [0.2.6] - 2026-08-17
+## [0.2.6] - 2026-08-18
 
 - Force supported dependency operations sent through Hermes `terminal` to execute via the resolved `sfw` binary using Hermes pre-tool argument rewriting.
 - Block unsupported, shell-prefixed, malformed, and path-qualified package-manager commands instead of allowing raw terminal bypasses.
 - Add regression coverage for transparent routing, quoting, wrapper/path detection, fail-closed binary discovery, and compound commands.
+- Document deferred `sfw` invocation and resolved-binary guidance for foreground and background shells.
 
 ## [0.2.5] - 2026-08-15
 
