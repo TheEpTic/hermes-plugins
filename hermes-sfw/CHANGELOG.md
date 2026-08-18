@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.7] - 2026-08-18
+
+- Refresh release metadata and the lockfile so GitHub's dependency graph records the patched `pytest 9.1.1` development dependency instead of the stale vulnerable `9.0.2` snapshot (CVE-2025-71176 / GHSA-6w46-j5rx-g56g).
+- Flatten nested conditionals across command parsing, dependency-operation handling, and plugin registration, with AST regression coverage.
+
 ## [0.2.6] - 2026-08-18
 
 - Force supported dependency operations sent through Hermes `terminal` to execute via the resolved `sfw` binary using Hermes pre-tool argument rewriting.

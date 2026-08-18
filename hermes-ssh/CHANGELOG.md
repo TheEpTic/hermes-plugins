@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.3] - 2026-08-18
+
+- Refresh release metadata and the lockfile so GitHub's dependency graph records the patched `pytest 9.1.1` development dependency instead of the stale vulnerable `9.0.2` snapshot (CVE-2025-71176 / GHSA-6w46-j5rx-g56g).
+- Flatten nested conditionals across SSH handlers, session and transfer lifecycle code, and migration paths, with AST regression coverage.
+
 ## [0.4.2] - 2026-08-15
 
 - Surface actionable remediation when host-key verification fails on first connect (ssh-keyscan seeding or accept-new) without changing the strict verification policy.
