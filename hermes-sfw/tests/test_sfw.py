@@ -625,19 +625,40 @@ class TestUnicodeHandling:
         assert isinstance(result.stdout, str)
 
 
-def test_direct_dependency_guard_blocks_terminal_installs() -> None:
+def test_direct_dependency_guard_rewrites_terminal_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hermes_sfw
     from hermes_sfw import _guard_direct_dependency_operation
 
+    sfw_bin = tmp_path / "sfw"
+    sfw_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    sfw_bin.chmod(0o755)
+    monkeypatch.setattr(
+        hermes_sfw,
+        "_manager",
+        SFWManager(SFWConfig(sfw_bin=str(sfw_bin))),
+    )
+
     result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
+    assert result is not None
+    assert result["action"] == "modify"
+    assert result["args"]["command"].endswith(" npm install express")
+    assert str(sfw_bin) in result["args"]["command"]
+
+
+def test_direct_dependency_guard_blocks_unsupported_package_commands() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    result = _guard_direct_dependency_operation("terminal", {"command": "npm run build"})
     assert result is not None
     assert result["action"] == "block"
     assert "sfw" in result["message"]
 
 
-def test_direct_dependency_guard_ignores_non_dependency_commands() -> None:
+def test_direct_dependency_guard_ignores_non_package_commands() -> None:
     from hermes_sfw import _guard_direct_dependency_operation
 
-    assert _guard_direct_dependency_operation("terminal", {"command": "npm run build"}) is None
     assert _guard_direct_dependency_operation("terminal", {"command": "git status"}) is None
     assert _guard_direct_dependency_operation("read_file", {"command": "npm install x"}) is None
 

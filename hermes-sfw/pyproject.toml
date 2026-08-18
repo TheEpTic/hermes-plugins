@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-sfw"
-version = "0.2.5"
+version = "0.2.6"
 description = "Socket Firewall Free wrapper for Hermes — block malicious dependencies during install"
 readme = "README.md"
 requires-python = ">=3.11"

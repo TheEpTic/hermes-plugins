@@ -37,7 +37,7 @@ Accepted ecosystems:
 
 `npx`, `rustup`, runner subcommands, arbitrary shell commands, and hidden runner forms are rejected.
 
-The plugin's pre-tool hook blocks accepted dependency operations sent directly through Hermes `terminal` and tells the agent to use `sfw`. Set `HERMES_SFW_ENFORCE_DIRECT=off` only when the user explicitly wants direct terminal installs.
+The plugin's pre-tool hook transparently rewrites supported dependency operations sent through Hermes `terminal` to the resolved `sfw` binary. Unsupported package-manager forms, shell-prefixed commands, malformed commands, and manager paths are blocked before raw execution. Set `HERMES_SFW_ENFORCE_DIRECT=off` only when explicitly accepting direct terminal dependency execution.
 
 Output beyond 10,000 characters is discarded after a truncation notice. Commands time out after 300 seconds by default.
 
