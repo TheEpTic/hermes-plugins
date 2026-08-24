@@ -236,13 +236,6 @@ def test_sessions_cleanup(tmp_path: Path) -> None:
     assert result["cleaned"] == 0
 
 
-def test_sessions_prune(tmp_path: Path) -> None:
-    handler = handle_ssh_sessions(_make_manager(tmp_path))
-    result = json.loads(handler({"action": "prune"}))
-    assert result["success"] is True
-    assert result["pruned"] == 0
-
-
 def test_sessions_unknown_action(tmp_path: Path) -> None:
     handler = handle_ssh_sessions(_make_manager(tmp_path))
     result = json.loads(handler({"action": "bogus"}))
@@ -355,54 +348,14 @@ def test_ssh_terminal_background(tmp_path: Path) -> None:
     assert result["status"] == "running"
 
 
-def test_ssh_terminal_poll(tmp_path: Path) -> None:
-    """ssh_terminal poll param checks background session status."""
-    from unittest.mock import patch
+def test_ssh_terminal_poll_rejected_without_machine(tmp_path: Path) -> None:
+    """poll/read_output are ssh_sessions-only: terminal requires machine+command."""
+    from ssh_tools.handlers.terminal import handle_ssh_terminal
 
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    handler = handle_ssh_terminal(mgr)
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        start = json.loads(handler({"machine": "h", "command": "cmd", "background": True}))
-    sid = start["session_id"]
-
-    # Still running
-    result = json.loads(handler({"machine": "h", "command": "", "poll": sid}))
-    assert result["success"] is True
-    assert result["running"] is True
-
-    # Now finished
-    fake_proc.poll.return_value = 0
-    fake_proc.stdout.read.return_value = b"done"
-    fake_proc.stderr.read.return_value = b""
-    result = json.loads(handler({"machine": "h", "command": "", "poll": sid}))
-    assert result["success"] is True
-    assert result["running"] is False
-    assert result["exit_code"] == 0
-
-
-def test_ssh_terminal_read_output(tmp_path: Path) -> None:
-    """ssh_terminal read_output param reads completed background output."""
-    from unittest.mock import patch
-
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    handler = handle_ssh_terminal(mgr)
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        start = json.loads(handler({"machine": "h", "command": "cmd", "background": True}))
-    sid = start["session_id"]
-
-    fake_proc.poll.return_value = 0
-    fake_proc.stdout.read.return_value = b"result data"
-    fake_proc.stderr.read.return_value = b""
-
-    out_result = json.loads(handler({"machine": "h", "command": "", "read_output": sid}))
-    assert out_result["success"] is True
-    assert out_result["stdout"] == "result data"
+    result = json.loads(handle_ssh_terminal(mgr)({"poll": "ssh_h_12345678"}))
+    assert result["success"] is False
+    assert "machine" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -477,38 +430,17 @@ def test_sessions_read_output_missing_id(tmp_path: Path) -> None:
     assert "session_id is required" in result["error"]
 
 
-# ---- Bug fix: poll/read_output without machine/command ----
+# ---- ssh_sessions is the canonical poll/read_output surface ----
 
 
-def test_ssh_terminal_poll_without_machine(tmp_path: Path) -> None:
-    """poll should work without machine/command"""
-    from ssh_tools.handlers.terminal import handle_ssh_terminal
-
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.Popen") as mock_popen:
-        proc = MagicMock()
-        proc.pid = 12345
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-        bg = json.loads(
-            handle_ssh_terminal(mgr)({"machine": "h", "command": "sleep 99", "background": True})
-        )
-        sid = bg["session_id"]
-    handler_fn = handle_ssh_terminal(mgr)
-    result = json.loads(handler_fn({"poll": sid}))
-    assert result["success"] is True
-    assert result["running"] is True
-
-
-def test_ssh_terminal_read_output_without_machine(tmp_path: Path) -> None:
-    """read_output should work without machine/command"""
-    from ssh_tools.handlers.terminal import handle_ssh_terminal
+def test_sessions_poll_without_session_id(tmp_path: Path) -> None:
+    """poll without session_id is rejected by the sessions handler."""
+    from ssh_tools.handlers.sessions import handle_ssh_sessions
 
     mgr = _make_manager(tmp_path)
-    result = json.loads(handle_ssh_terminal(mgr)({"read_output": "nonexistent"}))
+    result = json.loads(handle_ssh_sessions(mgr)({"action": "poll"}))
     assert result["success"] is False
-    assert "No background process" in result["error"]
+    assert "session_id is required" in result["error"]
 
 
 # ---- Hermes approval integration ----
@@ -629,9 +561,9 @@ def test_approval_does_not_block_poll(tmp_path: Path) -> None:
     from unittest.mock import patch as mock_patch
 
     mgr = _make_manager(tmp_path)
-    handler = handle_ssh_terminal(mgr)
+    handler = handle_ssh_sessions(mgr)
     with mock_patch("ssh_tools.handlers.terminal.check_approval") as mock_check:
-        result = json.loads(handler({"read_output": "nonexistent"}))
+        result = json.loads(handler({"action": "read_output", "session_id": "nonexistent"}))
         assert result["success"] is False
         mock_check.assert_not_called()
 

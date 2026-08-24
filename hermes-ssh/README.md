@@ -66,12 +66,9 @@ ssh_terminal machine=web1 command="make -j4" timeout=300
 
 When output exceeds `max_output_chars` (default: 50,000), the full output is saved under the plugin's restricted output directory and a summary with the path is returned.
 
-Long-running commands can spool stdout and stderr to restricted files in the background:
+Long-running commands can spool stdout and stderr to restricted files in the background. Poll or read output through `ssh_sessions` (the canonical session surface):
 
 ```text
-ssh_terminal poll=<session_id>
-ssh_terminal read_output=<session_id>
-
 ssh_sessions action=poll session_id=<session_id>
 ssh_sessions action=read_output session_id=<session_id>
 ```
@@ -141,7 +138,6 @@ Background commands are tracked as sessions with their process, machine, command
 ssh_sessions action=list
 ssh_sessions action=kill session_id=<session_id>
 ssh_sessions action=cleanup
-ssh_sessions action=prune
 ```
 
 Idle sessions are automatically killed after 30 minutes. Closed sessions are pruned after 24 hours.

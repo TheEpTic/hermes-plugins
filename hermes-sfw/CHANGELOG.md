@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.9] - 2026-08-24
+
+### Fixed
+- **Timeout orphan regression:** `os.killpg` now uses the process's own PID as the process-group ID directly (set by `start_new_session=True`) instead of calling `os.getpgid`, which can raise `ProcessLookupError` when the leader has already exited. After the SIGTERM grace period, the entire group is unconditionally SIGKILLed regardless of leader state, preventing orphaned child processes from surviving a timeout.
+- **Protected workdir prefixes:** `_validate_workdir` now rejects system directories (`/`, `/boot`, `/dev`, `/etc`, `/proc`, `/sys`, `/usr`) as install working directories.
+- **Local and git source rejection:** `_validate_command` now refuses install commands whose arguments are local paths (`.`, `./`, `../`, absolute paths), `--path` / `--git` cargo flags, or `git+` / `file:` URLs. These forms bypass the dependency network that sfw inspects and execute arbitrary build/lifecycle scripts directly. Requirements-file flags (`-r ./requirements.txt`, `--requirement=...`) are explicitly exempted.
+- **Parser false positives:** `_parse_output` now skips pure-digit tokens (counts like "added 1 package") and common English prose fillers ("by", "from", "for", etc.) after keywords, eliminating the "blocked by firewall" → `blocked=['by']` and "added 1 package" → `installed=['1']` false positives.
+
+### Added
+- Regression tests for timeout orphan kill (detached child cleanup).
+- Grammar tests for local-path, git/file-source, and cargo `--path`/`--git` rejection, plus requirements-file and registry-URL exemption tests.
+- Workdir protection tests for all system prefixes and root `/`.
+- Parser noise tests for digit counts and prose stopwords.
+
 ## [0.2.8] - 2026-08-18
 
 - Refresh the package and lock metadata for the coordinated release after hermes-ssh pinned cryptography to `50.0.0`, removing stale pre-50 records from the combined dependency graph.

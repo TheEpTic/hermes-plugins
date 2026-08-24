@@ -2,7 +2,7 @@
 
 SSH_TERMINAL_SCHEMA = {
     "name": "ssh_terminal",
-    "description": "Run a command on a remote machine via SSH. Uses the machine registry — add machines first with ssh_machines.",
+    "description": "Run a command on a remote machine via SSH. Uses the machine registry — add machines first with ssh_machines. Background commands return a session_id; poll or read output with ssh_sessions.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -38,16 +38,8 @@ SSH_TERMINAL_SCHEMA = {
                 "minimum": 1,
                 "maximum": 500000,
             },
-            "poll": {
-                "type": "string",
-                "description": "Session ID of a background command to poll for status. Returns running (bool), stdout, stderr, exit_code.",
-            },
-            "read_output": {
-                "type": "string",
-                "description": "Session ID of a completed background command to read full stdout/stderr from.",
-            },
         },
-        "required": [],
+        "required": ["machine", "command"],
     },
 }
 
@@ -165,13 +157,13 @@ SSH_MACHINES_SCHEMA = {
 
 SSH_SESSIONS_SCHEMA = {
     "name": "ssh_sessions",
-    "description": "Manage active SSH sessions. List, kill, cleanup, poll, or read output.",
+    "description": "Manage active SSH sessions. List, kill, cleanup idle, poll, or read output from background commands.",
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "kill", "cleanup", "prune", "poll", "read_output"],
+                "enum": ["list", "kill", "cleanup", "poll", "read_output"],
                 "description": "Action to perform",
             },
             "session_id": {

@@ -798,7 +798,6 @@ class SSHManager:
                 "exit_code": result.returncode,
                 "elapsed_secs": elapsed,
                 "machine": canonical,
-                "session_id": session_id,
             }
             if stdout_file:
                 resp["stdout_file"] = stdout_file
@@ -823,7 +822,6 @@ class SSHManager:
                 "exit_code": -1,
                 "elapsed_secs": elapsed,
                 "machine": canonical,
-                "session_id": session_id,
             }
         except Exception as e:
             logger.debug("run_command failed for %s: %s", canonical, e, exc_info=True)

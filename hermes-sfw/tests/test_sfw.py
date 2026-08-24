@@ -242,6 +242,47 @@ class TestCommandValidation:
         _call(manager, {"action": "run", "command": command})
         assert mock_popen.called
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # local-path installs execute build scripts sfw never sees
+            "cargo install --path /tmp/evil",
+            "cargo install --path=./evil",
+            "cargo install --git https://github.com/evil/thing",
+            "pip install .",
+            "pip install ./local-pkg",
+            "pip install ../local-pkg",
+            "uv pip install .",
+            "npm install ./local-dep",
+            "yarn add ../dep",
+            "pnpm add ./dep",
+            # git/file URL sources bypass the registry entirely
+            "pip install git+https://github.com/evil/pkg.git",
+            "npm install git+https://github.com/evil/pkg.git",
+            "npm install file:./local.tgz",
+        ],
+    )
+    def test_reject_local_and_git_sources(self, manager: SFWManager, command: str) -> None:
+        """Local-path and git/file install sources are refused."""
+        result = _call(manager, {"action": "run", "command": command})
+        assert result["success"] is False
+        assert "not allowed" in result.get("stderr", "").lower() or "registry" in result.get(
+            "stderr", ""
+        ).lower()
+
+    def test_accept_requirements_file_path_value(self, manager: SFWManager, mock_popen) -> None:
+        """-r/--requirement values are manifests, not install sources."""
+        _call(manager, {"action": "run", "command": "pip install -r ./requirements.txt"})
+        assert mock_popen.called
+
+    def test_accept_registry_url_index(self, manager: SFWManager, mock_popen) -> None:
+        """Registry index URLs are fine; only git/file sources are refused."""
+        _call(
+            manager,
+            {"action": "run", "command": "pip install --index-url https://pypi.org/simple requests"},
+        )
+        assert mock_popen.called
+
     def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
         """Null bytes in command should be rejected."""
         result = _call(manager, {"action": "run", "command": "npm install\x00evil"})
@@ -328,6 +369,20 @@ class TestParseOutput:
         assert blocked == []
         assert installed == []
 
+    def test_added_count_not_parsed_as_package(self) -> None:
+        """npm's 'added 1 package' summary must not yield installed=['1']."""
+        blocked, installed = SFWManager._parse_output("added 1 package")
+        assert installed == []
+
+    def test_added_count_plural_not_parsed_as_package(self) -> None:
+        blocked, installed = SFWManager._parse_output("added 5 packages")
+        assert installed == []
+
+    def test_blocked_by_prose_not_parsed_as_package(self) -> None:
+        """'blocked by firewall' prose must not yield blocked=['by']."""
+        blocked, installed = SFWManager._parse_output("the request was blocked by the firewall")
+        assert blocked == []
+
     def test_keyword_with_trailing_punctuation(self) -> None:
         """Keywords followed by colon should still match."""
         blocked, installed = SFWManager._parse_output("blocked: evil-pkg")
@@ -404,6 +459,36 @@ class TestTimeout:
         assert result.success is False
         assert result.exit_code == -1
         assert "timed out" in result.stderr.lower()
+
+    def test_timeout_kills_process_group_after_leader_exits(self, tmp_path: Path) -> None:
+        """Children surviving the leader must still be SIGKILLed (regression)."""
+        sfw_bin = tmp_path / "sfw"
+        # Leader exits quickly; a child ignores SIGTERM and keeps running.
+        sfw_bin.write_text(
+            "#!/bin/bash\n"
+            "sleep 100 &\n"
+            "child=$!\n"
+            "trap '' TERM\n"
+            "sleep 0.2\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        sfw_bin.chmod(0o755)
+
+        config = SFWConfig(sfw_bin=str(sfw_bin), timeout=1)
+        mgr = SFWManager(config)
+        result = mgr.run_command("npm install express")
+
+        assert result.success is False
+        assert result.exit_code == -1
+
+        # The child must not survive as an orphan.
+        import subprocess as _sp
+
+        leftover = _sp.run(
+            ["pgrep", "-f", "sleep 100"], capture_output=True, text=True, timeout=5
+        )
+        assert leftover.returncode != 0 or "sleep 100" not in leftover.stdout
 
 
 class TestOSError:
@@ -603,6 +688,18 @@ class TestWorkdirValidation:
         )
         # Should not fail — ~ resolves to home dir
         assert mock_popen.called
+
+    @pytest.mark.parametrize(
+        "workdir",
+        ["/", "/etc", "/usr", "/usr/local", "/boot", "/proc", "/sys", "/dev"],
+    )
+    def test_workdir_system_prefix_rejected(
+        self, tmp_path: Path, manager: SFWManager, workdir: str
+    ) -> None:
+        """System directories must be refused as install working directories."""
+        result = _call(manager, {"action": "run", "command": "npm install express", "workdir": workdir})
+        assert result["success"] is False
+        assert "system directory" in result.get("stderr", "").lower()
 
 
 # ---------------------------------------------------------------------------

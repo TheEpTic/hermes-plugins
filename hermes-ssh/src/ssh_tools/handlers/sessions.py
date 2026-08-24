@@ -56,11 +56,6 @@ def _handle_cleanup(manager: SSHManager, params: dict[str, Any]) -> str:
     return ok(cleaned=result["count"], details=result["killed"])
 
 
-def _handle_prune(manager: SSHManager) -> str:
-    count = manager.prune_closed()
-    return ok(pruned=count, message=f"Removed {count} closed session(s)")
-
-
 def _handle_poll(manager: SSHManager, params: dict[str, Any]) -> str:
     error = require(params, "session_id")
     if error:
@@ -92,8 +87,6 @@ def handle_ssh_sessions(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
             return _handle_kill(manager, params)
         if action == "cleanup":
             return _handle_cleanup(manager, params)
-        if action == "prune":
-            return _handle_prune(manager)
         if action == "poll":
             return _handle_poll(manager, params)
         if action == "read_output":

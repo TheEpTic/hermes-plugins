@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -25,6 +26,46 @@ _BLOCKED_KEYWORDS = frozenset({"blocked", "🚫", "🔴"})
 _INSTALLED_KEYWORDS = frozenset({"installed", "🟢", "added"})
 _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
 _MAX_LIST_ENTRIES = 50
+# Free-text prose commonly wraps sfw keywords ("blocked by firewall",
+# "added 5 packages"). The token directly after a keyword is only treated as a
+# package name when it is not a count or a prose filler word.
+_NON_PACKAGE_TOKENS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "package",
+        "packages",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "with",
+    }
+)
+
+# System directories a dependency install must never run in. Installing into
+# /etc, /usr, or / is almost certainly a mistake or an attack; the resolved
+# workdir is checked against these before any process starts.
+_WORKDIR_DENIED_PREFIXES = (
+    Path("/boot"),
+    Path("/dev"),
+    Path("/etc"),
+    Path("/proc"),
+    Path("/sys"),
+    Path("/usr"),
+)
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -257,6 +298,57 @@ def _validate_command(command: str) -> str | None:
             f"Allowed forms: {allowed}"
         )
 
+    source_error = _reject_local_or_git_source(parts)
+    if source_error:
+        return source_error
+
+    return None
+
+
+# Flags whose value is a local *manifest* (requirements file, find-links dir)
+# rather than an install source. The value itself is not executed; the
+# dependency manager reads it to resolve registry packages.
+_PATH_VALUE_FLAGS = frozenset({"-r", "--requirement", "-f", "--find-links"})
+
+
+def _reject_local_or_git_source(parts: list[str]) -> str | None:
+    """Reject installs whose source is local code or a git/file URL.
+
+    ``cargo install --path``, ``pip install .``, ``npm install ./local`` and
+    ``pip install git+https://...`` all execute build/lifecycle scripts from a
+    source sfw never sees on the dependency network — the local filesystem or
+    a git clone. Those forms are refused; registry installs are unaffected.
+    """
+    for i, token in enumerate(parts[1:], start=1):
+        lowered = token.lower()
+        if (
+            lowered == "--path"
+            or lowered.startswith("--path=")
+            or lowered == "--git"
+            or lowered.startswith("--git=")
+        ):
+            return (
+                "local/git install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
+        if token == ".":
+            return (
+                "installing the current directory ('.') runs arbitrary local "
+                "build scripts; install from a registry instead."
+            )
+        previous = parts[i - 1].lower() if i > 0 else ""
+        is_manifest_value = previous in _PATH_VALUE_FLAGS
+        is_relative_source = token.startswith("./") or token.startswith("../")
+        if is_relative_source and not is_manifest_value:
+            return (
+                "local path install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
+        if "git+" in lowered or lowered.startswith("file:"):
+            return (
+                "git/file install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
     return None
 
 
@@ -352,7 +444,18 @@ def _validate_workdir(workdir: str | None) -> str | None:
         raise ValueError(f"Working directory does not exist: {workdir}")
     if not Path(resolved).is_dir():
         raise ValueError(f"Working directory is not a directory: {workdir}")
+    if Path(resolved) == Path("/") or any(
+        _within(Path(resolved), prefix) for prefix in _WORKDIR_DENIED_PREFIXES
+    ):
+        raise ValueError(
+            "Working directory must not be a system directory "
+            "(/, /boot, /dev, /etc, /proc, /sys, /usr)"
+        )
     return resolved
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def _sanitize_output(text: str, max_len: int = 10_000) -> str:
@@ -756,20 +859,30 @@ class SFWManager:
                 stderr = _sanitize_output(stderr_bytes.decode("utf-8", errors="replace"))
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
-                # Kill entire process group (sfw + child package manager processes)
+                # Kill entire process group (sfw + child package manager
+                # processes). start_new_session=True means the child is its own
+                # group leader, so its pid is the process-group id.
+                pgid = proc.pid
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    os.killpg(pgid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
-                    proc.kill()
-                # Grace period for SIGTERM, then force-kill with SIGKILL
+                    pass
+                # Grace period for SIGTERM, then unconditionally SIGKILL the
+                # whole group. The leader may exit quickly while children keep
+                # running, so the SIGKILL must not be gated on the leader's
+                # state: gate on the group's existence instead.
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        proc.kill()
-                    proc.wait()
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2)
+                else:
+                    # Leader exited during the grace period; make sure no
+                    # detached children of the group are left behind.
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pgid, signal.SIGKILL)
                 return SFWResult(
                     success=False,
                     command=command,
@@ -836,10 +949,16 @@ class SFWManager:
                     j += 1
                 if j >= len(parts):
                     break
+                candidate = parts[j].strip(",:;")
+                # Skip counts ("added 5 packages") and prose fillers
+                # ("blocked by firewall") that are not package names.
+                candidate_lower = candidate.lower()
+                if candidate.isdigit() or candidate_lower in _NON_PACKAGE_TOKENS:
+                    break
                 if token in _BLOCKED_KEYWORDS:
-                    blocked.append(parts[j])
+                    blocked.append(candidate)
                 else:
-                    installed.append(parts[j])
+                    installed.append(candidate)
                 break
 
         # Deduplicate results while preserving order, then cap list size

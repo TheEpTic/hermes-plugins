@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.5] - 2026-08-24
+
+### Fixed
+- **Schema deduplication:** `poll` and `read_output` are now exposed only on `ssh_sessions` (the canonical session surface), removed from `ssh_terminal`. The `prune` action was removed from `ssh_sessions` (the idle checker auto-prunes every 10 cycles). `machine` and `command` are now always required by `ssh_terminal`.
+- **Sync-session contract:** synchronous `run_command` no longer returns a phantom `session_id` that was never registered as a session. Background commands continue to return a real `session_id`.
+- **Migration permissions:** `command_log.jsonl` copied during `migrate.py` now uses `0o600` instead of inheriting the default umask.
+
+### Changed
+- `ssh_terminal` description now directs agents to `ssh_sessions` for poll/read.
+- `ssh_sessions` description clarified ("cleanup idle").
+
 ## [0.4.4] - 2026-08-18
 
 - Pin cryptography to `50.0.0`, matching Hermes Agent 0.20.4 and excluding the vulnerable pre-50 release range reported by GitHub (CVE-2026-69248 and related advisories).

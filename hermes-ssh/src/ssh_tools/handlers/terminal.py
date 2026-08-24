@@ -13,28 +13,10 @@ if TYPE_CHECKING:
     from ..manager import SSHManager
 
 
-def _handle_poll(manager: SSHManager, value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        return err("poll must be a non-empty string")
-    return ok(**manager.poll_session(value))
-
-
-def _handle_read_output(manager: SSHManager, value: Any) -> str:
-    if not isinstance(value, str) or not value:
-        return err("read_output must be a non-empty string")
-    return ok(**manager.read_output(value))
-
-
 def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        # Handle poll/read_output first — these don't need machine/command.
-        if "poll" in params and params["poll"] is not None:
-            return _handle_poll(manager, params["poll"])
-        if "read_output" in params and params["read_output"] is not None:
-            return _handle_read_output(manager, params["read_output"])
-
         error = require(params, "machine", "command")
         if error:
             return err(error)
