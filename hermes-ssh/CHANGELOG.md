@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.6] - 2026-09-04
+
+### Fixed
+- Restore compatibility with Hermes Agent 0.21.0 approval internals by importing `_get_approval_mode` from `tools.approval_context`, while retaining fallback support for older Hermes releases.
+- Keep SSH commands fail-closed when either approval component is unavailable.
+
 ## [0.4.5] - 2026-08-24
 
 ### Fixed

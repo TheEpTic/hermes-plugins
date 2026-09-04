@@ -8,13 +8,22 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 try:
-    from tools.approval import (  # pyright: ignore[reportMissingImports]
-        _get_approval_mode,
+    from tools.approval import (
         check_dangerous_command as _check_dangerous,
-    )
+    )  # pyright: ignore[reportMissingImports]
 except ImportError:
     _check_dangerous = None
-    _get_approval_mode = None
+
+try:
+    from tools.approval_context import _get_approval_mode  # pyright: ignore[reportMissingImports]
+except ImportError:
+    try:
+        # compatibility with Hermes releases that still re-exported this helper.
+        from tools.approval import _get_approval_mode
+    except ImportError:
+        _get_approval_mode = None
+
+if _check_dangerous is None or _get_approval_mode is None:
     logger.warning("Hermes approval system unavailable — SFW commands will fail closed")
 
 

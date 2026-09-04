@@ -9,12 +9,21 @@ logger = logging.getLogger(__name__)
 
 try:
     from tools.approval import (
-        _get_approval_mode,
         check_dangerous_command as _check_dangerous,
     )  # pyright: ignore[reportMissingImports]
 except ImportError:
     _check_dangerous = None
-    _get_approval_mode = None
+
+try:
+    from tools.approval_context import _get_approval_mode  # pyright: ignore[reportMissingImports]
+except ImportError:
+    try:
+        # compatibility with Hermes releases that still re-exported this helper.
+        from tools.approval import _get_approval_mode
+    except ImportError:
+        _get_approval_mode = None
+
+if _check_dangerous is None or _get_approval_mode is None:
     logger.warning("Hermes approval system not available — SSH commands will fail closed")
 
 
