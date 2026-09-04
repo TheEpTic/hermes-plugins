@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import logging
 import os
@@ -25,29 +26,128 @@ _BLOCKED_KEYWORDS = frozenset({"blocked", "🚫", "🔴"})
 _INSTALLED_KEYWORDS = frozenset({"installed", "🟢", "added"})
 _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
 _MAX_LIST_ENTRIES = 50
-
-# ---------------------------------------------------------------------------
-# Command prefix allowlist
-# ---------------------------------------------------------------------------
-
-_ALLOWED_PREFIXES = frozenset(
+# Free-text prose commonly wraps sfw keywords ("blocked by firewall",
+# "added 5 packages"). The token directly after a keyword is only treated as a
+# package name when it is not a count or a prose filler word.
+_NON_PACKAGE_TOKENS = frozenset(
     {
-        "npm",
-        "yarn",
-        "pnpm",
-        "pip",
-        "pip3",
-        "uv",
-        "cargo",
-        "rustup",
+        "a",
+        "an",
+        "and",
+        "are",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "is",
+        "of",
+        "on",
+        "package",
+        "packages",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "with",
     }
 )
+
+# System directories a dependency install must never run in. Installing into
+# /etc, /usr, or / is almost certainly a mistake or an attack; the resolved
+# workdir is checked against these before any process starts.
+_WORKDIR_DENIED_PREFIXES = (
+    Path("/boot"),
+    Path("/dev"),
+    Path("/etc"),
+    Path("/proc"),
+    Path("/sys"),
+    Path("/usr"),
+)
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Dependency-operation grammar
+# ---------------------------------------------------------------------------
+# The command is passed to sfw as an argv list, never through a shell. Still,
+# allowing a package-manager binary alone is not enough: several managers have
+# subcommands that execute arbitrary programs. Require the command verb in its
+# canonical position, before any options. This deliberately rejects convenient
+# global-option forms such as ``npm --prefix x run`` rather than trying to
+# parse every manager's option grammar and missing a runner behind an argument.
+_ALLOWED_COMMAND_PREFIXES: dict[str, frozenset[tuple[str, ...]]] = {
+    "npm": frozenset({("install",), ("uninstall",), ("update",), ("ci",), ("dedupe",)}),
+    "yarn": frozenset({("add",), ("remove",), ("install",), ("upgrade",), ("up",)}),
+    "pnpm": frozenset({("add",), ("remove",), ("install",), ("update",), ("up",)}),
+    "pip": frozenset({("install",), ("uninstall",), ("download",)}),
+    "pip3": frozenset({("install",), ("uninstall",), ("download",)}),
+    "uv": frozenset(
+        {
+            ("add",),
+            ("remove",),
+            ("sync",),
+            ("lock",),
+            ("export",),
+            ("pip", "install"),
+            ("pip", "uninstall"),
+            ("pip", "compile"),
+            ("pip", "sync"),
+        }
+    ),
+    "cargo": frozenset(
+        {
+            ("add",),
+            ("remove",),
+            ("fetch",),
+            ("update",),
+            ("install",),
+            ("uninstall",),
+            ("vendor",),
+        }
+    ),
+}
 
 # ---------------------------------------------------------------------------
 # Command maxLength (server-side enforcement)
 # ---------------------------------------------------------------------------
 
 _MAX_COMMAND_LENGTH = 1024
+
+# ---------------------------------------------------------------------------
+# Package-manager command detection for the terminal hook
+# ---------------------------------------------------------------------------
+
+_PACKAGE_MANAGER_WRAPPERS = frozenset(
+    {"command", "env", "exec", "nice", "nohup", "sudo", "timeout"}
+)
+_SHELL_WRAPPERS = frozenset({"bash", "dash", "fish", "ksh", "sh", "zsh"})
+_SHELL_COMMAND_BOUNDARIES = frozenset({";", "&&", "||", "|", "&", "(", ")"})
+
+# ---------------------------------------------------------------------------
+# Binary discovery (SFW-2 / SFW-5)
+# ---------------------------------------------------------------------------
+# pnpm-style wrapper shims exec a real JS entry point (a cmd-shim or shell
+# shim). The shim layer must be reported separately from the binary version.
+_IS_NPM_SHIM_RE = re.compile(r"(?:^|/)(?:pnpm|npm-global)/")
+# npm's cmd-shim writes the real target into the shim in two forms:
+#   exec node "$basedir/../global/.../node_modules/sfw/dist/sfw.mjs" "$@"
+#   # cmd-shim-target=/absolute/path/to/sfw.mjs
+# The cmd-shim-target marker is the canonical absolute form and is preferred.
+_CMD_SHIM_TARGET_RE = re.compile(r"cmd-shim-target=(\S+)")
+_SHIM_EXEC_TARGET_RE = re.compile(r'exec\s+(?:\S+\s+)?["\']?([^\s"\']+?\.mjs)["\']?\s+"\$@"')
+
+# Common npm/pnpm shim and binary locations, walked in order. A shim is only
+# usable if its real target resolves; broken shims are skipped and reported.
+_KNOWN_BINARY_CANDIDATES = (
+    ".local/share/pnpm/sfw",
+    ".local/share/pnpm/bin/sfw",
+    ".local/bin/sfw",
+    ".npm-global/bin/sfw",
+    ".cargo/bin/sfw",
+    "/usr/local/bin/sfw",
+)
 
 # ---------------------------------------------------------------------------
 # OSError errno → generic message mapping
@@ -100,6 +200,53 @@ class SFWResult:
         return d
 
 
+@dataclass(frozen=True)
+class SFWBinaryInfo:
+    """Where the sfw binary was found and which layer it lives in.
+
+    ``binary_kind`` distinguishes npm-installed wrapper shims (``npm-shim``,
+    a tiny launcher that execs a real JS entry point) from genuine binaries,
+    so an npm-package/binary version mismatch is not confusing. ``target`` is
+    the resolved real entry point for shims and None for real binaries.
+    """
+
+    binary: str | None
+    binary_kind: str | None
+    target: str | None
+
+
+@dataclass(frozen=True)
+class SFWDiagnosis:
+    """Structured result of :meth:`SFWManager.diagnose`.
+
+    ``healthy`` is True only when a binary was found and its version query
+    succeeded. ``why`` is a human-readable explanation of exactly what is
+    broken when the install is not healthy. ``checked`` lists every candidate
+    location that was walked during discovery.
+    """
+
+    healthy: bool
+    binary: str | None
+    binary_kind: str | None
+    version: str | None
+    why: str
+    target: str | None = None
+    checked: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "healthy": self.healthy,
+            "binary": self.binary,
+            "binary_kind": self.binary_kind,
+            "version": self.version,
+            "why": self.why,
+            "target": self.target,
+            "checked": self.checked,
+            "errors": self.errors,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Helper functions
 # ---------------------------------------------------------------------------
@@ -136,13 +283,147 @@ def _validate_command(command: str) -> str | None:
             "Use bare command name (e.g. 'pip install foo', not '/usr/bin/pip install foo')"
         )
 
-    if program not in _ALLOWED_PREFIXES:
+    if program not in _ALLOWED_COMMAND_PREFIXES:
         return (
             f"Command prefix '{program}' is not allowed. "
-            f"Allowed: {', '.join(sorted(_ALLOWED_PREFIXES))}"
+            f"Allowed: {', '.join(sorted(_ALLOWED_COMMAND_PREFIXES))}"
         )
 
+    command_parts = parts[1:]
+    allowed_prefixes = _ALLOWED_COMMAND_PREFIXES[program]
+    if not any(tuple(command_parts[: len(prefix)]) == prefix for prefix in allowed_prefixes):
+        allowed = ", ".join(" ".join(prefix) for prefix in sorted(allowed_prefixes))
+        return (
+            f"Command is not allowed for '{program}': it is not a dependency operation. "
+            f"Allowed forms: {allowed}"
+        )
+
+    source_error = _reject_local_or_git_source(parts)
+    if source_error:
+        return source_error
+
     return None
+
+
+# Flags whose value is a local *manifest* (requirements file, find-links dir)
+# rather than an install source. The value itself is not executed; the
+# dependency manager reads it to resolve registry packages.
+_PATH_VALUE_FLAGS = frozenset({"-r", "--requirement", "-f", "--find-links"})
+
+
+def _reject_local_or_git_source(parts: list[str]) -> str | None:
+    """Reject installs whose source is local code or a git/file URL.
+
+    ``cargo install --path``, ``pip install .``, ``npm install ./local`` and
+    ``pip install git+https://...`` all execute build/lifecycle scripts from a
+    source sfw never sees on the dependency network — the local filesystem or
+    a git clone. Those forms are refused; registry installs are unaffected.
+    """
+    for i, token in enumerate(parts[1:], start=1):
+        lowered = token.lower()
+        if (
+            lowered == "--path"
+            or lowered.startswith("--path=")
+            or lowered == "--git"
+            or lowered.startswith("--git=")
+        ):
+            return (
+                "local/git install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
+        if token == ".":
+            return (
+                "installing the current directory ('.') runs arbitrary local "
+                "build scripts; install from a registry instead."
+            )
+        previous = parts[i - 1].lower() if i > 0 else ""
+        is_manifest_value = previous in _PATH_VALUE_FLAGS
+        is_relative_source = token.startswith("./") or token.startswith("../")
+        if is_relative_source and not is_manifest_value:
+            return (
+                "local path install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
+        if "git+" in lowered or lowered.startswith("file:"):
+            return (
+                "git/file install sources are not allowed: "
+                f"{token!r}. Install from a registry instead."
+            )
+    return None
+
+
+def is_dependency_operation(command: str) -> bool:
+    """Return True only for an operation the sfw tool itself would accept."""
+    return isinstance(command, str) and _validate_command(command) is None
+
+
+def _shell_command_tokens(command: str) -> list[str]:
+    """Tokenize shell syntax enough to identify nested command segments."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _segment_start_state(name: str) -> tuple[bool, str | None]:
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, None
+    wrapper_mode = "shell" if name in _SHELL_WRAPPERS else None
+    return False, "generic" if name in _PACKAGE_MANAGER_WRAPPERS else wrapper_mode
+
+
+def _wrapped_command_state(name: str, wrapper_mode: str | None) -> tuple[bool, str | None]:
+    if wrapper_mode != "generic":
+        return wrapper_mode == "shell" and contains_package_manager_command(name), wrapper_mode
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, wrapper_mode
+    return False, "shell" if name in _SHELL_WRAPPERS else wrapper_mode
+
+
+def contains_package_manager_command(command: str) -> bool:
+    """Return True when a shell command segment invokes a supported manager.
+
+    The terminal hook must not let a package-manager call escape through a
+    shell prefix (for example ``cd app && npm install``, ``sudo npm install``,
+    or ``bash -c 'npm install'``). This is deliberately a conservative
+    detector: false positives fail closed, while commands that do not invoke a
+    package manager are left alone.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False
+
+    try:
+        parts = _shell_command_tokens(command)
+    except ValueError:
+        # A malformed command beginning with a known manager still needs to be
+        # stopped before the terminal backend gets a chance to interpret it.
+        return bool(
+            re.search(
+                r"(?<![\w.-])(?:npm|yarn|pnpm|pip3?|uv|cargo)(?=\s|$)",
+                command,
+            )
+        )
+
+    segment_start = True
+    wrapper_mode: str | None = None
+    for token in parts:
+        if token in _SHELL_COMMAND_BOUNDARIES:
+            segment_start = True
+            wrapper_mode = None
+            continue
+
+        name = Path(token).name
+        was_segment_start = segment_start
+        if was_segment_start:
+            matched, wrapper_mode = _segment_start_state(name)
+            segment_start = False
+        else:
+            matched, wrapper_mode = _wrapped_command_state(name, wrapper_mode)
+        if matched:
+            return True
+        if was_segment_start:
+            continue
+
+    return False
 
 
 def _validate_workdir(workdir: str | None) -> str | None:
@@ -163,7 +444,18 @@ def _validate_workdir(workdir: str | None) -> str | None:
         raise ValueError(f"Working directory does not exist: {workdir}")
     if not Path(resolved).is_dir():
         raise ValueError(f"Working directory is not a directory: {workdir}")
+    if Path(resolved) == Path("/") or any(
+        _within(Path(resolved), prefix) for prefix in _WORKDIR_DENIED_PREFIXES
+    ):
+        raise ValueError(
+            "Working directory must not be a system directory "
+            "(/, /boot, /dev, /etc, /proc, /sys, /usr)"
+        )
     return resolved
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def _sanitize_output(text: str, max_len: int = 10_000) -> str:
@@ -198,57 +490,300 @@ class SFWManager:
 
     def __init__(self, config: SFWConfig | None = None) -> None:
         self._config = config or SFWConfig()
-        self._sfw_path = self._find_sfw()
+
+    def _classify_binary(self, binary: str) -> SFWBinaryInfo:
+        """Classify a resolved binary path by layer.
+
+        Returns which layer the binary lives in (``npm-shim`` for pnpm/npm
+        wrapper shims, ``binary`` for real executables) and, for shims, the
+        resolved real target entry point.
+        """
+        target = self._resolve_shim_target(binary)
+        if target is not None:
+            return SFWBinaryInfo(binary=binary, binary_kind="npm-shim", target=target)
+        return SFWBinaryInfo(binary=binary, binary_kind="binary", target=None)
+
+    @staticmethod
+    def _resolve_shim_target(binary: str) -> str | None:
+        """Resolve the real target of an npm-style shim, or None if not one.
+
+        Reads the shim script and extracts the real entry point it execs,
+        preferring the canonical ``cmd-shim-target`` marker over the
+        ``exec ... sfw.mjs`` line. Symlinks are resolved first so a link into
+        a pnpm shim (e.g. ``/usr/local/bin/sfw`` -> pnpm shim) is still
+        detected. Returns None for real binaries or shims whose target cannot
+        be determined.
+        """
+        binary_path = Path(binary)
+        try:
+            resolved = str(binary_path.resolve())
+        except (OSError, RuntimeError):
+            resolved = binary
+        if not _IS_NPM_SHIM_RE.search(resolved):
+            return None
+        try:
+            content = binary_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        marker = _CMD_SHIM_TARGET_RE.search(content)
+        if marker is not None:
+            return str(Path(marker.group(1)).expanduser())
+        exec_match = _SHIM_EXEC_TARGET_RE.search(content)
+        if exec_match is None:
+            return None
+        raw = exec_match.group(1)
+        # The exec form is written relative to the shim's own directory and
+        # may reference $basedir (resolved by the shim at runtime).
+        if raw.startswith("$basedir/"):
+            raw = str(binary_path.parent / raw[len("$basedir/") :])
+        target_path = Path(raw)
+        if not target_path.is_absolute():
+            target_path = binary_path.parent / target_path
+        return str(target_path.expanduser())
+
+    def _configured_sfw(self) -> str | None:
+        configured = Path(self._config.sfw_bin)
+        if not configured.exists():
+            return None
+        return self._config.sfw_bin
+
+    def _candidate_sfw(self, candidate: Path) -> str | None:
+        if not candidate.exists() or not os.access(candidate, os.X_OK):
+            return None
+        target = self._resolve_shim_target(str(candidate))
+        if target is not None and not Path(target).exists():
+            return None
+        return str(candidate)
 
     def _find_sfw(self) -> str | None:
-        """Locate the sfw binary."""
-        # If config points to a specific binary, use it directly
-        if self._config.sfw_bin != "sfw":
-            if Path(self._config.sfw_bin).exists():
-                return self._config.sfw_bin
-            return None
+        """Locate the sfw binary.
 
-        # Default: search PATH and common locations
+        Discovery is intentionally performed on demand instead of being cached
+        during manager construction. The plugin manager can outlive changes to
+        the process environment, and sfw may be installed after registration.
+        """
+        # If config points to a specific binary, use it directly.
+        if self._config.sfw_bin != "sfw":
+            return self._configured_sfw()
+
+        # Default: search PATH and common locations.
         path = shutil.which(self._config.sfw_bin)
         if path:
             return path
-        # Check common locations.
-        for candidate in [
-            Path.home() / ".local" / "share" / "pnpm" / "bin" / "sfw",
-            Path.home() / ".local" / "bin" / "sfw",
-            Path.home() / ".npm-global" / "bin" / "sfw",
-            Path.home() / ".cargo" / "bin" / "sfw",
-            Path("/usr/local/bin/sfw"),
-        ]:
-            if candidate.exists() and os.access(candidate, os.X_OK):
-                return str(candidate)
+        # Check common locations. A candidate that exists but is a wrapper
+        # shim whose real target is missing is skipped, like the one that
+        # broke a machine even though ``npm ci`` succeeded.
+        for candidate in self._known_candidates():
+            path = self._candidate_sfw(candidate)
+            if path is not None:
+                return path
         return None
+
+    def _known_candidates(self) -> list[Path]:
+        """Known shim/binary locations, newest home-aware first."""
+        home = Path.home()
+        candidates = [home / rel for rel in _KNOWN_BINARY_CANDIDATES]
+        return candidates
 
     def is_installed(self) -> bool:
         """Check if sfw is available."""
-        return self._sfw_path is not None
+        return self._find_sfw() is not None
 
     @property
     def sfw_path(self) -> str | None:
-        """Return the path to the sfw binary."""
-        return self._sfw_path
+        """Return the current path to the sfw binary."""
+        return self._find_sfw()
 
     def get_version(self) -> str | None:
-        """Get sfw version string."""
-        if not self._sfw_path:
-            return None
+        """Get the sfw binary version string, or None if unavailable."""
+        version = self.get_version_info()["version"]
+        assert version is None or isinstance(version, str)
+        return version
+
+    def get_version_info(self) -> dict[str, Any]:
+        """Report the binary version together with the layer it came from.
+
+        The npm package version (e.g. 2.0.6) and the binary version (e.g.
+        1.15.0) can differ, so the layer must be explicit: ``binary_kind``
+        says whether the resolved path is an npm/pnpm wrapper shim or a real
+        binary, and ``target`` names the real entry point for shims.
+
+        Returns:
+            Dict with keys ``version``, ``binary``, ``binary_kind`` and
+            ``target`` (all None when sfw is not installed).
+        """
+        sfw_path = self.sfw_path
+        if not sfw_path:
+            return {"version": None, "binary": None, "binary_kind": None, "target": None}
+        info = self._classify_binary(sfw_path)
         try:
             proc = subprocess.run(
-                [self._sfw_path, "--version"],
+                [sfw_path, "--version"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=10,
             )
             stdout = proc.stdout.decode("utf-8", errors="replace").strip()
             stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-            return stdout or stderr or None
+            version = stdout or stderr or None
         except (subprocess.TimeoutExpired, OSError):
+            version = None
+        return {
+            "version": version,
+            "binary": info.binary,
+            "binary_kind": info.binary_kind,
+            "target": info.target,
+        }
+
+    def _diagnose_binary(
+        self,
+        binary: str,
+        failure_reason: str,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis:
+        info = self._classify_binary(binary)
+        version = self.get_version()
+        if version is None:
+            return SFWDiagnosis(
+                healthy=False,
+                binary=binary,
+                binary_kind=info.binary_kind,
+                version=None,
+                why=failure_reason,
+                target=info.target,
+                checked=checked,
+                errors=errors,
+            )
+        return SFWDiagnosis(
+            healthy=True,
+            binary=binary,
+            binary_kind=info.binary_kind,
+            version=version,
+            why="ok",
+            target=info.target,
+            checked=checked,
+            errors=errors,
+        )
+
+    def _diagnose_override(
+        self,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis:
+        override = Path(self._config.sfw_bin)
+        checked.append(str(override))
+        if not override.exists():
+            return SFWDiagnosis(
+                healthy=False,
+                binary=None,
+                binary_kind=None,
+                version=None,
+                why=(
+                    f"configured sfw_bin override does not exist: {override}. "
+                    "Reinstall with: npm i -g sfw"
+                ),
+                checked=checked,
+                errors=errors,
+            )
+        return self._diagnose_binary(
+            str(override),
+            "the binary exists but its --version query failed",
+            checked,
+            errors,
+        )
+
+    def _diagnose_path(
+        self,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis | None:
+        path = shutil.which(self._config.sfw_bin)
+        if not path:
             return None
+        checked.append(path)
+        return self._diagnose_binary(
+            path,
+            "the binary was found on PATH but its --version query failed",
+            checked,
+            errors,
+        )
+
+    def _diagnose_candidate(
+        self,
+        candidate: Path,
+        checked: list[str],
+        errors: list[str],
+    ) -> SFWDiagnosis | None:
+        checked.append(str(candidate))
+        if not candidate.exists():
+            return None
+        if not os.access(candidate, os.X_OK):
+            errors.append(f"{candidate} exists but is not executable")
+            return None
+        target = self._resolve_shim_target(str(candidate))
+        if target is not None and not Path(target).exists():
+            return SFWDiagnosis(
+                healthy=False,
+                binary=str(candidate),
+                binary_kind="npm-shim",
+                version=None,
+                why=(
+                    f"shim {candidate} points at missing target {target}. "
+                    "Reinstall with: npm i -g sfw"
+                ),
+                target=target,
+                checked=checked,
+                errors=errors,
+            )
+        return self._diagnose_binary(
+            str(candidate),
+            f"binary {candidate} exists but its --version query failed",
+            checked,
+            errors,
+        )
+
+    def diagnose(self) -> SFWDiagnosis:
+        """Self-diagnose the sfw install.
+
+        Walks every known shim/cache location, the PATH lookup and the
+        configured ``sfw_bin`` override and reports exactly what is broken:
+        no binary found anywhere, a shim that exists but points at a missing
+        target, or a binary whose version query fails.
+
+        Returns:
+            An :class:`SFWDiagnosis` with ``healthy``, the resolved
+            ``binary``/``binary_kind``/``target``, the queried ``version``, a
+            human-readable ``why``, the list of ``checked`` locations and any
+            discovery ``errors``.
+        """
+        checked: list[str] = []
+        errors: list[str] = []
+        if self._config.sfw_bin != "sfw":
+            return self._diagnose_override(checked, errors)
+
+        path_diagnosis = self._diagnose_path(checked, errors)
+        if path_diagnosis is not None:
+            return path_diagnosis
+
+        for candidate in self._known_candidates():
+            candidate_diagnosis = self._diagnose_candidate(candidate, checked, errors)
+            if candidate_diagnosis is not None:
+                return candidate_diagnosis
+
+        return SFWDiagnosis(
+            healthy=False,
+            binary=None,
+            binary_kind=None,
+            version=None,
+            why=(
+                "sfw binary not found: checked PATH and "
+                + ", ".join(checked)
+                + ". Install with: npm i -g sfw"
+            ),
+            checked=checked,
+            errors=errors,
+        )
 
     def run_command(
         self,
@@ -266,7 +801,8 @@ class SFWManager:
         Returns:
             SFWResult with stdout, stderr, exit_code, and parsed blocked/installed.
         """
-        if not self._sfw_path:
+        sfw_path = self.sfw_path
+        if not sfw_path:
             return SFWResult(
                 success=False,
                 command=command,
@@ -301,7 +837,7 @@ class SFWManager:
                 exit_code=1,
             )
 
-        args = [self._sfw_path]
+        args = [sfw_path]
         if verbose:
             args.append("--verbose")
         args.extend(cmd_parts)
@@ -323,20 +859,30 @@ class SFWManager:
                 stderr = _sanitize_output(stderr_bytes.decode("utf-8", errors="replace"))
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
-                # Kill entire process group (sfw + child package manager processes)
+                # Kill entire process group (sfw + child package manager
+                # processes). start_new_session=True means the child is its own
+                # group leader, so its pid is the process-group id.
+                pgid = proc.pid
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    os.killpg(pgid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
-                    proc.kill()
-                # Grace period for SIGTERM, then force-kill with SIGKILL
+                    pass
+                # Grace period for SIGTERM, then unconditionally SIGKILL the
+                # whole group. The leader may exit quickly while children keep
+                # running, so the SIGKILL must not be gated on the leader's
+                # state: gate on the group's existence instead.
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        proc.kill()
-                    proc.wait()
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pgid, signal.SIGKILL)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=2)
+                else:
+                    # Leader exited during the grace period; make sure no
+                    # detached children of the group are left behind.
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pgid, signal.SIGKILL)
                 return SFWResult(
                     success=False,
                     command=command,
@@ -395,17 +941,25 @@ class SFWManager:
             # Find the keyword token, then take the first non-keyword token after it
             for i, part in enumerate(parts):
                 token = part.lower().strip(",:;")
-                if token in _ALL_KEYWORDS and i + 1 < len(parts):
-                    # Walk past any additional keyword tokens (e.g. 🔴 blocked)
-                    j = i + 1
-                    while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
-                        j += 1
-                    if j < len(parts):
-                        if token in _BLOCKED_KEYWORDS:
-                            blocked.append(parts[j])
-                        else:
-                            installed.append(parts[j])
+                if token not in _ALL_KEYWORDS or i + 1 >= len(parts):
+                    continue
+                # Walk past any additional keyword tokens (e.g. 🔴 blocked)
+                j = i + 1
+                while j < len(parts) and parts[j].lower().strip(",:;") in _ALL_KEYWORDS:
+                    j += 1
+                if j >= len(parts):
                     break
+                candidate = parts[j].strip(",:;")
+                # Skip counts ("added 5 packages") and prose fillers
+                # ("blocked by firewall") that are not package names.
+                candidate_lower = candidate.lower()
+                if candidate.isdigit() or candidate_lower in _NON_PACKAGE_TOKENS:
+                    break
+                if token in _BLOCKED_KEYWORDS:
+                    blocked.append(candidate)
+                else:
+                    installed.append(candidate)
+                break
 
         # Deduplicate results while preserving order, then cap list size
         blocked = _truncate_list(list(dict.fromkeys(blocked)))

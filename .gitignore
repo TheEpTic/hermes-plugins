@@ -29,6 +29,7 @@ Thumbs.db
 **/sockets/
 *.tmp
 *.lock
+!**/uv.lock
 
 # Environment
 .env
@@ -37,3 +38,6 @@ Thumbs.db
 # Hermes runtime (if symlinked from install)
 *.log
 node_modules
+
+# Local Hermes session artifacts (never commit)
+.hermes/

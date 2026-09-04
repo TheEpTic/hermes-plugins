@@ -1,0 +1,36 @@
+name: ci
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.plugin }} / python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [hermes-ssh, hermes-sfw]
+        python-version: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        working-directory: ${{ matrix.plugin }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+      - name: install
+        run: uv sync --extra dev --locked
+      - name: tests
+        run: uv run pytest
+      - name: formatting
+        run: uv run black --check src tests
+      - name: types
+        run: uv run mypy src

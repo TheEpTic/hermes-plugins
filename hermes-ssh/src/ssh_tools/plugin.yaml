@@ -1,8 +1,13 @@
 name: hermes-ssh
-version: 0.2.0
-description: "SSH remote execution — run commands on remote machines, track sessions, reuse connections. Requires OpenSSH client (ssh)."
+version: 0.4.7
+description: "SSH remote operations — run commands and transfer files on registered machines. Requires OpenSSH clients (ssh and sftp)."
 author: TheEpTic
 kind: standalone
+provides_tools:
+  - ssh_terminal
+  - ssh_transfer
+  - ssh_machines
+  - ssh_sessions
 platforms:
   - linux
   - macos

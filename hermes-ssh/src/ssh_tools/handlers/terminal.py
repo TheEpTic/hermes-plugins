@@ -17,18 +17,6 @@ def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        # Handle poll/read_output first — these don't need machine/command.
-        if "poll" in params and params["poll"] is not None:
-            session_id = params["poll"]
-            if not isinstance(session_id, str) or not session_id:
-                return err("poll must be a non-empty string")
-            return ok(**manager.poll_session(session_id))
-        if "read_output" in params and params["read_output"] is not None:
-            session_id = params["read_output"]
-            if not isinstance(session_id, str) or not session_id:
-                return err("read_output must be a non-empty string")
-            return ok(**manager.read_output(session_id))
-
         error = require(params, "machine", "command")
         if error:
             return err(error)

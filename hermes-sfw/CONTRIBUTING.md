@@ -7,16 +7,15 @@ PRs welcome. Here's the workflow.
 ```bash
 git clone https://github.com/TheEpTic/hermes-plugins.git
 cd hermes-plugins/hermes-sfw
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev --locked
 ```
 
 ## Development
 
 ```bash
-black src/hermes_sfw/ tests/
-mypy src/hermes_sfw/
-pytest
+uv run black src/hermes_sfw/ tests/
+uv run mypy src/hermes_sfw/
+uv run pytest
 ```
 
 ## Testing
@@ -24,7 +23,7 @@ pytest
 Run the full test suite with:
 
 ```bash
-pytest
+uv run pytest
 ```
 
 Aim for **90%+ coverage** on new code. The test suite uses pytest fixtures defined in `tests/conftest.py` for mocking subprocess calls. When adding new functionality, write tests that cover:

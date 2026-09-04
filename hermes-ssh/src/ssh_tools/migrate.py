@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -94,7 +95,9 @@ def migrate(data_dir: Path) -> None:
         if old_log.exists():
             new_log = data_dir / "command_log.jsonl"
             new_log.parent.mkdir(parents=True, exist_ok=True)
-            new_log.write_text(old_log.read_text(encoding="utf-8"), encoding="utf-8")
+            fd = os.open(str(new_log), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(old_log.read_text(encoding="utf-8"))
             old_log.unlink()
             print(f"  command_log.jsonl: copied and deleted from old dir")
 
@@ -104,10 +107,7 @@ def migrate(data_dir: Path) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        target = Path(sys.argv[1])
-    else:
-        target = DEFAULT_DATA_DIR
+    target = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DATA_DIR
 
     print("Migrating hermes-ssh data to encrypted storage")
     print(f"Target dir: {target}\n")

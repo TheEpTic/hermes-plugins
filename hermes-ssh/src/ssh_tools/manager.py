@@ -7,6 +7,7 @@ No module-level mutable state — everything lives on the instance.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from .config import DEFAULT_CONFIG, SSHConfig
 from .models import Machine, Session
@@ -32,6 +33,56 @@ logger = logging.getLogger(__name__)
 _HOST_RE = re.compile(r"[A-Za-z0-9_.:-]{1,253}")
 _USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _MAX_OUTPUT_RETURN_CHARS = 500_000
+_AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+_HOST_KEY_VERIFICATION_MARKERS = (
+    "host key verification failed",
+    "no hostkey alg",
+    "remote host identification has changed",
+    "host key mismatch",
+)
+# Key files ssh tries on its own when no -i option is given (in order).
+_DEFAULT_IDENTITY_PATHS = ("~/.ssh/id_ed25519", "~/.ssh/id_rsa")
+_SENSITIVE_NAME = (
+    r"(?:[a-z0-9]+[_-])*"
+    r"(?:password|passwd|token|api[_-]?key|secret|authorization)"
+    r"(?:[_-][a-z0-9]+)*"
+)
+_SECRET_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)"""
+_AUDIT_ASSIGNMENT_RE = re.compile(rf"(?i)\b({_SENSITIVE_NAME})(\s*=\s*)({_SECRET_VALUE})")
+_AUDIT_FLAG_RE = re.compile(rf"(?i)(--{_SENSITIVE_NAME}(?:=|\s+))({_SECRET_VALUE})")
+_AUDIT_URL_RE = re.compile(r"(?i)(https?://[^:/\s]+:)([^@\s]+)(@)")
+_AUDIT_HEADER_RE = re.compile(
+    r"(?i)([\"']?(?:[a-z0-9]+[-_])*(?:authorization|api[-_]?key|token|secret)\s*:\s*)"
+    r"(?:(?:bearer|basic)\s+)?([^\"'\s;&|]+)([\"']?)"
+)
+
+
+def _redact_command(command: str) -> str:
+    """Remove common inline credentials before persisting command text."""
+    redacted = _AUDIT_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}<redacted>", command
+    )
+    redacted = _AUDIT_FLAG_RE.sub(lambda match: f"{match.group(1)}<redacted>", redacted)
+    redacted = _AUDIT_URL_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}", redacted
+    )
+    redacted = _AUDIT_HEADER_RE.sub(
+        lambda match: f"{match.group(1)}<redacted>{match.group(3)}", redacted
+    )
+    return redacted
+
+
+def _session_is_old(sdata: dict[str, Any], now: datetime, hours: int) -> bool:
+    """Return whether a persisted non-active session is older than the limit."""
+    if sdata.get("status") == "active":
+        return False
+    try:
+        started = datetime.fromisoformat(sdata.get("started", ""))
+    except (ValueError, TypeError):
+        return False
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return (now - started).total_seconds() > hours * 3600
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +102,7 @@ class SSHManager:
         self._checker_thread: threading.Thread | None = None
         self._checker_event = threading.Event()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
+        self._background_outputs: dict[str, tuple[Path, Path, int]] = {}
         self._process_lock = threading.Lock()
         self._config.ensure_dirs()
         self._store = EncryptedStore(self._config.data_dir)
@@ -256,12 +308,19 @@ class SSHManager:
                 timeout=self._config.connect_timeout + 5,
             )
             if result.returncode == 0 and "ok" in result.stdout:
+                self._remember_working_key(machine)
                 return {"success": True, "status": "connected", "host": machine.host}
+            failure = self._machine_response(machine, result.returncode, result.stderr)
             return {
                 "success": False,
                 "status": "unreachable",
                 "host": machine.host,
-                "error": result.stderr.strip() or f"exit code {result.returncode}",
+                "error": (
+                    failure["error"]
+                    if failure is not None and "error" in failure
+                    else result.stderr.strip() or f"exit code {result.returncode}"
+                ),
+                **({} if failure is None else {k: v for k, v in failure.items() if k != "error"}),
             }
         except subprocess.TimeoutExpired:
             return {
@@ -336,10 +395,12 @@ class SSHManager:
         except OSError:
             pass
 
-    def close_session(self, session_id: str) -> None:
-        self._cleanup_output_files(session_id)
+    def close_session(self, session_id: str, *, cleanup_output_files: bool = True) -> None:
+        if cleanup_output_files:
+            self._cleanup_output_files(session_id)
         with self._process_lock:
             self._processes.pop(session_id, None)
+            self._background_outputs.pop(session_id, None)
         with self._lock:
             sessions = self._load_sessions()
             if session_id in sessions:
@@ -347,70 +408,57 @@ class SSHManager:
                 self._save_sessions(sessions)
 
     def remove_session(self, session_id: str) -> None:
+        self._cleanup_output_files(session_id)
         with self._lock:
             sessions = self._load_sessions()
             sessions.pop(session_id, None)
             self._save_sessions(sessions)
 
     def kill_session(self, session_id: str) -> dict[str, Any]:
-        """Kill an active SSH session by PID and close control socket.
+        """Kill a background SSH process tracked by this manager instance.
 
-        Note: There is a small race window between SIGTERM and the SIGKILL
-        fallback check where the PID could be recycled by another process.
-        In practice this is extremely unlikely (0.5s window, PIDs rarely
-        recycle that fast on busy systems) but worth being aware of.
+        Persisted PIDs are never signalled: after a Hermes restart they may
+        identify an unrelated recycled process. Shared ControlMaster sockets
+        are connection state and are deliberately left alive.
         """
         session = self.get_session(session_id)
         if not session:
             return {"success": False, "error": f"Session '{session_id}' not found"}
 
-        results: dict[str, Any] = {"pid_killed": False, "socket_closed": False}
+        with self._process_lock:
+            proc = self._processes.pop(session_id, None)
+        if proc is None:
+            self._mark_session_orphaned(session_id)
+            return {
+                "success": False,
+                "error": "Session is not owned by this Hermes process; refusing to signal persisted PID",
+                "status": "orphaned",
+            }
 
-        # Kill the SSH process
-        if session.pid:
+        killed = proc.poll() is not None
+        if not killed:
             try:
-                os.kill(session.pid, signal.SIGTERM)
-                time.sleep(0.5)
-                try:
-                    os.kill(session.pid, 0)
-                    os.kill(session.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                results["pid_killed"] = True
-            except OSError:
-                results["pid_killed"] = True  # Already dead
-
-        # Close control socket
-        if session.control_path and os.path.exists(session.control_path):
-            hostname = None
-            try:
-                machine = self.get_machine(session.machine)
-                if machine:
-                    hostname = machine.host
-            except Exception:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=2)
+            except ProcessLookupError:
                 pass
-            try:
-                subprocess.run(
-                    [
-                        "ssh",
-                        "-O",
-                        "exit",
-                        "-o",
-                        f"ControlPath={session.control_path}",
-                        hostname or "dummy",
-                    ],
-                    capture_output=True,
-                    timeout=5,
-                )
-                results["socket_closed"] = True
-            except Exception:
-                pass
-            # Remove orphaned socket file
-            with contextlib.suppress(OSError):
-                os.unlink(session.control_path)
+            killed = True
 
         self.close_session(session_id)
-        return {"success": True, **results}
+        return {"success": True, "pid_killed": killed, "socket_closed": False}
+
+    def _mark_session_orphaned(self, session_id: str) -> None:
+        """Mark a persisted session orphaned when this process does not own it."""
+        with self._lock:
+            sessions = self._load_sessions()
+            if session_id not in sessions:
+                return
+            sessions[session_id]["status"] = "orphaned"
+            self._save_sessions(sessions)
 
     def cleanup_idle(self, max_idle_minutes: int | None = None) -> dict[str, Any]:
         """Kill all sessions idle for more than max_idle_minutes."""
@@ -423,51 +471,12 @@ class SSHManager:
             if idle is not None and idle > threshold:
                 to_kill.append(sid)
 
-        # Kill processes and close control sockets (no session file reloads)
         killed: list[dict[str, Any]] = []
         for sid in to_kill:
             session = active[sid]
-            result: dict[str, Any] = {"pid_killed": False, "socket_closed": False}
-            # Kill the SSH process
-            if session.pid:
-                try:
-                    os.kill(session.pid, signal.SIGTERM)
-                    time.sleep(0.5)
-                    try:
-                        os.kill(session.pid, 0)
-                        os.kill(session.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
-                    result["pid_killed"] = True
-                except OSError:
-                    result["pid_killed"] = True  # Already dead
-            # Close control socket
-            if session.control_path and os.path.exists(session.control_path):
-                try:
-                    machine = self.get_machine(session.machine)
-                    hostname = machine.host if machine else "dummy"
-                except Exception:
-                    hostname = "dummy"
-                try:
-                    subprocess.run(
-                        [
-                            "ssh",
-                            "-O",
-                            "exit",
-                            "-o",
-                            f"ControlPath={session.control_path}",
-                            hostname,
-                        ],
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    result["socket_closed"] = True
-                except Exception:
-                    pass
+            result = self.kill_session(sid)
             killed.append({"session_id": sid, "machine": session.machine, **result})
 
-        # Batch close all sessions in one save
-        self._close_sessions_batch(to_kill)
         return {"killed": killed, "count": len(killed)}
 
     def _close_sessions_batch(self, session_ids: list[str]) -> None:
@@ -491,15 +500,8 @@ class SSHManager:
             now = datetime.now(UTC)
             to_remove = []
             for sid, sdata in raw.items():
-                if sdata.get("status") != "active":
-                    try:
-                        started = datetime.fromisoformat(sdata.get("started", ""))
-                        if started.tzinfo is None:
-                            started = started.replace(tzinfo=UTC)
-                        if (now - started).total_seconds() > hours * 3600:
-                            to_remove.append(sid)
-                    except (ValueError, TypeError):
-                        pass
+                if _session_is_old(sdata, now, hours):
+                    to_remove.append(sid)
             for sid in to_remove:
                 del raw[sid]
             if to_remove:
@@ -551,6 +553,101 @@ class SSHManager:
         wrapped = f"set -o pipefail; {command}"
         cmd.extend(["bash", "-c", shlex.quote(wrapped)])
         return cmd
+
+    @staticmethod
+    def _is_host_key_failure(stderr: str) -> bool:
+        """True when stderr indicates the host key could not be trusted."""
+        lowered = stderr.lower()
+        return any(marker in lowered for marker in _HOST_KEY_VERIFICATION_MARKERS)
+
+    @staticmethod
+    def _attempted_keys(machine: Machine) -> list[str]:
+        """Keys OpenSSH actually tried for this machine, in attempt order.
+
+        When the machine has an explicit key only that key is attempted
+        (``-i`` is passed). Without one, ssh falls back to its default
+        identities, which are reported so the agent does not brute-force
+        them one by one.
+        """
+        if machine.key:
+            return [machine.key]
+        return list(_DEFAULT_IDENTITY_PATHS)
+
+    def _host_key_remediation(self, machine: Machine) -> str:
+        """Actionable guidance for a failed host key verification.
+
+        Strict verification is the default (config.strict_host_key_checking
+        is "yes"); a new host must be pre-seeded or explicitly accepted
+        before the first connect can succeed. This never changes the
+        verification policy — it only tells the agent how to satisfy it.
+        """
+        return (
+            f"Host key verification failed for {machine.user}@{machine.host}:"
+            f" the host key is not trusted yet. Seed it first, e.g.\n"
+            f"  ssh-keyscan -p {machine.port} {machine.host} >> ~/.ssh/known_hosts\n"
+            f"or accept it interactively once (ssh -o StrictHostKeyChecking=accept-new "
+            f"{machine.user}@{machine.host}) and retry this command."
+        )
+
+    def _remember_working_key(self, machine: Machine) -> None:
+        """Persist the key that just authenticated as this machine's key.
+
+        The machine's existing stored config is updated through the
+        manager's storage accessors; no new state files are introduced.
+        """
+        if not machine.key:
+            return
+        with self._lock:
+            machines = self._load_machines()
+            if machine.name not in machines:
+                return
+            if machines[machine.name].get("key") == machine.key:
+                return
+            machines[machine.name]["key"] = machine.key
+            self._save_machines(machines)
+
+    def _machine_response(
+        self,
+        machine: Machine,
+        exit_code: int | None,
+        stderr: str,
+    ) -> dict[str, Any] | None:
+        """Attach SSH-1 remediation / SSH-2 attempted-keys context to a failure.
+
+        Returns a response dict when the failure is connection-level (exit
+        code 255), or None when the remote command itself failed (the raw
+        stderr is the accurate signal then).
+        """
+        if exit_code != 255:
+            return None
+        if self._is_host_key_failure(stderr):
+            return {"error": self._host_key_remediation(machine)}
+        if "permission denied" in stderr.lower():
+            return {"keys_attempted": self._attempted_keys(machine)}
+        return None
+
+    def _finish_response(
+        self,
+        resp: dict[str, Any],
+        machine: Machine,
+        exit_code: int | None,
+        stderr: str,
+        *,
+        success: bool,
+    ) -> dict[str, Any]:
+        """Apply SSH-1/SSH-2 context to a completed (sync or background) command.
+
+        On success the working key is remembered per machine; on failure the
+        response gains remediation or attempted-keys guidance.
+        """
+        if success:
+            self._remember_working_key(machine)
+            resp["key_used"] = machine.key
+            return resp
+        failure = self._machine_response(machine, exit_code, stderr)
+        if failure is not None:
+            resp.update(failure)
+        return resp
 
     def _normalize_timeout(self, timeout: object | None) -> int:
         """Normalize a caller-supplied timeout, falling back to the configured default."""
@@ -623,14 +720,25 @@ class SSHManager:
 
         # ---- background path ----
         if background:
+            stdout_path: Path | None = None
+            stderr_path: Path | None = None
+            stdout_handle: BinaryIO | None = None
+            stderr_handle: BinaryIO | None = None
+            proc: subprocess.Popen[bytes] | None = None
             try:
+                stdout_path, stdout_handle = self._open_background_output(session_id, "stdout")
+                stderr_path, stderr_handle = self._open_background_output(session_id, "stderr")
                 proc = subprocess.Popen(
                     ssh_args,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
                     start_new_session=True,
                 )
-                # Register session first so kill_session can find it
+                stdout_handle.close()
+                stderr_handle.close()
+                stdout_handle = None
+                stderr_handle = None
+
                 self.register_session(
                     Session(
                         id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
@@ -638,6 +746,11 @@ class SSHManager:
                 )
                 with self._process_lock:
                     self._processes[session_id] = proc
+                    self._background_outputs[session_id] = (
+                        stdout_path,
+                        stderr_path,
+                        max_output_chars,
+                    )
                 elapsed = round(time.monotonic() - start_time, 2)
                 self._log_command(
                     canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
@@ -650,6 +763,13 @@ class SSHManager:
                     "session_id": session_id,
                 }
             except Exception as e:
+                self._cleanup_failed_background_process(
+                    proc,
+                    stdout_handle,
+                    stderr_handle,
+                    stdout_path,
+                    stderr_path,
+                )
                 logger.debug("run_command (bg) failed for %s: %s", canonical, e, exc_info=True)
                 return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
 
@@ -678,13 +798,18 @@ class SSHManager:
                 "exit_code": result.returncode,
                 "elapsed_secs": elapsed,
                 "machine": canonical,
-                "session_id": session_id,
             }
             if stdout_file:
                 resp["stdout_file"] = stdout_file
             if stderr_file:
                 resp["stderr_file"] = stderr_file
-            return resp
+            return self._finish_response(
+                resp,
+                machine,
+                result.returncode,
+                result.stderr,
+                success=result.returncode == 0,
+            )
 
         except subprocess.TimeoutExpired:
             elapsed = round(time.monotonic() - start_time, 2)
@@ -697,7 +822,6 @@ class SSHManager:
                 "exit_code": -1,
                 "elapsed_secs": elapsed,
                 "machine": canonical,
-                "session_id": session_id,
             }
         except Exception as e:
             logger.debug("run_command failed for %s: %s", canonical, e, exc_info=True)
@@ -735,34 +859,107 @@ class SSHManager:
         )
         return summary, str(path)
 
-    # ----- Background process helpers -----
+    def _open_background_output(self, session_id: str, stream: str) -> tuple[Path, BinaryIO]:
+        """Open a restricted spool file so background processes cannot fill a pipe."""
+        path = self._config.output_dir / f"ssh_output_{session_id}_{stream}.txt"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(path), flags, 0o600)
+        return path, os.fdopen(fd, "wb")
 
-    def poll_session(self, session_id: str) -> dict[str, Any]:
-        """Check if a background process is still running.
+    @staticmethod
+    def _cleanup_failed_background_process(
+        proc: subprocess.Popen[bytes] | None,
+        stdout_handle: BinaryIO | None,
+        stderr_handle: BinaryIO | None,
+        stdout_path: Path | None,
+        stderr_path: Path | None,
+    ) -> None:
+        if stdout_handle is not None:
+            stdout_handle.close()
+        if stderr_handle is not None:
+            stderr_handle.close()
+        if proc is not None and proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+        for path in (stdout_path, stderr_path):
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    path.unlink()
 
-        Returns a dict with ``running`` (bool) and, when the process has
-        finished, the collected stdout/stderr plus the exit code.
-        """
+    @staticmethod
+    def _read_fallback_output(fallback_stream: Any) -> bytes:
+        """Read a fallback stream, normalising supported values to bytes."""
+        if fallback_stream is None or not hasattr(fallback_stream, "read"):
+            return b""
+        try:
+            fallback = fallback_stream.read()
+        except Exception:
+            return b""
+        if isinstance(fallback, str):
+            return fallback.encode()
+        if isinstance(fallback, bytes):
+            return fallback
+        return b""
+
+    def _collect_background_output(
+        self, path: Path, fallback_stream: Any, max_chars: int
+    ) -> tuple[str, str | None]:
+        """Read a completed spool, deleting short output and retaining large output."""
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            raw = b""
+
+        if not raw and fallback_stream is not None and hasattr(fallback_stream, "read"):
+            raw = self._read_fallback_output(fallback_stream)
+
+        text = raw.decode("utf-8", errors="replace")
+        if len(text) <= max_chars:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            return text, None
+
+        summary = (
+            f"[output saved to {path} — {len(text):,} chars total, "
+            f"first {max_chars:,} shown below]\n{text[:max_chars]}"
+        )
+        return summary, str(path)
+
+    def _take_finished_background_process(
+        self, session_id: str
+    ) -> tuple[subprocess.Popen[bytes], Path, Path, int] | None:
+        """Atomically detach a finished process and its output spools."""
         with self._process_lock:
             proc = self._processes.get(session_id)
-            if proc is None:
-                return {
-                    "success": False,
-                    "error": f"No background process for session '{session_id}'",
-                }
-            exit_code = proc.poll()
-            if exit_code is None:
-                return {"success": True, "session_id": session_id, "running": True}
+            if proc is None or proc.poll() is None:
+                return None
+            outputs = self._background_outputs.get(session_id)
+            if outputs is None:
+                outputs = (
+                    self._config.output_dir / f"ssh_output_{session_id}_stdout.txt",
+                    self._config.output_dir / f"ssh_output_{session_id}_stderr.txt",
+                    self._config.max_output_chars,
+                )
             self._processes.pop(session_id, None)
-        # Process finished — collect output
-        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
-        max_chars = self._config.max_output_chars
-        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
-        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self.close_session(session_id)
-        resp: dict[str, Any] = {
-            "success": True,
+            self._background_outputs.pop(session_id, None)
+        return proc, *outputs
+
+    def _finish_background_process(
+        self,
+        session_id: str,
+        proc: subprocess.Popen[bytes],
+        stdout_path: Path,
+        stderr_path: Path,
+        max_chars: int,
+    ) -> dict[str, Any]:
+        stdout, stdout_file = self._collect_background_output(stdout_path, proc.stdout, max_chars)
+        stderr, stderr_file = self._collect_background_output(stderr_path, proc.stderr, max_chars)
+        self.close_session(session_id, cleanup_output_files=False)
+        exit_code = proc.returncode if proc.returncode is not None else proc.poll()
+        response: dict[str, Any] = {
+            "success": exit_code == 0,
             "session_id": session_id,
             "running": False,
             "stdout": stdout,
@@ -770,18 +967,25 @@ class SSHManager:
             "exit_code": exit_code,
         }
         if stdout_file:
-            resp["stdout_file"] = stdout_file
+            response["stdout_file"] = stdout_file
         if stderr_file:
-            resp["stderr_file"] = stderr_file
-        return resp
+            response["stderr_file"] = stderr_file
+        session = self.get_session(session_id)
+        machine = self.get_machine(session.machine) if session is not None else None
+        if machine is not None:
+            return self._finish_response(
+                response,
+                machine,
+                exit_code,
+                stderr,
+                success=exit_code == 0,
+            )
+        return response
 
-    def read_output(self, session_id: str) -> dict[str, Any]:
-        """Read stdout/stderr from a completed background process.
+    # ----- Background process helpers -----
 
-        Unlike :meth:`poll_session` this does **not** check whether the
-        process is still running — it is intended for callers who already
-        know the process has finished.
-        """
+    def poll_session(self, session_id: str) -> dict[str, Any]:
+        """Check whether a background process is running and collect it when complete."""
         with self._process_lock:
             proc = self._processes.get(session_id)
             if proc is None:
@@ -789,31 +993,44 @@ class SSHManager:
                     "success": False,
                     "error": f"No background process for session '{session_id}'",
                 }
-            exit_code = proc.poll()
-            if exit_code is None:
+            if proc.poll() is None:
+                return {"success": True, "session_id": session_id, "running": True}
+
+        finished = self._take_finished_background_process(session_id)
+        if finished is None:
+            return {"success": True, "session_id": session_id, "running": True}
+        proc, stdout_path, stderr_path, max_chars = finished
+        return self._finish_background_process(
+            session_id, proc, stdout_path, stderr_path, max_chars
+        )
+
+    def read_output(self, session_id: str) -> dict[str, Any]:
+        """Read output from a completed background process."""
+        with self._process_lock:
+            proc = self._processes.get(session_id)
+            if proc is None:
+                return {
+                    "success": False,
+                    "error": f"No background process for session '{session_id}'",
+                }
+            if proc.poll() is None:
                 return {
                     "success": False,
                     "error": f"Process for session '{session_id}' is still running",
                 }
-            self._processes.pop(session_id, None)
-        stdout_raw = (proc.stdout.read() or b"").decode(errors="replace") if proc.stdout else ""
-        stderr_raw = (proc.stderr.read() or b"").decode(errors="replace") if proc.stderr else ""
-        max_chars = self._config.max_output_chars
-        stdout, stdout_file = self._maybe_save_output(stdout_raw, max_chars, session_id, "stdout")
-        stderr, stderr_file = self._maybe_save_output(stderr_raw, max_chars, session_id, "stderr")
-        self.close_session(session_id)
-        resp2: dict[str, Any] = {
-            "success": True,
-            "session_id": session_id,
-            "stdout": stdout,
-            "stderr": stderr,
-            "exit_code": exit_code,
-        }
-        if stdout_file:
-            resp2["stdout_file"] = stdout_file
-        if stderr_file:
-            resp2["stderr_file"] = stderr_file
-        return resp2
+
+        finished = self._take_finished_background_process(session_id)
+        if finished is None:
+            return {
+                "success": False,
+                "error": f"No background process for session '{session_id}'",
+            }
+        proc, stdout_path, stderr_path, max_chars = finished
+        result = self._finish_background_process(
+            session_id, proc, stdout_path, stderr_path, max_chars
+        )
+        result.pop("running", None)
+        return result
 
     # ----- Audit log -----
 
@@ -825,15 +1042,26 @@ class SSHManager:
         elapsed: float,
         session_id: str,
     ) -> None:
-        """Append a single JSONL line to the command audit log."""
+        """Append a redacted or metadata-only JSONL audit entry."""
+        mode = self._config.audit_log_mode.strip().lower()
+        if mode not in _AUDIT_MODES:
+            logger.warning("Unknown audit_log_mode %r; using redacted", mode)
+            mode = "redacted"
+        if mode == "off":
+            return
+
+        redacted_command = _redact_command(command)
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
             "machine": machine,
-            "command": command,
+            "command_sha256": hashlib.sha256(redacted_command.encode()).hexdigest(),
+            "command_length": len(redacted_command),
             "exit_code": exit_code,
             "elapsed_secs": elapsed,
             "session_id": session_id,
         }
+        if mode == "redacted":
+            entry["command"] = redacted_command
         try:
             self._config.data_dir.mkdir(parents=True, exist_ok=True)
             fd = os.open(

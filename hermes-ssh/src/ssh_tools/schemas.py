@@ -2,7 +2,7 @@
 
 SSH_TERMINAL_SCHEMA = {
     "name": "ssh_terminal",
-    "description": "Run a command on a remote machine via SSH. Uses the machine registry — add machines first with ssh_machines.",
+    "description": "Run a command on a remote machine via SSH. Uses the machine registry — add machines first with ssh_machines. Background commands return a session_id; poll or read output with ssh_sessions.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -38,16 +38,67 @@ SSH_TERMINAL_SCHEMA = {
                 "minimum": 1,
                 "maximum": 500000,
             },
-            "poll": {
+        },
+        "required": ["machine", "command"],
+    },
+}
+
+SSH_TRANSFER_SCHEMA = {
+    "name": "ssh_transfer",
+    "description": (
+        "Upload or download a file or directory using a registered SSH machine and OpenSSH "
+        "SFTP. Transfers default to no overwrite. Credential paths and symbolic links are blocked."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
                 "type": "string",
-                "description": "Session ID of a background command to poll for status. Returns running (bool), stdout, stderr, exit_code.",
+                "enum": ["upload", "download"],
+                "description": "Transfer direction from the Hermes host's perspective",
             },
-            "read_output": {
+            "machine": {
                 "type": "string",
-                "description": "Session ID of a completed background command to read full stdout/stderr from.",
+                "description": "Machine name or alias",
+            },
+            "source": {
+                "type": "string",
+                "description": (
+                    "Upload: local source path. Download: absolute remote source path or a path "
+                    "starting with '~/'."
+                ),
+            },
+            "destination": {
+                "type": "string",
+                "description": (
+                    "Upload: absolute remote destination path or a path starting with '~/'. "
+                    "Download: local destination path."
+                ),
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Required for directory transfers (default: false)",
+                "default": False,
+            },
+            "preserve": {
+                "type": "boolean",
+                "description": "Preserve file times and modes where supported (default: false)",
+                "default": False,
+            },
+            "overwrite": {
+                "type": "boolean",
+                "description": "Allow replacing an existing regular file (default: false)",
+                "default": False,
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Seconds before cancelling the transfer (default: 300)",
+                "default": 300,
+                "minimum": 1,
+                "maximum": 3600,
             },
         },
-        "required": [],
+        "required": ["action", "machine", "source", "destination"],
     },
 }
 
@@ -72,8 +123,7 @@ SSH_MACHINES_SCHEMA = {
             },
             "user": {
                 "type": "string",
-                "description": "SSH username (default: root)",
-                "default": "root",
+                "description": "SSH username (defaults to the current local user when omitted)",
             },
             "port": {
                 "type": "integer",
@@ -107,13 +157,13 @@ SSH_MACHINES_SCHEMA = {
 
 SSH_SESSIONS_SCHEMA = {
     "name": "ssh_sessions",
-    "description": "Manage active SSH sessions. List, kill, cleanup, poll, or read output.",
+    "description": "Manage active SSH sessions. List, kill, cleanup idle, poll, or read output from background commands.",
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list", "kill", "cleanup", "prune", "poll", "read_output"],
+                "enum": ["list", "kill", "cleanup", "poll", "read_output"],
                 "description": "Action to perform",
             },
             "session_id": {

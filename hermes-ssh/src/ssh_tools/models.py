@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import getpass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,7 +14,7 @@ class Machine:
 
     name: str
     host: str
-    user: str = "root"
+    user: str = field(default_factory=getpass.getuser)
     port: int = 22
     key: str = ""
     aliases: list[str] | None = None
@@ -38,7 +39,7 @@ class Machine:
         return cls(
             name=name,
             host=data.get("host", ""),
-            user=data.get("user", "root"),
+            user=data.get("user") or getpass.getuser(),
             port=data.get("port", 22),
             key=data.get("key", ""),
             aliases=data.get("aliases", []),

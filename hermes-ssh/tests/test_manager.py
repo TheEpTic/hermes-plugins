@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 import json
+import signal
+import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -32,7 +35,7 @@ def test_machine_to_dict_roundtrip() -> None:
 
 def test_machine_defaults() -> None:
     m = Machine(name="x", host="1.2.3.4")
-    assert m.user == "root"
+    assert m.user == getpass.getuser()
     assert m.port == 22
     assert m.key == ""
     assert m.aliases is None
@@ -341,7 +344,7 @@ def test_cleanup_idle(tmp_path: Path) -> None:
 
     s = mgr.get_session("s1")
     assert s is not None
-    assert s.status == "closed"
+    assert s.status == "orphaned"
 
 
 def test_cleanup_idle_skips_recent(tmp_path: Path) -> None:
@@ -593,6 +596,7 @@ def test_start_idle_checker_idempotent(tmp_path: Path) -> None:
 
 from unittest.mock import MagicMock, patch
 
+from ssh_tools.config import SSHConfig
 from ssh_tools.manager import SSHManager
 
 # ---------------------------------------------------------------------------
@@ -600,71 +604,55 @@ from ssh_tools.manager import SSHManager
 # ---------------------------------------------------------------------------
 
 
-def test_kill_session_no_pid(tmp_path: Path) -> None:
-    """kill_session with pid=0 skips os.kill and still closes the session."""
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=0))
-    result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["pid_killed"] is False
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "closed"
-
-
-def test_kill_session_with_pid_mocked(tmp_path: Path) -> None:
-    """Kill session with a real PID — mock os.kill to avoid actually killing."""
+def test_kill_session_refuses_untracked_persisted_pid(tmp_path: Path) -> None:
+    """Persisted PIDs are never signalled after manager restart."""
     mgr = _make_manager(tmp_path)
     mgr.register_session(Session(id="s1", machine="h", pid=99999))
-
-    with (
-        patch("ssh_tools.manager.os.kill") as mock_kill,
-        patch("ssh_tools.manager.time.sleep"),
-    ):
-        # First call (SIGTERM) succeeds, second (alive check) raises OSError = dead
-        mock_kill.side_effect = [None, OSError("No such process")]
+    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
         result = mgr.kill_session("s1")
+    assert result["success"] is False
+    assert result["status"] == "orphaned"
+    mock_killpg.assert_not_called()
+    assert mgr.get_session("s1").status == "orphaned"
 
+
+def test_kill_session_tracked_process_group(tmp_path: Path) -> None:
+    """Only an in-memory tracked process group may be signalled."""
+    mgr = _make_manager(tmp_path)
+    mgr.register_session(Session(id="s1", machine="h", pid=99999))
+    proc = MagicMock(pid=99999)
+    proc.poll.return_value = None
+    mgr._processes["s1"] = proc
+    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
+        result = mgr.kill_session("s1")
     assert result["success"] is True
     assert result["pid_killed"] is True
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "closed"
+    mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
+    assert mgr.get_session("s1").status == "closed"
 
 
-def test_kill_session_real_machine_hostname_in_ssh_exit(tmp_path: Path) -> None:
-    """Verify hostname from machine registry is used in ssh -O exit command."""
+def test_kill_session_does_not_close_shared_control_socket(tmp_path: Path) -> None:
+    """Killing one command must not close a machine-wide ControlMaster."""
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="prod", host="10.0.0.1", user="admin"))
-    # Create a fake control path file so os.path.exists returns True
     ctrl = tmp_path / "prod.sock"
     ctrl.touch()
-    mgr.register_session(Session(id="s1", machine="prod", pid=0, control_path=str(ctrl)))
-
-    with (
-        patch("ssh_tools.manager.subprocess.run") as mock_sub,
-        patch("ssh_tools.manager.os.kill"),
-    ):
-        mock_sub.return_value = MagicMock(returncode=0)
+    mgr.register_session(Session(id="s1", machine="prod", pid=123, control_path=str(ctrl)))
+    proc = MagicMock(pid=123)
+    proc.poll.return_value = 0
+    mgr._processes["s1"] = proc
+    with patch("ssh_tools.manager.subprocess.run") as mock_sub:
         result = mgr.kill_session("s1")
-
     assert result["success"] is True
-    assert result["socket_closed"] is True
-    # Verify the ssh command used the real hostname "10.0.0.1"
-    call_args = mock_sub.call_args
-    cmd = call_args[0][0]
-    assert cmd[0] == "ssh"
-    assert "10.0.0.1" in cmd
+    assert result["socket_closed"] is False
+    mock_sub.assert_not_called()
 
 
 def test_kill_session_socket_path_missing(tmp_path: Path) -> None:
-    """When control_path file doesn't exist, socket_closed is False."""
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     mgr.register_session(Session(id="s1", machine="h", pid=0, control_path="/nonexistent.sock"))
     result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["socket_closed"] is False
+    assert result["success"] is False
+    assert result["status"] == "orphaned"
 
 
 def test_kill_session_nonexistent(tmp_path: Path) -> None:
@@ -724,13 +712,13 @@ def test_cleanup_idle_batch_close_single_save(tmp_path: Path) -> None:
         result = mgr.cleanup_idle(max_idle_minutes=30)
 
     assert result["count"] == 2
-    # Both sessions should be closed
+    # Untracked persisted sessions are marked orphaned without signalling PIDs.
     s1 = mgr.get_session("s1")
     assert s1 is not None
-    assert s1.status == "closed"
+    assert s1.status == "orphaned"
     s2 = mgr.get_session("s2")
     assert s2 is not None
-    assert s2.status == "closed"
+    assert s2.status == "orphaned"
 
 
 def test_cleanup_idle_empty_list(tmp_path: Path) -> None:
@@ -820,6 +808,28 @@ def test_poll_session_finished(tmp_path: Path) -> None:
     assert s.status == "closed"
 
 
+def test_poll_session_reports_nonzero_background_exit_as_failure(tmp_path: Path) -> None:
+    """A finished background command must not be reported as successful when it fails."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        background = mgr.run_command("h", "false", background=True)
+
+    fake_proc.poll.return_value = 1
+    fake_proc.returncode = 1
+    fake_proc.stdout.read.return_value = b""
+    fake_proc.stderr.read.return_value = b"command failed\n"
+
+    result = mgr.poll_session(background["session_id"])
+
+    assert result["success"] is False
+    assert result["running"] is False
+    assert result["exit_code"] == 1
+    assert result["stderr"] == "command failed\n"
+
+
 def test_poll_session_nonexistent(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     result = mgr.poll_session("no_such_session")
@@ -828,7 +838,7 @@ def test_poll_session_nonexistent(tmp_path: Path) -> None:
 
 
 def test_read_output_finished(tmp_path: Path) -> None:
-    """read_output returns output from a finished background process."""
+    """read_output preserves output and exit status from a finished background process."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
 
@@ -843,7 +853,7 @@ def test_read_output_finished(tmp_path: Path) -> None:
     fake_proc.stderr.read.return_value = b"err msg"
 
     out = mgr.read_output(sid)
-    assert out["success"] is True
+    assert out["success"] is False
     assert out["stdout"] == "some output"
     assert out["stderr"] == "err msg"
     assert out["exit_code"] == 1
@@ -1238,3 +1248,117 @@ def test_background_session_registered_before_process(tmp_path: Path) -> None:
         assert session is not None
         assert session.pid == 99999
         assert sid in mgr._processes
+
+
+def test_background_process_uses_spool_files(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc) as popen:
+        result = mgr.run_command("h", "verbose command", background=True)
+    assert popen.call_args.kwargs["stdout"] is not subprocess.PIPE
+    assert popen.call_args.kwargs["stderr"] is not subprocess.PIPE
+    assert result["session_id"] in mgr._background_outputs
+
+
+def test_background_large_output_file_survives_poll(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        started = mgr.run_command("h", "verbose command", background=True, max_output_chars=10)
+    sid = started["session_id"]
+    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
+    stdout_path.write_text("x" * 100)
+    stderr_path.write_text("")
+    fake_proc.poll.return_value = 0
+    fake_proc.returncode = 0
+    result = mgr.poll_session(sid)
+    assert result["running"] is False
+    assert Path(result["stdout_file"]).exists()
+    assert Path(result["stdout_file"]).read_text() == "x" * 100
+    assert not stderr_path.exists()
+
+
+def test_background_short_output_spool_is_removed(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    fake_proc = _fake_running_popen()
+    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
+        started = mgr.run_command("h", "small command", background=True)
+    sid = started["session_id"]
+    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
+    stdout_path.write_text("done")
+    stderr_path.write_text("")
+    fake_proc.poll.return_value = 0
+    fake_proc.returncode = 0
+    result = mgr.poll_session(sid)
+    assert result["stdout"] == "done"
+    assert "stdout_file" not in result
+    assert not stdout_path.exists()
+    assert not stderr_path.exists()
+
+
+def test_audit_log_redacts_common_inline_secrets(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "TOKEN=super-secret deploy --password hunter2")
+    entry = mgr.list_command_log()[-1]
+    assert "super-secret" not in entry["command"]
+    assert "hunter2" not in entry["command"]
+    assert "<redacted>" in entry["command"]
+    assert len(entry["command_sha256"]) == 64
+
+
+def test_audit_log_metadata_mode_omits_command(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "echo private")
+    entry = mgr.list_command_log()[-1]
+    assert "command" not in entry
+    assert entry["command_length"] == len("echo private")
+
+
+def test_audit_log_can_be_disabled(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="off"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "echo private")
+    assert not (tmp_path / "command_log.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    ("command", "secret"),
+    [
+        ("GITHUB_TOKEN=ghp_leak deploy", "ghp_leak"),
+        ("AWS_SECRET_ACCESS_KEY='secret with spaces' deploy", "secret with spaces"),
+        ('tool --api-key "flag secret value"', "flag secret value"),
+        ('curl -H "Authorization: Bearer bearer-leak" https://example.com', "bearer-leak"),
+        ('curl -H "X-Api-Key: header-leak" https://example.com', "header-leak"),
+        ("curl https://user:url-password@example.com", "url-password"),
+    ],
+)
+def test_redact_command_handles_prefixed_and_quoted_secrets(command: str, secret: str) -> None:
+    from ssh_tools.manager import _redact_command
+
+    redacted = _redact_command(command)
+    assert secret not in redacted
+    assert "<redacted>" in redacted
+
+
+def test_audit_hash_is_based_on_redacted_command(tmp_path: Path) -> None:
+    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.manager.subprocess.run") as run:
+        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        mgr.run_command("h", "GITHUB_TOKEN=short deploy")
+        mgr.run_command("h", "GITHUB_TOKEN=a-much-longer-secret deploy")
+
+    first, second = mgr.list_command_log(limit=2)
+    assert first["command_sha256"] == second["command_sha256"]
+    assert first["command_length"] == second["command_length"]

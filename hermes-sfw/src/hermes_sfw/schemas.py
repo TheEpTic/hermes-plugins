@@ -8,8 +8,11 @@ SFW_TOOL_SCHEMA = {
         "Run package manager commands through Socket Firewall Free (sfw). "
         "sfw wraps your package manager and blocks malicious packages at install time. "
         "No API key or config needed. "
-        "Supports: npm, yarn, pnpm (JS/TS), pip, uv (Python), cargo (Rust). "
-        "Works for install, uninstall, add, remove, update, and any other package manager command."
+        "Supports documented dependency operations for npm, yarn, pnpm (JS/TS), pip, uv (Python), and cargo (Rust). "
+        "Direct terminal dependency calls are automatically routed through sfw when the Hermes pre-tool hook is available. "
+        "sfw is a deferred tool: discover it with tool_search/tool_describe. "
+        "In background/pty shells where sfw is not on PATH, "
+        "use the status action to get the resolved binary path and call it directly."
     ),
     "parameters": {
         "type": "object",
@@ -19,7 +22,8 @@ SFW_TOOL_SCHEMA = {
                 "enum": ["run", "status"],
                 "description": (
                     "'run' — execute a package manager command through sfw. "
-                    "'status' — check if sfw is installed and get version."
+                    "'status' — check if sfw is installed and get version, "
+                    "resolved binary path, and invocation guidance for background/pty shells."
                 ),
             },
             "command": {
@@ -27,8 +31,8 @@ SFW_TOOL_SCHEMA = {
                 "maxLength": 1024,
                 "description": (
                     "Package manager command to run through sfw. "
-                    "Must start with: npm, yarn, pnpm, pip, pip3, uv, cargo, rustup. "
-                    "Any command the underlying package manager supports works here. "
+                    "Must use one of the documented dependency operations for: "
+                    "npm, yarn, pnpm (JS/TS), pip, uv (Python), or cargo (Rust). "
                     "Examples: "
                     "'npm install express', 'npm uninstall lodash', "
                     "'yarn add @types/node', 'yarn remove debug', "

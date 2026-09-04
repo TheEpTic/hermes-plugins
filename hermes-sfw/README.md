@@ -1,61 +1,64 @@
 # hermes-sfw
 
+[![CI](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/TheEpTic/hermes-plugins/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 Socket Firewall Free plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-Block malicious dependencies at install time. Wrap any package manager command with `sfw` to get automatic protection — no API key, no config.
+Block known malicious dependencies during supported dependency operations. Route those operations through `sfw` for automatic protection — no API key, no config.
 
-```
+```text
 sfw action=run command="npm install express"
 sfw action=status
 ```
 
-## Quick Start
+## quick start
 
-> **Requires Python 3.11+** and the [sfw CLI](https://github.com/nicedoc/socket-firewall-free) installed on the host system.
+> Requires Python 3.11+, Hermes Agent, and the Socket Firewall Free `sfw` CLI.
 
-### Option 1: Deploy script (recommended)
+Install the prerequisite and the plugin:
+
+```bash
+npm i -g sfw
+python -m pip install hermes-sfw
+hermes plugins enable hermes-sfw --no-allow-tool-override
+```
+
+Run `/reset` or restart Hermes, then verify without installing a throwaway dependency:
+
+```bash
+sfw --version
+python -m pip show hermes-sfw
+hermes plugins list --enabled --plain
+```
+
+Inside Hermes:
+
+```text
+sfw action=status
+```
+
+If Hermes cannot see the package, install it with the Python environment that owns the `hermes` executable. See [AGENTS.md](../AGENTS.md).
+
+For source development:
 
 ```bash
 git clone https://github.com/TheEpTic/hermes-plugins.git
 cd hermes-plugins/hermes-sfw
 ./deploy.sh
+hermes plugins enable hermes-sfw --no-allow-tool-override
 ```
 
-Then restart Hermes with `/reset`.
+Run `/reset` or restart Hermes after changing the source tree.
 
-### Option 2: Manual symlink
+## features
 
-```bash
-git clone https://github.com/TheEpTic/hermes-plugins.git
-ln -s "$(pwd)/hermes-plugins/hermes-sfw/src/hermes_sfw" ~/.hermes/plugins/hermes-sfw
-```
+### `sfw run` — execute commands
 
-Then `/reset` in Hermes. Changes to the source take effect immediately through the symlink — no restart needed.
+Run supported dependency operations through sfw. Known malicious packages are blocked automatically.
 
-### Option 3: As a Python package
-
-```bash
-pip install git+https://github.com/TheEpTic/hermes-plugins.git#subdirectory=hermes-sfw
-```
-
-Then add to your Hermes config:
-
-```yaml
-plugins:
-  - name: hermes-sfw
-    module: hermes_sfw
-```
-
-## Features
-
-### `sfw run` — Execute Commands
-
-Run any package manager command through sfw. Malicious packages are blocked automatically.
-
-```bash
+```text
 # Install a package
 sfw action=run command="npm install express"
 
@@ -76,42 +79,80 @@ sfw action=run command="pnpm add -D vitest" verbose=true
 sfw action=run command="npm install" workdir="/path/to/project"
 ```
 
-**Supported package managers:** npm, yarn, pnpm (JS/TS), pip, pip3, uv (Python), cargo, rustup (Rust). `npx` is intentionally blocked because it can execute arbitrary package code.
+**Supported package managers:** npm, yarn, and pnpm for JavaScript/TypeScript; pip, pip3, and uv for Python; cargo for Rust. Each manager is restricted to dependency operations — for example `npm install`, `npm ci`, `npm uninstall`, and `npm update` are accepted, but runner-style subcommands like `npm run` are not. `npx`, `rustup`, and runner-style subcommands are intentionally blocked because they can execute arbitrary programs.
 
-**Blocked packages:** When sfw detects a malicious package, the install is blocked and the package name is returned in the response. Non-package-manager commands (like `cat`, `rm`, `curl`) are rejected by the prefix allowlist.
+**Blocked packages:** When sfw detects a malicious package, the install is blocked and the package name is returned in the response. Blocked and installed indicators are parsed from sfw output and returned as `blocked` and `installed` lists in the result, alongside `success`, `command`, `exit_code`, `stdout`, and `stderr`:
 
-**Output truncation:** Output exceeding 10,000 characters is automatically truncated with a size note.
+```text
+🔴 blocked malicious-pkg
+blocked: evil-trojan
+🟢 installed express
+added 5 packages
+```
 
-### `sfw status` — Check Installation
+Non-package-manager commands (like `cat`, `rm`, `curl`) are rejected by the prefix allowlist, and commands longer than 1,024 characters are rejected outright.
+
+**Output truncation:** Output exceeding 10,000 characters is intentionally truncated with a size note. The discarded suffix is not returned in another field.
+
+### automatic terminal enforcement
+
+When enabled, the plugin watches Hermes `terminal` calls. A supported dependency operation such as `npm install`, `uv pip install`, or `cargo fetch` is rewritten before execution to invoke the resolved `sfw` binary:
+
+```text
+terminal command: npm install express
+executed command: /home/user/.local/share/pnpm/bin/sfw npm install express
+```
+
+The model does not need to notice a block or issue a second tool call. Unsupported package-manager forms, shell-prefixed calls (`cd app && npm install`, `sudo npm install`), malformed commands, and manager paths are blocked before raw execution. Non-package-manager terminal commands are unaffected.
+
+The hook only runs when Hermes exposes `pre_tool_call` hooks. Set `HERMES_SFW_ENFORCE_DIRECT=off` before starting Hermes only when you deliberately want to bypass automatic terminal enforcement. The default is on.
+
+### `sfw status` — check installation
 
 Verify sfw is installed and get the version.
 
-```bash
+```text
 sfw action=status
 ```
 
-Returns: `installed` (bool), `version` (string), `binary` (path).
+Returns: `installed` (bool), `version` (string), `binary` (path). `version` is the sfw binary's own `--version` output, which can differ from the npm package version you installed — see [troubleshooting](#troubleshooting).
 
-## How It Works
+## how it works
 
-hermes-sfw is a thin wrapper around the [sfw CLI](https://github.com/nicedoc/socket-firewall-free). It:
+hermes-sfw is a thin wrapper around the [sfw CLI](https://github.com/SocketDev/sfw-free). It:
 
-1. Validates the command starts with an allowed package manager prefix
+1. Validates commands against the strict package-manager operation grammar
 2. Resolves and validates the working directory (if specified)
 3. Executes the command through `sfw` with timeout protection
 4. Parses stdout/stderr for blocked and installed package indicators
 5. Returns structured JSON with success status, output, and parsed results
 
-## Configuration
+The explicit `sfw` tool executes the manager as an argument vector — never through a shell — so quoting and special characters cannot reach a shell interpreter. Automatic terminal enforcement uses Hermes's `modify` hook to build a shell-quoted command for the resolved `sfw` binary, preserving the same manager arguments while preventing the raw package manager from running. Both paths pass through Hermes's dangerous-command approval system and fail closed when that system is unavailable.
+
+### binary discovery
+
+The sfw binary is located on demand for every call rather than cached, so an install that happens after the plugin is registered is picked up immediately. Discovery order:
+
+1. An explicit `SFWConfig(sfw_bin=...)` path, if configured
+2. `sfw` on `PATH` (`shutil.which`)
+3. Known shim and install locations:
+   - `~/.local/share/pnpm/sfw`
+   - `~/.local/share/pnpm/bin/sfw`
+   - `~/.local/bin/sfw`
+   - `~/.npm-global/bin/sfw`
+   - `~/.cargo/bin/sfw`
+   - `/usr/local/bin/sfw`
+
+## configuration
 
 All settings live in `src/hermes_sfw/manager.py` as an `SFWConfig` dataclass:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `sfw_bin` | `sfw` | Path to the sfw binary |
+| `sfw_bin` | `sfw` | Path to the sfw binary (a concrete path bypasses PATH and shim discovery) |
 | `timeout` | 300s | Max seconds per command |
 
-## Architecture
+## architecture
 
 ```
 src/hermes_sfw/
@@ -133,60 +174,90 @@ src/hermes_sfw/
 - Output sanitization truncates long outputs to prevent context overflow.
 - `OSError` errno mapping provides clean error messages without leaking internals.
 
-## Security
+## security
 
-See [SECURITY.md](SECURITY.md) for the full picture.
+See [SECURITY.md](SECURITY.md) for the full boundary.
 
 **Defaults you should know about:**
 
 - Only package manager commands are allowed (prefix allowlist: npm, yarn, pnpm, pip, cargo, etc.)
 - Non-package-manager commands (`cat`, `rm`, `curl`, etc.) are rejected
 - Commands run with the permissions of the Hermes agent process
+- Commands pass through Hermes dangerous-command approval checks and fail closed if the approval system is unavailable
+
+**hermes-sfw is a dependency guard, not a sandbox.** It blocks packages sfw knows are malicious, but package lifecycle scripts (`postinstall`, etc.) and build backends still run with the permissions of the Hermes process. Use it to reduce known-bad dependencies, not to contain untrusted code.
 
 **Hardening applied:**
 
 - Command prefix validation via allowlist before execution
-- `shlex.split()` with error handling prevents shell injection
-- Workdir resolved with `os.path.realpath()` to prevent path traversal
+- Commands are passed as an argument vector without invoking a shell
+- `shlex.split()` handles quoting and rejects malformed command strings early
+- Working directories are expanded, resolved, and checked to be existing directories
 - Output truncated at 10K chars to prevent context overflow
 - Timeout protection prevents hanging installs
 
-## Requirements
+## requirements
 
 - Python 3.11+
-- [sfw CLI](https://github.com/nicedoc/socket-firewall-free) installed on PATH
+- [sfw CLI](https://github.com/SocketDev/sfw-free) installed on PATH
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 
-## Troubleshooting
+## troubleshooting
 
-**"sfw is not installed"**
-Install sfw globally: `npm i -g sfw`. The plugin searches PATH and common locations (`~/.local/share/pnpm/bin/`, `/usr/local/bin/`, `~/.npm-global/bin/`).
+**Plugin installed but tools are absent**
+
+Enable the plugin and reset Hermes:
+
+```bash
+hermes plugins enable hermes-sfw --no-allow-tool-override
+hermes plugins list --enabled --plain
+```
+
+**`sfw action=status` reports `installed: false`**
+
+The binary was not found on `PATH` or in any known shim location at the moment of the call. Possible causes:
+
+- sfw was never installed — run `npm i -g sfw`.
+- sfw was installed into a different environment or user than the one running Hermes. A shell finding `sfw` does not prove the Hermes process can find it; background shells, systemd services, and containers often have a different `PATH`.
+- The install happened after Hermes started. Binary discovery is on-demand since 0.2.4, so no restart is required — but if you are on an older version, restart Hermes after installing sfw.
+
+**Version looks wrong (`status` reports a version that differs from the npm package)**
+
+`sfw action=status` reports the version of the sfw *binary* (`sfw --version`). The npm package version and the binary's own version are separate layers and can legitimately differ. Check which layer you are looking at before reporting a bug.
+
+**Broken shim: `sfw` exists but every run fails**
+
+pnpm-style installs create a wrapper script at the shim path that points at the real `sfw.mjs`. If that target file is missing or stale, even `npm ci` can fail and `sfw --version` may error. Verify the resolved binary from `sfw action=status` (the `binary` field), inspect that path, and repair with `npm i -g sfw` (or your package manager's equivalent) so the shim is regenerated. As a workaround, point `SFWConfig(sfw_bin=...)` at a known-good binary.
 
 **Command rejected with "not allowed"**
-Only package manager commands are allowed. If you need to add a prefix, modify `_ALLOWED_PREFIXES` in `manager.py`.
+
+Only the documented dependency operations are allowed. Runner-style commands, unsupported subcommands, shell-prefixed calls, malformed commands, and manager paths are intentionally blocked so they cannot bypass SFW. Use a documented `sfw` operation, or set `HERMES_SFW_ENFORCE_DIRECT=off` only when you deliberately accept raw terminal dependency execution.
 
 **Command timeout**
+
 Default timeout is 5 minutes (300s). For very large installs, this may not be enough. Override via `SFWConfig(timeout=...)` when creating the manager.
 
 **Output looks truncated**
-This is intentional — outputs over 10K chars are truncated with a size note. The full output is in the raw stdout/stderr fields.
 
-## Development
+This is intentional. Outputs over 10K characters are truncated to protect context, and the discarded suffix is not retained by the plugin.
+
+## development
 
 ```bash
 git clone https://github.com/TheEpTic/hermes-plugins.git
 cd hermes-plugins/hermes-sfw
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+uv sync --extra dev --locked
 
-# Run checks
-black --check src/hermes_sfw/ tests/
-mypy src/hermes_sfw/
-pytest
+# Run the gates
+uv run pytest
+uv run black --check src tests
+uv run mypy src
 ```
+
+CI runs those gates on Python 3.11, 3.12, and 3.13.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## License
+## license
 
 MIT — see [LICENSE](LICENSE).

@@ -1,0 +1,639 @@
+"""Transfer orchestration, remote probes, staging, and audit events."""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from .models import RemoteKind, TransferRequest, TransferValidationError
+from .policy import (
+    cleanup_local,
+    local_temp,
+    path_size,
+    prepare_download_destination,
+    prepare_upload_source,
+    remote_path,
+    remote_sensitive_reason,
+    remote_shell_path,
+    remote_temp,
+)
+from .transport import SFTPTransport
+
+if TYPE_CHECKING:
+    from ..manager import SSHManager
+    from ..models import Machine
+
+_AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+
+
+def _renameat2_no_replace(temporary: Path, destination: Path) -> None:
+    """Install a staged file atomically on Linux without replacing a target."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    try:
+        renameat2 = libc.renameat2
+    except AttributeError as exc:
+        raise OSError(errno.ENOTSUP, "renameat2 is unavailable") from exc
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(temporary),
+        -100,
+        os.fsencode(destination),
+        1,
+    )
+    if result != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
+def _move_local_no_replace(temporary: Path, destination: Path) -> None:
+    """Atomically install a staged download without replacing a new destination."""
+    if sys.platform.startswith("linux"):
+        _renameat2_no_replace(temporary, destination)
+        return
+
+    if temporary.is_file():
+        os.link(temporary, destination)
+        temporary.unlink()
+        return
+    raise OSError(
+        errno.ENOTSUP,
+        "atomic no-replace finalisation for directories is unsupported on this platform",
+        destination,
+    )
+
+
+class TransferService:
+    """Coordinates policy, OpenSSH transport, finalisation, and audit events."""
+
+    def __init__(self, manager: SSHManager) -> None:
+        self.manager = manager
+        self.transport = SFTPTransport(manager)
+
+    def execute(self, request: TransferRequest) -> dict[str, Any]:
+        machine = self.manager.get_machine(request.machine_name)
+        if machine is None:
+            return {"success": False, "error": f"Machine '{request.machine_name}' not found."}
+        if shutil.which("sftp") is None:
+            return self._error(
+                machine.name,
+                "OpenSSH sftp client is not installed or available on PATH",
+            )
+        if request.action == "upload":
+            return self._upload(request, machine)
+        return self._download(request, machine)
+
+    def _probe(
+        self,
+        machine: str,
+        path: str,
+        timeout: int,
+    ) -> tuple[RemoteKind | None, str | None]:
+        target = remote_shell_path(path)
+        command = (
+            f"if [ -L {target} ]; then exit 4; "
+            f"elif [ -f {target} ]; then exit 0; "
+            f"elif [ -d {target} ]; then exit 3; "
+            f"elif [ -e {target} ]; then exit 5; else exit 6; fi"
+        )
+        result = self.manager.run_command(
+            machine,
+            command,
+            timeout=min(timeout, 30),
+            max_output_chars=2_000,
+        )
+        kinds: dict[int, RemoteKind] = {
+            0: "file",
+            3: "directory",
+            4: "symlink",
+            5: "special",
+            6: "missing",
+        }
+        exit_code = result.get("exit_code")
+        if isinstance(exit_code, int) and exit_code in kinds:
+            return kinds[exit_code], None
+        error = result.get("error") or result.get("stderr") or "remote probe failed"
+        return None, str(error)
+
+    def _tree_has_unsafe_entry(
+        self,
+        machine: str,
+        path: str,
+        timeout: int,
+    ) -> tuple[bool | None, str | None]:
+        target = remote_shell_path(path)
+        command = (
+            f"entry=$(find {target} \\( "
+            "-type l -o "
+            "\\( -type d \\( -name .ssh -o -name .gnupg -o -name .aws -o -name .kube "
+            "-o -name .docker -o -name .azure -o -name .hermes -o -name mcp-tokens "
+            "-o -name pairing \\) \\) -o "
+            "\\( -type f \\( -name .netrc -o -name .npmrc -o -name .pypirc -o -name .pgpass "
+            "-o -name .git-credentials -o -name .anthropic_oauth.json -o -name auth.json "
+            "-o -name auth.lock -o -name webhook_subscriptions.json -o -name google_oauth.json "
+            "-o -name bws_cache.json -o -name bws_cache.enc.json -o -name credentials "
+            "-o -name id_rsa -o -name id_dsa -o -name id_ecdsa -o -name id_ed25519 "
+            "-o \\( -name '.env*' ! -name .env.example ! -name .env.sample ! -name .env.template \\) \\) \\) "
+            "-o -path '*/.config/gh' -o -path '*/.config/gh/*' "
+            "-o -path '*/.config/gcloud' -o -path '*/.config/gcloud/*' \\) "
+            "-print -quit 2>/dev/null); status=$?; "
+            "if [ $status -ne 0 ]; then exit 9; "
+            'elif [ -n "$entry" ]; then printf "%s" "$entry"; exit 7; else exit 0; fi'
+        )
+        result = self.manager.run_command(
+            machine,
+            command,
+            timeout=min(timeout, 60),
+            max_output_chars=2_000,
+        )
+        if result.get("exit_code") == 0:
+            return False, None
+        if result.get("exit_code") == 7:
+            return True, str(result.get("stdout") or "unsafe entry")
+        error = result.get("error") or result.get("stderr") or "remote scan failed"
+        return None, str(error)
+
+    def _run_sftp(
+        self,
+        machine: Machine,
+        request: TransferRequest,
+        local_path: Path,
+        remote_path_value: str,
+    ) -> subprocess.CompletedProcess[str]:
+        return self.transport.run(machine, request, local_path, remote_path_value)
+
+    def _cleanup_remote(
+        self,
+        machine: str,
+        path: str,
+        timeout: int,
+    ) -> None:
+        self.manager.run_command(
+            machine,
+            f"rm -rf -- {remote_shell_path(path)}",
+            timeout=min(timeout, 30),
+            max_output_chars=1_000,
+        )
+
+    def _validate_remote_directory(
+        self,
+        machine: str,
+        source: str,
+        timeout: int,
+        is_directory: bool,
+    ) -> str | None:
+        if not is_directory:
+            return None
+        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
+        if has_unsafe_entry:
+            return (
+                "remote directory contains a symbolic link or credential path; "
+                "refusing recursive download"
+            )
+        if scan_error:
+            return f"Could not safely scan remote directory: {scan_error}"
+        return None
+
+    @staticmethod
+    def _validate_download_destination(
+        destination: Path,
+        is_directory: bool,
+        overwrite: bool,
+    ) -> str | None:
+        if not destination.exists():
+            return None
+        if destination.is_dir() or destination.is_symlink():
+            return "download destination already exists as a directory or symbolic link"
+        if is_directory:
+            return "recursive directory downloads cannot replace an existing destination"
+        if not overwrite:
+            return "download destination already exists; set overwrite=true to replace it"
+        return None
+
+    def _finalise_upload(
+        self,
+        request: TransferRequest,
+        machine: str,
+        temporary: str,
+        is_directory: bool,
+    ) -> dict[str, Any]:
+        temporary_arg = remote_shell_path(temporary)
+        destination_arg = remote_shell_path(request.destination)
+        temporary_name = temporary.rsplit("/", 1)[-1]
+        nested_temporary_arg = remote_shell_path(
+            f"{request.destination.rstrip('/')}/{temporary_name}"
+        )
+        expected = f"[ -d {destination_arg} ]" if is_directory else f"[ -f {destination_arg} ]"
+        can_replace = request.overwrite and not is_directory
+        if can_replace:
+            precondition = (
+                f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
+                f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
+            )
+            move_command = f"mv -f -- {temporary_arg} {destination_arg} || exit $?; "
+            no_clobber_check = ""
+        else:
+            precondition = (
+                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+            )
+            move_command = f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; "
+            no_clobber_check = (
+                f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
+                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+                "exit $move_status; fi; "
+                "if [ $move_status -ne 0 ]; then exit $move_status; fi; "
+            )
+        command = (
+            f"{precondition}{move_command}{no_clobber_check}"
+            f"if {expected} && [ ! -L {destination_arg} ] && "
+            f"[ ! -e {nested_temporary_arg} ] && [ ! -L {nested_temporary_arg} ]; then exit 0; fi; "
+            f"if [ -d {destination_arg} ]; then rm -rf -- {nested_temporary_arg}; fi; exit 4"
+        )
+        return self.manager.run_command(
+            machine,
+            command,
+            timeout=min(request.timeout, 60),
+            max_output_chars=2_000,
+        )
+
+    @staticmethod
+    def _upload_finalise_error(finalise: dict[str, Any], overwrite: bool) -> tuple[int, str]:
+        raw_code = finalise.get("exit_code")
+        code = raw_code if isinstance(raw_code, int) else -1
+        if code == 3 and not overwrite:
+            return code, "remote destination appeared during transfer; refusing to overwrite it"
+        if code == 4:
+            return code, "remote destination changed to an unsupported type during transfer"
+        detail = finalise.get("error") or finalise.get("stderr")
+        return code, str(detail or "remote rename failed")
+
+    def _complete_upload(
+        self,
+        request: TransferRequest,
+        machine: str,
+        source: Path,
+        destination: str,
+        started: float,
+        size: int,
+    ) -> dict[str, Any]:
+        elapsed = round(time.monotonic() - started, 2)
+        self._audit(request, machine, str(source), destination, True, 0, elapsed, size)
+        return self._success(request, machine, str(source), destination, elapsed, size)
+
+    def _upload(self, request: TransferRequest, machine: Machine) -> dict[str, Any]:
+        try:
+            local = prepare_upload_source(request.source, request.recursive)
+            destination = remote_path(request.destination, "destination")
+            reason = remote_sensitive_reason(destination)
+            if reason:
+                raise TransferValidationError(
+                    f"upload destination is blocked because it is a {reason}"
+                )
+        except TransferValidationError as exc:
+            return self._error(machine.name, str(exc))
+
+        kind, error = self._probe(machine.name, destination, request.timeout)
+        if error:
+            return self._error(machine.name, f"Could not inspect remote destination: {error}")
+        if kind in {"directory", "symlink", "special"}:
+            return self._error(machine.name, f"remote destination already exists as a {kind}")
+        if kind == "file" and (not request.overwrite or local.is_directory):
+            message = (
+                "recursive directory uploads cannot replace an existing destination"
+                if local.is_directory
+                else "remote destination already exists; set overwrite=true to replace it"
+            )
+            return self._error(machine.name, message)
+
+        started = time.monotonic()
+        temporary = remote_temp(destination)
+        try:
+            result = self._run_sftp(machine, request, local.path, temporary)
+        except subprocess.TimeoutExpired:
+            self._cleanup_remote(machine.name, temporary, request.timeout)
+            return self._audited_error(
+                request,
+                machine.name,
+                local.path,
+                destination,
+                started,
+                -1,
+                "Transfer timed out",
+            )
+        if result.returncode:
+            self._cleanup_remote(machine.name, temporary, request.timeout)
+            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
+            return self._audited_error(
+                request,
+                machine.name,
+                local.path,
+                destination,
+                started,
+                result.returncode,
+                message,
+            )
+
+        finalise = self._finalise_upload(
+            request,
+            machine.name,
+            temporary,
+            local.is_directory,
+        )
+        if finalise.get("success"):
+            return self._complete_upload(
+                request,
+                machine.name,
+                local.path,
+                destination,
+                started,
+                local.size,
+            )
+        self._cleanup_remote(machine.name, temporary, request.timeout)
+        code, message = self._upload_finalise_error(finalise, request.overwrite)
+        return self._audited_error(
+            request,
+            machine.name,
+            local.path,
+            destination,
+            started,
+            code,
+            message,
+        )
+
+    def _download(self, request: TransferRequest, machine: Machine) -> dict[str, Any]:
+        try:
+            source = remote_path(request.source, "source")
+            reason = remote_sensitive_reason(source)
+            if reason:
+                raise TransferValidationError(
+                    f"download source is blocked because it is a {reason}"
+                )
+            destination = prepare_download_destination(request.destination)
+        except TransferValidationError as exc:
+            return self._error(machine.name, str(exc))
+
+        kind, error = self._probe(machine.name, source, request.timeout)
+        if error:
+            return self._error(machine.name, f"Could not inspect remote source: {error}")
+        if kind == "missing":
+            return self._error(machine.name, "remote source does not exist")
+        if kind == "symlink":
+            return self._error(machine.name, "remote source must not be a symbolic link")
+        if kind == "special":
+            return self._error(machine.name, "remote source must be a regular file or directory")
+
+        is_directory = kind == "directory"
+        if is_directory and not request.recursive:
+            return self._error(
+                machine.name,
+                "recursive=true is required to download a directory",
+            )
+        directory_error = self._validate_remote_directory(
+            machine.name,
+            source,
+            request.timeout,
+            is_directory,
+        )
+        if directory_error:
+            return self._error(machine.name, directory_error)
+
+        destination_error = self._validate_download_destination(
+            destination,
+            is_directory,
+            request.overwrite,
+        )
+        if destination_error:
+            return self._error(machine.name, destination_error)
+
+        dirs_created = not destination.parent.exists()
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return self._error(
+                machine.name,
+                f"could not create destination directory: {exc}",
+            )
+
+        started = time.monotonic()
+        temporary = local_temp(destination)
+        cleanup_local(temporary)
+        try:
+            result = self._run_sftp(machine, request, temporary, source)
+        except subprocess.TimeoutExpired:
+            cleanup_local(temporary)
+            return self._audited_error(
+                request,
+                machine.name,
+                source,
+                destination,
+                started,
+                -1,
+                "Transfer timed out",
+            )
+        if result.returncode:
+            cleanup_local(temporary)
+            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
+            return self._audited_error(
+                request,
+                machine.name,
+                source,
+                destination,
+                started,
+                result.returncode,
+                message,
+            )
+        try:
+            if request.overwrite:
+                os.replace(temporary, destination)
+            else:
+                _move_local_no_replace(temporary, destination)
+        except FileExistsError:
+            cleanup_local(temporary)
+            return self._audited_error(
+                request,
+                machine.name,
+                source,
+                destination,
+                started,
+                -1,
+                "download destination appeared during transfer; refusing to overwrite it",
+            )
+        except OSError as exc:
+            cleanup_local(temporary)
+            return self._audited_error(
+                request,
+                machine.name,
+                source,
+                destination,
+                started,
+                -1,
+                f"could not finalise local download: {exc}",
+            )
+
+        size = path_size(destination)
+        elapsed = round(time.monotonic() - started, 2)
+        self._audit(
+            request,
+            machine.name,
+            source,
+            str(destination),
+            True,
+            0,
+            elapsed,
+            size,
+        )
+        response = self._success(
+            request,
+            machine.name,
+            source,
+            str(destination),
+            elapsed,
+            size,
+        )
+        response["dirs_created"] = dirs_created
+        return response
+
+    @staticmethod
+    def _error(machine: str, message: str) -> dict[str, Any]:
+        return {"success": False, "error": message, "machine": machine}
+
+    def _audited_error(
+        self,
+        request: TransferRequest,
+        machine: str,
+        source: str | Path,
+        destination: str | Path,
+        started: float,
+        exit_code: int,
+        message: str,
+    ) -> dict[str, Any]:
+        elapsed = round(time.monotonic() - started, 2)
+        self._audit(
+            request,
+            machine,
+            str(source),
+            str(destination),
+            False,
+            exit_code,
+            elapsed,
+            0,
+        )
+        return {
+            "success": False,
+            "error": message,
+            "machine": machine,
+            "exit_code": exit_code,
+            "elapsed_secs": elapsed,
+        }
+
+    @staticmethod
+    def _success(
+        request: TransferRequest,
+        machine: str,
+        source: str,
+        destination: str,
+        elapsed: float,
+        size: int,
+    ) -> dict[str, Any]:
+        return {
+            "success": True,
+            "action": request.action,
+            "machine": machine,
+            "source": source,
+            "destination": destination,
+            "recursive": request.recursive,
+            "preserve": request.preserve,
+            "overwrite": request.overwrite,
+            "bytes": size,
+            "elapsed_secs": elapsed,
+            "transport": "openssh-sftp",
+        }
+
+    @staticmethod
+    def _audit_paths(
+        mode: str,
+        request: TransferRequest,
+        source: str,
+        destination: str,
+    ) -> dict[str, str | int]:
+        if mode == "metadata":
+            return {
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "source_length": len(source),
+                "destination_sha256": hashlib.sha256(destination.encode()).hexdigest(),
+                "destination_length": len(destination),
+            }
+        if request.action == "upload":
+            return {"source": TransferService._redact_local(source), "destination": destination}
+        return {"source": source, "destination": TransferService._redact_local(destination)}
+
+    def _audit(
+        self,
+        request: TransferRequest,
+        machine: str,
+        source: str,
+        destination: str,
+        success: bool,
+        exit_code: int,
+        elapsed: float,
+        size: int,
+    ) -> None:
+        mode = str(self.manager.config.audit_log_mode).strip().lower()
+        if mode not in _AUDIT_MODES:
+            mode = "redacted"
+        if mode == "off":
+            return
+
+        entry: dict[str, Any] = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event": "transfer",
+            "direction": request.action,
+            "machine": machine,
+            "recursive": request.recursive,
+            "preserve": request.preserve,
+            "overwrite": request.overwrite,
+            "success": success,
+            "exit_code": exit_code,
+            "elapsed_secs": elapsed,
+            "bytes": size,
+        }
+        entry.update(self._audit_paths(mode, request, source, destination))
+
+        try:
+            self.manager.config.data_dir.mkdir(parents=True, exist_ok=True)
+            path = self.manager.config.data_dir / "command_log.jsonl"
+            fd = os.open(
+                str(path),
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                0o600,
+            )
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+        except OSError:
+            return
+
+    @staticmethod
+    def _redact_local(path: str) -> str:
+        home = str(Path.home())
+        if path == home:
+            return "~"
+        if path.startswith(home + os.sep):
+            return "~" + path[len(home) :]
+        return path

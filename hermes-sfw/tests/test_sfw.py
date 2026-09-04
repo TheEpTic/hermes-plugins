@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hermes_sfw.handlers import handle_sfw
 from hermes_sfw.manager import SFWConfig, SFWManager, SFWResult, _MAX_LIST_ENTRIES
 
@@ -135,6 +137,31 @@ class TestValidation:
         assert result["success"] is False
         assert "Unknown action" in result["error"]
 
+    def test_approval_denial_blocks_execution(self, manager: SFWManager) -> None:
+        denial = {"approved": False, "message": "BLOCKED: approval required"}
+        with (
+            patch("hermes_sfw.handlers.sfw.check_approval", return_value=denial),
+            patch("hermes_sfw.manager.subprocess.Popen") as popen,
+        ):
+            result = _call(manager, {"action": "run", "command": "npm install left-pad"})
+        assert result["success"] is False
+        assert "BLOCKED" in result["error"]
+        popen.assert_not_called()
+
+    def test_approval_required_without_explicit_denial_blocks_execution(
+        self, manager: SFWManager
+    ) -> None:
+        """Approval state must never fall through to command execution."""
+        pending = {"status": "approval_required", "message": "awaiting approval"}
+        with (
+            patch("hermes_sfw.handlers.sfw.check_approval", return_value=pending),
+            patch("hermes_sfw.manager.subprocess.Popen") as popen,
+        ):
+            result = _call(manager, {"action": "run", "command": "npm install left-pad"})
+        assert result["success"] is False
+        assert "awaiting approval" in result["error"]
+        popen.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Command validation — path separators and maxLength
@@ -178,6 +205,87 @@ class TestCommandValidation:
         result = _call(manager, {"action": "run", "command": "npx cowsay hello"})
         assert result["success"] is False
         assert "not allowed" in result.get("stderr", "").lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "npm exec sh",
+            "npm run postinstall",
+            "pnpm dlx cowsay hi",
+            "yarn run build",
+            "uv run python evil.py",
+            "cargo run",
+            "rustup run stable sh",
+            # option arguments used to be mistaken for the command verb.
+            "npm --prefix /tmp exec sh",
+            "npm --prefix=/tmp run-script x",
+            "uv --project /tmp run sh",
+            "uv --project=/tmp run sh",
+            "cargo --manifest-path /tmp/Cargo.toml run",
+            "rustup toolchain run stable sh",
+        ],
+    )
+    def test_reject_execution_and_option_hidden_subcommands(
+        self, manager: SFWManager, command: str
+    ) -> None:
+        result = _call(manager, {"action": "run", "command": command})
+        assert result["success"] is False
+        assert "not allowed" in result.get("stderr", "").lower()
+
+    @pytest.mark.parametrize(
+        "command",
+        ["npm install express", "uv pip install flask", "cargo fetch"],
+    )
+    def test_accept_documented_dependency_operations(
+        self, manager: SFWManager, mock_popen, command: str
+    ) -> None:
+        _call(manager, {"action": "run", "command": command})
+        assert mock_popen.called
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # local-path installs execute build scripts sfw never sees
+            "cargo install --path /tmp/evil",
+            "cargo install --path=./evil",
+            "cargo install --git https://github.com/evil/thing",
+            "pip install .",
+            "pip install ./local-pkg",
+            "pip install ../local-pkg",
+            "uv pip install .",
+            "npm install ./local-dep",
+            "yarn add ../dep",
+            "pnpm add ./dep",
+            # git/file URL sources bypass the registry entirely
+            "pip install git+https://github.com/evil/pkg.git",
+            "npm install git+https://github.com/evil/pkg.git",
+            "npm install file:./local.tgz",
+        ],
+    )
+    def test_reject_local_and_git_sources(self, manager: SFWManager, command: str) -> None:
+        """Local-path and git/file install sources are refused."""
+        result = _call(manager, {"action": "run", "command": command})
+        assert result["success"] is False
+        assert (
+            "not allowed" in result.get("stderr", "").lower()
+            or "registry" in result.get("stderr", "").lower()
+        )
+
+    def test_accept_requirements_file_path_value(self, manager: SFWManager, mock_popen) -> None:
+        """-r/--requirement values are manifests, not install sources."""
+        _call(manager, {"action": "run", "command": "pip install -r ./requirements.txt"})
+        assert mock_popen.called
+
+    def test_accept_registry_url_index(self, manager: SFWManager, mock_popen) -> None:
+        """Registry index URLs are fine; only git/file sources are refused."""
+        _call(
+            manager,
+            {
+                "action": "run",
+                "command": "pip install --index-url https://pypi.org/simple requests",
+            },
+        )
+        assert mock_popen.called
 
     def test_reject_null_bytes_in_command(self, manager: SFWManager) -> None:
         """Null bytes in command should be rejected."""
@@ -265,6 +373,20 @@ class TestParseOutput:
         assert blocked == []
         assert installed == []
 
+    def test_added_count_not_parsed_as_package(self) -> None:
+        """npm's 'added 1 package' summary must not yield installed=['1']."""
+        blocked, installed = SFWManager._parse_output("added 1 package")
+        assert installed == []
+
+    def test_added_count_plural_not_parsed_as_package(self) -> None:
+        blocked, installed = SFWManager._parse_output("added 5 packages")
+        assert installed == []
+
+    def test_blocked_by_prose_not_parsed_as_package(self) -> None:
+        """'blocked by firewall' prose must not yield blocked=['by']."""
+        blocked, installed = SFWManager._parse_output("the request was blocked by the firewall")
+        assert blocked == []
+
     def test_keyword_with_trailing_punctuation(self) -> None:
         """Keywords followed by colon should still match."""
         blocked, installed = SFWManager._parse_output("blocked: evil-pkg")
@@ -341,6 +463,29 @@ class TestTimeout:
         assert result.success is False
         assert result.exit_code == -1
         assert "timed out" in result.stderr.lower()
+
+    def test_timeout_kills_process_group_after_leader_exits(self, tmp_path: Path) -> None:
+        """Children surviving the leader must still be SIGKILLed (regression)."""
+        sfw_bin = tmp_path / "sfw"
+        # Leader exits quickly; a child ignores SIGTERM and keeps running.
+        sfw_bin.write_text(
+            "#!/bin/bash\n" "sleep 100 &\n" "child=$!\n" "trap '' TERM\n" "sleep 0.2\n" "exit 0\n",
+            encoding="utf-8",
+        )
+        sfw_bin.chmod(0o755)
+
+        config = SFWConfig(sfw_bin=str(sfw_bin), timeout=1)
+        mgr = SFWManager(config)
+        result = mgr.run_command("npm install express")
+
+        assert result.success is False
+        assert result.exit_code == -1
+
+        # The child must not survive as an orphan.
+        import subprocess as _sp
+
+        leftover = _sp.run(["pgrep", "-f", "sleep 100"], capture_output=True, text=True, timeout=5)
+        assert leftover.returncode != 0 or "sleep 100" not in leftover.stdout
 
 
 class TestOSError:
@@ -425,6 +570,44 @@ class TestFindSfw:
             mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
             assert mgr.is_installed()
 
+    def test_default_search_finds_pnpm_root_shim(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The pnpm global shim can live directly under the pnpm home."""
+        sfw_bin = tmp_path / ".local" / "share" / "pnpm" / "sfw"
+        sfw_bin.parent.mkdir(parents=True)
+        sfw_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        sfw_bin.chmod(0o755)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        with patch("hermes_sfw.manager.shutil.which", return_value=None):
+            mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
+            assert mgr.is_installed()
+            assert mgr.sfw_path == str(sfw_bin)
+
+    def test_manager_rechecks_configured_path_after_initial_miss(self, tmp_path: Path) -> None:
+        """All manager operations must see a binary installed after construction."""
+        sfw_bin = tmp_path / "sfw"
+        mgr = SFWManager(SFWConfig(sfw_bin=str(sfw_bin), timeout=5))
+        assert not mgr.is_installed()
+
+        sfw_bin.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then\n'
+            '  printf "Socket Firewall Free, version 1.15.0\\n"\n'
+            "else\n"
+            '  printf "🟢 installed express\\n"\n'
+            "fi\n",
+            encoding="utf-8",
+        )
+        sfw_bin.chmod(0o755)
+
+        assert mgr.is_installed()
+        assert mgr.get_version() == "Socket Firewall Free, version 1.15.0"
+        result = mgr.run_command("npm install express")
+        assert result.success
+        assert result.installed == ["express"]
+
     def test_default_search_not_found(self) -> None:
         with patch("hermes_sfw.manager.shutil.which", return_value=None):
             with patch("hermes_sfw.manager.Path") as MockPath:
@@ -503,6 +686,20 @@ class TestWorkdirValidation:
         # Should not fail — ~ resolves to home dir
         assert mock_popen.called
 
+    @pytest.mark.parametrize(
+        "workdir",
+        ["/", "/etc", "/usr", "/usr/local", "/boot", "/proc", "/sys", "/dev"],
+    )
+    def test_workdir_system_prefix_rejected(
+        self, tmp_path: Path, manager: SFWManager, workdir: str
+    ) -> None:
+        """System directories must be refused as install working directories."""
+        result = _call(
+            manager, {"action": "run", "command": "npm install express", "workdir": workdir}
+        )
+        assert result["success"] is False
+        assert "system directory" in result.get("stderr", "").lower()
+
 
 # ---------------------------------------------------------------------------
 # Unicode handling
@@ -522,3 +719,50 @@ class TestUnicodeHandling:
         result = mgr.run_command("npm install express")
         # Should not raise UnicodeDecodeError
         assert isinstance(result.stdout, str)
+
+
+def test_direct_dependency_guard_rewrites_terminal_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hermes_sfw
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    sfw_bin = tmp_path / "sfw"
+    sfw_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    sfw_bin.chmod(0o755)
+    monkeypatch.setattr(
+        hermes_sfw,
+        "_manager",
+        SFWManager(SFWConfig(sfw_bin=str(sfw_bin))),
+    )
+
+    result = _guard_direct_dependency_operation("terminal", {"command": "npm install express"})
+    assert result is not None
+    assert result["action"] == "modify"
+    assert result["args"]["command"].endswith(" npm install express")
+    assert str(sfw_bin) in result["args"]["command"]
+
+
+def test_direct_dependency_guard_blocks_unsupported_package_commands() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    result = _guard_direct_dependency_operation("terminal", {"command": "npm run build"})
+    assert result is not None
+    assert result["action"] == "block"
+    assert "sfw" in result["message"]
+
+
+def test_direct_dependency_guard_ignores_non_package_commands() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    assert _guard_direct_dependency_operation("terminal", {"command": "git status"}) is None
+    assert _guard_direct_dependency_operation("read_file", {"command": "npm install x"}) is None
+
+
+def test_direct_dependency_guard_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    monkeypatch.setenv("HERMES_SFW_ENFORCE_DIRECT", "off")
+    assert (
+        _guard_direct_dependency_operation("terminal", {"command": "pip install requests"}) is None
+    )
