@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.11] - 2026-09-05
+
+### Security
+- Pin the development test dependency to pytest 9.0.3, the first release fixing CVE-2025-71176 insecure temporary-directory handling.
+- Restore CI formatting compliance for the SFW test suite.
+
 ## [0.2.10] - 2026-09-04
 
 ### Fixed

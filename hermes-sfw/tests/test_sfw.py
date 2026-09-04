@@ -266,9 +266,10 @@ class TestCommandValidation:
         """Local-path and git/file install sources are refused."""
         result = _call(manager, {"action": "run", "command": command})
         assert result["success"] is False
-        assert "not allowed" in result.get("stderr", "").lower() or "registry" in result.get(
-            "stderr", ""
-        ).lower()
+        assert (
+            "not allowed" in result.get("stderr", "").lower()
+            or "registry" in result.get("stderr", "").lower()
+        )
 
     def test_accept_requirements_file_path_value(self, manager: SFWManager, mock_popen) -> None:
         """-r/--requirement values are manifests, not install sources."""
@@ -279,7 +280,10 @@ class TestCommandValidation:
         """Registry index URLs are fine; only git/file sources are refused."""
         _call(
             manager,
-            {"action": "run", "command": "pip install --index-url https://pypi.org/simple requests"},
+            {
+                "action": "run",
+                "command": "pip install --index-url https://pypi.org/simple requests",
+            },
         )
         assert mock_popen.called
 
@@ -465,12 +469,7 @@ class TestTimeout:
         sfw_bin = tmp_path / "sfw"
         # Leader exits quickly; a child ignores SIGTERM and keeps running.
         sfw_bin.write_text(
-            "#!/bin/bash\n"
-            "sleep 100 &\n"
-            "child=$!\n"
-            "trap '' TERM\n"
-            "sleep 0.2\n"
-            "exit 0\n",
+            "#!/bin/bash\n" "sleep 100 &\n" "child=$!\n" "trap '' TERM\n" "sleep 0.2\n" "exit 0\n",
             encoding="utf-8",
         )
         sfw_bin.chmod(0o755)
@@ -485,9 +484,7 @@ class TestTimeout:
         # The child must not survive as an orphan.
         import subprocess as _sp
 
-        leftover = _sp.run(
-            ["pgrep", "-f", "sleep 100"], capture_output=True, text=True, timeout=5
-        )
+        leftover = _sp.run(["pgrep", "-f", "sleep 100"], capture_output=True, text=True, timeout=5)
         assert leftover.returncode != 0 or "sleep 100" not in leftover.stdout
 
 
@@ -697,7 +694,9 @@ class TestWorkdirValidation:
         self, tmp_path: Path, manager: SFWManager, workdir: str
     ) -> None:
         """System directories must be refused as install working directories."""
-        result = _call(manager, {"action": "run", "command": "npm install express", "workdir": workdir})
+        result = _call(
+            manager, {"action": "run", "command": "npm install express", "workdir": workdir}
+        )
         assert result["success"] is False
         assert "system directory" in result.get("stderr", "").lower()
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.7] - 2026-09-05
+
+### Security
+- Pin the development test dependency to pytest 9.0.3, the first release fixing CVE-2025-71176 insecure temporary-directory handling.
+- Record the security dependency refresh in the release notes.
+
 ## [0.4.6] - 2026-09-04
 
 ### Fixed
