@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.8] - 2026-09-05
 
 ### Fixed
 - **Order-independent approval loading:** `check_approval` now resolves the Hermes approval functions on each call instead of at plugin import time. This removes an order-dependent circular-import failure when plugins are imported in sequence, and re-validates availability on every check.
