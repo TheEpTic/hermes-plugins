@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Order-independent approval loading:** `check_approval` now resolves the Hermes approval functions on each call instead of at plugin import time. This removes an order-dependent circular-import failure when plugins are imported in sequence, and re-validates availability on every check.
+
+### Added
+- Regression tests for lazy approval loading: fail-closed when Hermes approval is unavailable, per-call re-resolution, `approvals.mode=off` bypass, and denial shape.
+
 ## [0.2.11] - 2026-09-05
 
 ### Security

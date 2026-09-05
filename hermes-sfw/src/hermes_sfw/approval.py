@@ -3,40 +3,55 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-try:
-    from tools.approval import (
-        check_dangerous_command as _check_dangerous,
-    )  # pyright: ignore[reportMissingImports]
-except ImportError:
-    _check_dangerous = None
+ApprovalCheck = Callable[..., dict[str, Any]]
+ApprovalMode = Callable[[], str]
 
-try:
-    from tools.approval_context import _get_approval_mode  # pyright: ignore[reportMissingImports]
-except ImportError:
+
+def _approval_functions() -> tuple[ApprovalCheck | None, ApprovalMode | None]:
+    """Load approval functions after plugin discovery has finished.
+
+    Hermes imports enabled plugins in sequence. Importing one plugin can still be
+    inside another plugin's package initializer, so binding these functions at
+    module import time creates an order-dependent circular-import failure.
+    """
+    check_dangerous: ApprovalCheck | None
+    get_approval_mode: ApprovalMode | None
     try:
-        # compatibility with Hermes releases that still re-exported this helper.
-        from tools.approval import _get_approval_mode
+        from tools.approval import check_dangerous_command
     except ImportError:
-        _get_approval_mode = None
+        return None, None
 
-if _check_dangerous is None or _get_approval_mode is None:
-    logger.warning("Hermes approval system unavailable — SFW commands will fail closed")
+    check_dangerous = check_dangerous_command
+
+    try:
+        from tools.approval_context import _get_approval_mode
+    except ImportError:
+        try:
+            # compatibility with Hermes releases that still re-exported this helper.
+            from tools.approval import _get_approval_mode
+        except ImportError:
+            return None, None
+    get_approval_mode = _get_approval_mode
+    return check_dangerous, get_approval_mode
 
 
 def check_approval(command: str) -> dict[str, Any] | None:
     """Return a denial result, or None when the command is approved."""
-    if _check_dangerous is None:
+    check_dangerous, get_approval_mode = _approval_functions()
+    if check_dangerous is None or get_approval_mode is None:
+        logger.warning("Hermes approval system unavailable — SFW commands will fail closed")
         return {
             "approved": False,
             "message": "SFW command blocked: Hermes approval system is unavailable",
         }
-    if _get_approval_mode is not None and _get_approval_mode() == "off":
+    if get_approval_mode() == "off":
         return None
-    result: dict[str, Any] = _check_dangerous(command, env_type="local")
+    result: dict[str, Any] = check_dangerous(command, env_type="local")
     if result.get("status") == "approval_required":
         description = str(result.get("description") or "command flagged")
         return {
