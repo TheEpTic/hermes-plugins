@@ -18,12 +18,10 @@ Behavior pinned here:
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any
 from unittest.mock import patch
 
 from ssh_tools.approval import check_approval
-
-_Deny = Callable[[str], dict[str, Any]]
 
 
 def _deny(_command: str, **_kwargs: Any) -> dict[str, Any]:
