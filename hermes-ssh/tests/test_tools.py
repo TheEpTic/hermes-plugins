@@ -522,14 +522,16 @@ def test_approval_mode_off_bypasses_checks(tmp_path: Path) -> None:
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     handler = handle_ssh_terminal(mgr)
     with (
-        mock_patch("ssh_tools.approval._get_approval_mode", return_value="off"),
-        mock_patch("ssh_tools.approval._check_dangerous") as mock_check,
+        mock_patch(
+            "ssh_tools.approval._approval_functions",
+            return_value=(lambda *_a, **_k: {"status": "approval_required"}, lambda: "off"),
+        ),
         mock_patch("ssh_tools.manager.subprocess.run") as mock_run,
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         result = json.loads(handler({"machine": "h", "command": "rm -rf /tmp/test"}))
         assert result["success"] is True
-        mock_check.assert_not_called()
+        mock_run.assert_called_once()
 
 
 def test_approval_required_message_tells_user_exact_command(tmp_path: Path) -> None:

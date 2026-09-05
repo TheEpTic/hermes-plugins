@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Order-independent approval loading:** `check_approval` now resolves the Hermes approval functions on each call instead of at plugin import time. This removes an order-dependent circular-import failure when plugins are imported in sequence, and re-validates availability on every check.
+- **SSH denial completeness:** an `approval_required` result now always carries `approved: False`, matching the SFW plugin's contract.
+
+### Added
+- Regression tests for lazy approval loading: fail-closed when Hermes approval is unavailable, per-call re-resolution, `approvals.mode=off` bypass, and denial shape (both `hermes-ssh` and `hermes-sfw`).
+
 ## [0.4.7] - 2026-09-05
 
 ### Security
