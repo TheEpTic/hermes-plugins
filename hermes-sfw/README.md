@@ -79,7 +79,7 @@ sfw action=run command="pnpm add -D vitest" verbose=true
 sfw action=run command="npm install" workdir="/path/to/project"
 ```
 
-**Supported package managers:** npm, yarn, and pnpm for JavaScript/TypeScript; pip, pip3, and uv for Python; cargo for Rust. Each manager is restricted to dependency operations — for example `npm install`, `npm ci`, `npm uninstall`, and `npm update` are accepted, but runner-style subcommands like `npm run` are not. `npx`, `rustup`, and runner-style subcommands are intentionally blocked because they can execute arbitrary programs.
+**Supported package managers:** npm, yarn, and pnpm for JavaScript/TypeScript; pip, pip3, and uv for Python; cargo for Rust. Direct terminal enforcement routes ordinary manager commands — including `cargo test`, `cargo clippy`, `pnpm test`, `npm run build`, and version checks — through sfw. `npx`, runner commands, opaque wrappers, path-qualified managers, command substitutions, and heredocs remain fail-closed when the hook cannot route them without changing shell semantics.
 
 **Blocked packages:** When sfw detects a malicious package, the install is blocked and the package name is returned in the response. Blocked and installed indicators are parsed from sfw output and returned as `blocked` and `installed` lists in the result, alongside `success`, `command`, `exit_code`, `stdout`, and `stderr`:
 
@@ -96,14 +96,14 @@ Non-package-manager commands (like `cat`, `rm`, `curl`) are rejected by the pref
 
 ### automatic terminal enforcement
 
-When enabled, the plugin watches Hermes `terminal` calls. A supported dependency operation such as `npm install`, `uv pip install`, or `cargo fetch` is rewritten before execution to invoke the resolved `sfw` binary:
+When enabled, the plugin watches Hermes `terminal` calls. Reachable package-manager commands — including dev commands such as `cargo test`, `cargo clippy`, `pnpm test`, and `npm run build` — are rewritten before execution to invoke the resolved `sfw` binary while preserving the original shell syntax:
 
 ```text
 terminal command: npm install express
 executed command: /home/user/.local/share/pnpm/bin/sfw npm install express
 ```
 
-The model does not need to notice a block or issue a second tool call. Unsupported package-manager forms, shell-prefixed calls (`cd app && npm install`, `sudo npm install`), malformed commands, and manager paths are blocked before raw execution. Non-package-manager terminal commands are unaffected.
+The model does not need to notice a block or issue a second tool call. Opaque-wrapper calls (`sudo`, `doas`, `xargs`), path-qualified managers, command substitutions, heredocs, malformed commands, and other forms the hook cannot rewrite without changing semantics are blocked before raw execution. Non-package-manager terminal commands are unaffected.
 
 The hook only runs when Hermes exposes `pre_tool_call` hooks. Set `HERMES_SFW_ENFORCE_DIRECT=off` before starting Hermes only when you deliberately want to bypass automatic terminal enforcement. The default is on.
 

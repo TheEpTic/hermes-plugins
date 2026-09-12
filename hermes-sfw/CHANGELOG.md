@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.13] - 2026-09-12
+
+### Fixed
+- Route supported package-manager development commands such as `cargo test`, `cargo clippy`, `pnpm test`, `npm run build`, and version checks through sfw instead of blocking them as unsupported dependency operations.
+- Preserve original shell syntax when routing terminal commands; compound operators, quoting, pipelines, redirections, and newline-separated commands are no longer rebuilt into altered argv.
+- Keep opaque wrappers, path-qualified managers, command substitutions, heredocs, and unparseable forms fail-closed.
+
+### Added
+- Regression coverage for dev-command routing and compound-command preservation.
+
 ## [0.2.12] - 2026-09-05
 
 ### Fixed

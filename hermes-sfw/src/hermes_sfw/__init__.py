@@ -8,6 +8,7 @@ import shlex
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 from typing import Any
 
+from .guard import plan_terminal_guard
 from .handlers import handle_sfw
 from .manager import (
     SFWManager,
@@ -72,14 +73,7 @@ def _rewrite_dependency_operation(command: str) -> dict[str, Any]:
 def _guard_direct_dependency_operation(
     tool_name: str, args: dict[str, Any], **kwargs: Any
 ) -> dict[str, Any] | None:
-    """Force supported terminal dependency operations through the sfw binary.
-
-    Hermes pre-tool hooks support ``modify`` directives. Returning one rewrites
-    the terminal command before its backend executes it, so the model does not
-    need to notice a block and issue a second tool call. Package-manager forms
-    outside the plugin's strict grammar are blocked rather than allowed to raw
-    execute.
-    """
+    """Force reachable terminal package-manager commands through sfw."""
     enabled = os.getenv("HERMES_SFW_ENFORCE_DIRECT", "1").strip().lower()
     if enabled in _FALSE_VALUES or tool_name != "terminal":
         return None
@@ -88,19 +82,19 @@ def _guard_direct_dependency_operation(
     if not isinstance(command, str):
         return None
 
-    if is_dependency_operation(command):
-        return _rewrite_dependency_operation(command)
-
-    if contains_package_manager_command(command):
+    plan = plan_terminal_guard(command, _resolved_sfw_path())
+    if plan.action == "modify":
+        assert plan.command is not None
+        return {"action": "modify", "args": {"command": plan.command}}
+    if plan.action == "block":
         return {
             "action": "block",
             "message": _direct_terminal_block_message(
                 command,
                 _resolved_sfw_path(),
-                "the command is outside sfw's supported dependency grammar",
+                plan.reason or "the command could not be routed safely",
             ),
         }
-
     return None
 
 

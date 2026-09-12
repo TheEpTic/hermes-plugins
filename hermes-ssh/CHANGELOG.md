@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.9] - 2026-09-12
+
+### Fixed
+- Enforce `ssh_terminal` command timeouts for background sessions with process-group termination and deterministic timeout results.
+- Register background process ownership before publishing persisted sessions, and record final background exit codes in the audit log.
+- Make idle-checker shutdown/restart interruptible and bound SFTP subprocesses to the requested timeout instead of adding an extra five seconds.
+
 ## [0.4.8] - 2026-09-05
 
 ### Fixed

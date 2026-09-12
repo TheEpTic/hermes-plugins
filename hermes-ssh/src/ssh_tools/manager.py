@@ -103,6 +103,8 @@ class SSHManager:
         self._checker_event = threading.Event()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._background_outputs: dict[str, tuple[Path, Path, int]] = {}
+        self._background_meta: dict[str, tuple[str, str, float, float]] = {}
+        self._background_timeouts: set[str] = set()
         self._process_lock = threading.Lock()
         self._config.ensure_dirs()
         self._store = EncryptedStore(self._config.data_dir)
@@ -401,6 +403,8 @@ class SSHManager:
         with self._process_lock:
             self._processes.pop(session_id, None)
             self._background_outputs.pop(session_id, None)
+            self._background_meta.pop(session_id, None)
+            self._background_timeouts.discard(session_id)
         with self._lock:
             sessions = self._load_sessions()
             if session_id in sessions:
@@ -739,11 +743,6 @@ class SSHManager:
                 stdout_handle = None
                 stderr_handle = None
 
-                self.register_session(
-                    Session(
-                        id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
-                    )
-                )
                 with self._process_lock:
                     self._processes[session_id] = proc
                     self._background_outputs[session_id] = (
@@ -751,10 +750,29 @@ class SSHManager:
                         stderr_path,
                         max_output_chars,
                     )
-                elapsed = round(time.monotonic() - start_time, 2)
-                self._log_command(
-                    canonical, command, exit_code=None, elapsed=elapsed, session_id=session_id
+                    self._background_meta[session_id] = (
+                        canonical,
+                        command,
+                        start_time,
+                        start_time + timeout,
+                    )
+                self.register_session(
+                    Session(
+                        id=session_id, machine=canonical, pid=proc.pid, control_path=control_path
+                    )
                 )
+                self._log_command(
+                    canonical,
+                    command,
+                    exit_code=None,
+                    elapsed=round(time.monotonic() - start_time, 2),
+                    session_id=session_id,
+                )
+                threading.Thread(
+                    target=self._watch_background_timeout,
+                    args=(session_id,),
+                    daemon=True,
+                ).start()
                 return {
                     "success": True,
                     "background": True,
@@ -927,6 +945,24 @@ class SSHManager:
         )
         return summary, str(path)
 
+    def _watch_background_timeout(self, session_id: str) -> None:
+        """Enforce a background command deadline for this process-owned session."""
+        with self._process_lock:
+            metadata = self._background_meta.get(session_id)
+        if metadata is None:
+            return
+        deadline = metadata[3]
+        delay = max(0.0, deadline - time.monotonic())
+        if delay:
+            time.sleep(delay)
+        with self._process_lock:
+            proc = self._processes.get(session_id)
+            if proc is None or proc.poll() is not None:
+                return
+            self._background_timeouts.add(session_id)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+
     def _take_finished_background_process(
         self, session_id: str
     ) -> tuple[subprocess.Popen[bytes], Path, Path, int] | None:
@@ -956,16 +992,36 @@ class SSHManager:
     ) -> dict[str, Any]:
         stdout, stdout_file = self._collect_background_output(stdout_path, proc.stdout, max_chars)
         stderr, stderr_file = self._collect_background_output(stderr_path, proc.stderr, max_chars)
+        timeout_hit = session_id in self._background_timeouts
+        with self._process_lock:
+            metadata = self._background_meta.get(session_id)
         self.close_session(session_id, cleanup_output_files=False)
         exit_code = proc.returncode if proc.returncode is not None else proc.poll()
+        if timeout_hit:
+            exit_code = -1
         response: dict[str, Any] = {
-            "success": exit_code == 0,
+            "success": exit_code == 0 and not timeout_hit,
             "session_id": session_id,
             "running": False,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": exit_code,
         }
+        if timeout_hit:
+            response["status"] = "timeout"
+            response["timed_out"] = True
+            response["error"] = "Command timed out"
+        with self._process_lock:
+            self._background_meta.pop(session_id, None)
+            self._background_timeouts.discard(session_id)
+        if metadata is not None:
+            self._log_command(
+                metadata[0],
+                metadata[1],
+                exit_code,
+                round(time.monotonic() - metadata[2], 2),
+                session_id,
+            )
         if stdout_file:
             response["stdout_file"] = stdout_file
         if stderr_file:
@@ -1114,7 +1170,7 @@ class SSHManager:
                     _prune_counter[0] = 0
                     with contextlib.suppress(Exception):
                         self.prune_closed()
-                time.sleep(self._config.idle_check_interval)
+                self._checker_event.wait(self._config.idle_check_interval)
 
         self._checker_event.clear()
         self._checker_thread = threading.Thread(target=_loop, daemon=True)
@@ -1122,3 +1178,7 @@ class SSHManager:
 
     def stop_idle_checker(self) -> None:
         self._checker_event.set()
+        thread = self._checker_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self._config.idle_check_interval + 1))
+        self._checker_thread = None

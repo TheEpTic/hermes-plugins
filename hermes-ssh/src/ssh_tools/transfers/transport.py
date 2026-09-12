@@ -91,5 +91,5 @@ class SFTPTransport:
             ),
             capture_output=True,
             text=True,
-            timeout=request.timeout + 5,
+            timeout=request.timeout,
         )
