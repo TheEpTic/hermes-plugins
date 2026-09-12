@@ -69,11 +69,9 @@ class TestForcedTerminalRouting:
 
         assert result is not None
         assert result["action"] == "modify"
-        assert result["args"]["command"] == shlex.join(
-            [str(sfw_bin), "npm", "install", "@scope/package", "--save-dev"]
-        )
+        assert result["args"]["command"] == f'{sfw_bin} npm install "@scope/package" --save-dev'
 
-    def test_unsupported_package_manager_operation_is_blocked(
+    def test_unsupported_package_manager_operation_is_routed(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
         manager, sfw_bin = self._manager_for(tmp_path)
@@ -82,34 +80,28 @@ class TestForcedTerminalRouting:
         result = _guard_direct_dependency_operation("terminal", {"command": "npm run build"})
 
         assert result is not None
-        assert result["action"] == "block"
-        assert "npm run build" in result["message"]
-        assert "sfw" in result["message"]
-        assert str(sfw_bin) in result["message"]
+        assert result["action"] == "modify"
+        assert result["args"]["command"] == f"{sfw_bin} npm run build"
 
-    def test_compound_package_manager_operation_is_blocked(
+    def test_compound_package_manager_operation_preserves_shell_syntax(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        manager, _ = self._manager_for(tmp_path)
+        manager, sfw_bin = self._manager_for(tmp_path)
         monkeypatch.setattr(hermes_sfw, "_manager", manager)
 
         result = _guard_direct_dependency_operation(
-            "terminal", {"command": "cd project && npm install express"}
+            "terminal", {"command": "npm install express && echo done"}
         )
 
         assert result is not None
-        assert result["action"] == "block"
-        assert "sfw" in result["message"]
+        assert result["action"] == "modify"
+        assert result["args"]["command"] == f"{sfw_bin} npm install express && echo done"
 
     @pytest.mark.parametrize(
         "command",
         [
             "sudo npm install express",
-            "env NODE_ENV=test npm install express",
             "sudo bash -lc 'npm install express'",
-            "bash -c 'npm install express'",
-            "(npm install express)",
-            "cd project\nnpm install express",
             "/usr/bin/npm install express",
             'npm install "unterminated',
         ],

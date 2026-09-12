@@ -743,13 +743,18 @@ def test_direct_dependency_guard_rewrites_terminal_installs(
     assert str(sfw_bin) in result["args"]["command"]
 
 
-def test_direct_dependency_guard_blocks_unsupported_package_commands() -> None:
+def test_direct_dependency_guard_blocks_unsupported_package_commands(
+    manager: SFWManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hermes_sfw
+
+    monkeypatch.setattr(hermes_sfw, "_manager", manager)
     from hermes_sfw import _guard_direct_dependency_operation
 
     result = _guard_direct_dependency_operation("terminal", {"command": "npm run build"})
     assert result is not None
-    assert result["action"] == "block"
-    assert "sfw" in result["message"]
+    assert result["action"] == "modify"
+    assert result["args"]["command"].endswith(" npm run build")
 
 
 def test_direct_dependency_guard_ignores_non_package_commands() -> None:
@@ -757,6 +762,29 @@ def test_direct_dependency_guard_ignores_non_package_commands() -> None:
 
     assert _guard_direct_dependency_operation("terminal", {"command": "git status"}) is None
     assert _guard_direct_dependency_operation("read_file", {"command": "npm install x"}) is None
+
+
+def test_direct_dependency_guard_preserves_newline_command_boundaries(
+    manager: SFWManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hermes_sfw
+
+    monkeypatch.setattr(hermes_sfw, "_manager", manager)
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    result = _guard_direct_dependency_operation("terminal", {"command": "cargo test\necho after"})
+    assert result is not None
+    assert result["action"] == "modify"
+    assert result["args"]["command"].endswith(" cargo test\necho after")
+
+
+def test_direct_dependency_guard_blocks_opaque_and_heredoc_forms() -> None:
+    from hermes_sfw import _guard_direct_dependency_operation
+
+    for command in ("xargs npm test", "cat <<EOF\nnpm test\nEOF"):
+        result = _guard_direct_dependency_operation("terminal", {"command": command})
+        assert result is not None
+        assert result["action"] == "block"
 
 
 def test_direct_dependency_guard_can_be_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
