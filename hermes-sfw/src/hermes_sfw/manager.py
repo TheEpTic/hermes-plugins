@@ -150,6 +150,23 @@ _KNOWN_BINARY_CANDIDATES = (
 )
 
 # ---------------------------------------------------------------------------
+# Launcher firewall-binary cache (wrapper installs)
+# ---------------------------------------------------------------------------
+# The npm/pnpm distribution ships a launcher, not an engine: ``dist/sfw.mjs``
+# downloads the platform firewall binary into
+# ``<package root>/.sfw-cache/<release>/<asset>`` and points
+# ``.sfw-cache/latest`` at it. A launcher whose ``latest`` link does not resolve
+# cannot start: it exits 1 with "Failed to prepare firewall binary" before the
+# wrapped command runs, so a routed command (``cargo build``, ``pnpm test``)
+# fails with no visible cause. The state is detectable offline and has an exact
+# repair, so it is checked before a launcher is handed to the terminal guard or
+# to a tool call.
+_SFW_CACHE_DIR = ".sfw-cache"
+_SFW_LATEST_LINK = "latest"
+_SFW_ASSET_PREFIX = "sfw-free-"
+_SFW_BOOTSTRAP_FAILURE_RE = re.compile(r"Failed to prepare firewall binary", re.IGNORECASE)
+
+# ---------------------------------------------------------------------------
 # OSError errno → generic message mapping
 # ---------------------------------------------------------------------------
 
@@ -245,6 +262,44 @@ class SFWDiagnosis:
             "checked": self.checked,
             "errors": self.errors,
         }
+
+
+@dataclass(frozen=True)
+class SFWCacheFault:
+    """Why a sfw launcher cannot start, and the exact repair.
+
+    ``cached_asset`` is the firewall binary the launcher already downloaded and
+    should have been pointing at; ``repair`` is the single command that restores
+    it offline. Reported only when the launcher's cache is *demonstrably*
+    unusable — a downloaded asset exists but ``latest`` does not resolve to it.
+    A cache that is merely empty is a fresh install, which the launcher fills on
+    first use, so it is not a fault.
+    """
+
+    binary: str
+    reason: str
+    cache_dir: str
+    cached_asset: str | None = None
+    repair: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "binary": self.binary,
+            "reason": self.reason,
+            "cache_dir": self.cache_dir,
+            "cached_asset": self.cached_asset,
+            "repair": self.repair,
+        }
+
+    def note(self) -> str:
+        """Operator note appended to a failed sfw invocation."""
+        asset = f" (cached firewall binary: {self.cached_asset})" if self.cached_asset else ""
+        return (
+            f"hermes-sfw: the sfw launcher at {self.binary} cannot prepare its "
+            f"firewall binary — {self.reason}{asset}. This is a local sfw install "
+            f"fault, not a dependency block: the command never reached a package "
+            f"manager, and hermes-sfw will not run it unfiltered. Repair: {self.repair}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +540,33 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+def _resolves_to_file(path: Path) -> bool:
+    """True when *path* exists and follows to a regular file."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _cached_release_asset(cache_dir: Path) -> Path | None:
+    """Return the newest downloaded firewall binary in a launcher cache, if any."""
+    try:
+        releases = [p for p in cache_dir.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    assets: list[Path] = []
+    for release in releases:
+        try:
+            assets.extend(
+                f for f in release.iterdir() if f.is_file() and f.name.startswith(_SFW_ASSET_PREFIX)
+            )
+        except OSError:
+            continue
+    if not assets:
+        return None
+    return max(assets, key=lambda f: f.stat().st_mtime)
+
+
 class SFWManager:
     """Manages sfw CLI execution."""
 
@@ -555,8 +637,83 @@ class SFWManager:
             return None
         return str(candidate)
 
+    def _wrapper_install_root(self, binary: str) -> Path | None:
+        """Package root of an npm/pnpm sfw launcher, or None for a real binary.
+
+        The launcher layer is recognised structurally — a JavaScript entry point
+        under ``dist/`` — rather than by install path, so a package installed
+        outside ``npm-global``/``pnpm`` (for example under Hermes's own node
+        prefix) is identified too.
+        """
+        try:
+            resolved = Path(binary).resolve()
+        except (OSError, RuntimeError):
+            resolved = Path(binary)
+        shim_target = self._resolve_shim_target(binary)
+        entry = Path(shim_target) if shim_target else resolved
+        if entry.suffix != ".mjs":
+            return None
+        return entry.parent.parent
+
+    def wrapper_cache_fault(self, binary: str | None = None) -> SFWCacheFault | None:
+        """Report a launcher whose firewall-binary cache cannot start it.
+
+        Returns None for a real binary (no cache layer), for a launcher whose
+        ``latest`` link resolves, and for a fresh install whose cache is still
+        empty (the launcher downloads on first use).
+        """
+        target = binary if binary is not None else self.sfw_path
+        if not target:
+            return None
+        root = self._wrapper_install_root(target)
+        if root is None:
+            return None
+        cache_dir = root / _SFW_CACHE_DIR
+        latest = cache_dir / _SFW_LATEST_LINK
+        if _resolves_to_file(latest):
+            return None
+        cached_asset = _cached_release_asset(cache_dir)
+        if cached_asset is None:
+            # Nothing downloaded yet: the launcher's normal first-run path.
+            return None
+        if latest.is_symlink():
+            pointed = ""
+            with contextlib.suppress(OSError):
+                pointed = f" (points at {os.readlink(latest)})"
+            reason = f"{latest} is a dangling symlink{pointed}"
+        elif latest.exists():
+            reason = f"{latest} exists but is not a usable firewall binary"
+        else:
+            reason = f"{latest} is missing"
+        return SFWCacheFault(
+            binary=target,
+            reason=reason,
+            cache_dir=str(cache_dir),
+            cached_asset=str(cached_asset),
+            repair=f"ln -sfn {cached_asset} {latest}",
+        )
+
+    def bootstrap_failure_note(self, *streams: str) -> str | None:
+        """Note to append when an sfw invocation failed to prepare its binary.
+
+        Returns None for any other failure, so unrelated errors stay untouched.
+        """
+        if not any(_SFW_BOOTSTRAP_FAILURE_RE.search(s or "") for s in streams):
+            return None
+        fault = self.wrapper_cache_fault()
+        if fault is not None:
+            return fault.note()
+        return (
+            "hermes-sfw: sfw could not prepare its firewall binary on this host. "
+            "No firewall binary is cached and the release could not be fetched "
+            "(the GitHub releases API is commonly rate-limited or blocked for "
+            "hosted IPs). Run the sfw tool with action=status for the resolved "
+            "binary, or restore a cached release while the network can reach "
+            "api.github.com."
+        )
+
     def _find_sfw(self) -> str | None:
-        """Locate the sfw binary.
+        """Locate a sfw binary.
 
         Discovery is intentionally performed on demand instead of being cached
         during manager construction. The plugin manager can outlive changes to
@@ -566,18 +723,29 @@ class SFWManager:
         if self._config.sfw_bin != "sfw":
             return self._configured_sfw()
 
-        # Default: search PATH and common locations.
+        # Default: search PATH and common locations. A candidate that exists but
+        # cannot run is skipped in favour of a working install — a shim whose
+        # real target is missing, or a launcher whose downloaded firewall binary
+        # is unreachable. When nothing usable exists the unusable candidate is
+        # still returned, so the failure carries its own repair note instead of
+        # hiding behind "sfw is not installed".
+        fallback: str | None = None
         path = shutil.which(self._config.sfw_bin)
-        if path:
-            return path
+        candidate = self._candidate_sfw(Path(path)) if path else None
+        if candidate is not None and self.wrapper_cache_fault(candidate) is None:
+            return candidate
+        fallback = candidate
         # Check common locations. A candidate that exists but is a wrapper
         # shim whose real target is missing is skipped, like the one that
         # broke a machine even though ``npm ci`` succeeded.
-        for candidate in self._known_candidates():
-            path = self._candidate_sfw(candidate)
-            if path is not None:
-                return path
-        return None
+        for known in self._known_candidates():
+            found = self._candidate_sfw(known)
+            if found is None:
+                continue
+            if self.wrapper_cache_fault(found) is None:
+                return found
+            fallback = fallback or found
+        return fallback
 
     def _known_candidates(self) -> list[Path]:
         """Known shim/binary locations, newest home-aware first."""
@@ -901,6 +1069,13 @@ class SFWManager:
 
         # Parse output for blocked/installed packages
         blocked, installed = self._parse_output(stdout + stderr)
+
+        # A launcher that cannot prepare its firewall binary exits before the
+        # package manager runs; its own one-line error names neither the local
+        # cause nor the repair. Attach both.
+        note = self.bootstrap_failure_note(stdout, stderr) if exit_code != 0 else None
+        if note:
+            stderr = f"{stderr}\n\n{note}".strip()
 
         return SFWResult(
             success=exit_code == 0,

@@ -39,12 +39,21 @@ def _handle_status(manager: SFWManager) -> str:
     installed = manager.is_installed()
     version = manager.get_version() if installed else None
     binary = manager.sfw_path
-    return ok(
-        installed=installed,
-        version=version,
-        binary=binary,
-        invocation=_invocation_guidance(binary),
-    )
+    fault = manager.wrapper_cache_fault(binary) if binary else None
+    payload: dict[str, Any] = {
+        "installed": installed,
+        "version": version,
+        "binary": binary,
+        "invocation": _invocation_guidance(binary),
+    }
+    if fault is not None:
+        # A launcher whose firewall-binary cache does not resolve still exists
+        # and answers --version failures, so "installed" alone would read as
+        # healthy while every routed command dies at startup.
+        payload["usable"] = False
+        payload["cache_fault"] = fault.to_dict()
+        payload["note"] = fault.note()
+    return ok(**payload)
 
 
 def _handle_run(manager: SFWManager, params: dict[str, Any]) -> str:

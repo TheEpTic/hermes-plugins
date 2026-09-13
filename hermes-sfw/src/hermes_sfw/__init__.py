@@ -106,6 +106,29 @@ def _resolved_sfw_path() -> str | None:
     return _manager.sfw_path
 
 
+def _annotate_sfw_bootstrap_failure(
+    tool_name: str = "",
+    command: str = "",
+    output: Any = None,
+    **kwargs: Any,
+) -> str | None:
+    """Attach the sfw launcher diagnosis to a terminal result that shows one.
+
+    The pre-tool guard rewrites reachable package-manager commands to run
+    through sfw. When the launcher cannot prepare its firewall binary, the
+    routed command fails with sfw's own one-line error — no cause, no repair,
+    and no hint that an unrelated dev command was stopped by the sfw layer.
+    The ``transform_terminal_output`` hook adds both; any other output is
+    returned untouched.
+    """
+    if not isinstance(output, str) or _manager is None:
+        return None
+    note = _manager.bootstrap_failure_note(output)
+    if note is None:
+        return None
+    return f"{output}\n\n{note}"
+
+
 _manager: SFWManager | None = None
 
 
@@ -127,6 +150,7 @@ def register(ctx: Any) -> None:
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         register_hook("pre_tool_call", _guard_direct_dependency_operation)
+        register_hook("transform_terminal_output", _annotate_sfw_bootstrap_failure)
     else:
         logger.warning(
             "Hermes pre_tool_call hooks unavailable; direct terminal installs are not enforced"
