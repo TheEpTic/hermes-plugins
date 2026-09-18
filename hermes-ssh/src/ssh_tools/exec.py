@@ -561,9 +561,7 @@ class Executor:
 
     def poll(self, session_id: str, close_session: Any) -> dict[str, Any]:
         """Check whether a background process is running and collect it when complete."""
-        return self._collect_finished(
-            session_id, still_running_error=False, close_session=close_session
-        )
+        return self._collect_finished(session_id, still_running_error=False, close_session=close_session)
 
     def read_output(self, session_id: str, close_session: Any) -> dict[str, Any]:
         """Read output from a completed background process."""
