@@ -12,7 +12,7 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from ..audit import effective_mode, redact_local_path
 from ..helpers import append_jsonl
@@ -168,34 +168,23 @@ class TransferService:
         error = result.get("error") or result.get("stderr") or "remote scan failed"
         return None, str(error)
 
-    def _run_sftp(
-        self,
-        machine: Machine,
-        request: TransferRequest,
-        local_path: Path,
-        remote_path_value: str,
-    ) -> subprocess.CompletedProcess[str]:
-        return run_sftp(machine, self.manager.config, request, local_path, remote_path_value)
-
     def _sftp_or_error(
         self,
         machine: Machine,
         request: TransferRequest,
         local_path: Path,
         remote_path_value: str,
-        fail: Any,
-    ) -> subprocess.CompletedProcess[str] | dict[str, Any]:
-        """Run the sftp batch, mapping timeout/exit failures to audited errors."""
+        fail: Callable[[int, str], dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Run the sftp batch; audited error dict on failure, None on success."""
         try:
-            result = self._run_sftp(machine, request, local_path, remote_path_value)
+            result = run_sftp(machine, self.manager.config, request, local_path, remote_path_value)
         except subprocess.TimeoutExpired:
-            failed: dict[str, Any] = fail(-1, "Transfer timed out")
-            return failed
+            return fail(-1, "Transfer timed out")
         if result.returncode:
             message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
-            failed = fail(result.returncode, message)
-            return failed
-        return result
+            return fail(result.returncode, message)
+        return None
 
     def _cleanup_remote(
         self,
@@ -349,9 +338,9 @@ class TransferService:
                 request, machine.name, local.path, destination, started, code, message
             )
 
-        result = self._sftp_or_error(machine, request, local.path, temporary, fail)
-        if isinstance(result, dict):
-            return result
+        failed = self._sftp_or_error(machine, request, local.path, temporary, fail)
+        if failed is not None:
+            return failed
 
         finalise = self._finalise_upload(
             request,
@@ -444,9 +433,9 @@ class TransferService:
                 request, machine.name, source, destination, started, code, message
             )
 
-        result = self._sftp_or_error(machine, request, temporary, source, fail)
-        if isinstance(result, dict):
-            return result
+        failed = self._sftp_or_error(machine, request, temporary, source, fail)
+        if failed is not None:
+            return failed
         try:
             if request.overwrite:
                 os.replace(temporary, destination)

@@ -66,10 +66,10 @@ def _ok() -> subprocess.CompletedProcess:
 
 
 def _upload_locally(result: str | None, payload: bytes = b"payload"):
-    """fake _run_sftp that materialises the remote temp file locally."""
+    """fake run_sftp that materialises the remote temp file locally."""
 
-    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, local_path
+    def fake_sftp(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, local_path
         temporary = Path(remote_path)
         temporary.parent.mkdir(parents=True, exist_ok=True)
         temporary.write_bytes(payload)
@@ -79,10 +79,10 @@ def _upload_locally(result: str | None, payload: bytes = b"payload"):
 
 
 def _writes_file(path_content: bytes | None, code: int = 0, err: str = ""):
-    """fake _run_sftp that writes the staged local file (downloads)."""
+    """fake run_sftp that writes the staged local file (downloads)."""
 
-    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, remote_path
+    def fake_sftp(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, remote_path
         if path_content is not None:
             local_path.write_bytes(path_content)
         return subprocess.CompletedProcess(["sftp"], code, "", err)
@@ -166,10 +166,11 @@ def _faked(probe: tuple = ("missing", None), fake: Any = None, which: str = "/us
     stack = ExitStack()
     stack.enter_context(patch(_WHICH, return_value=which))
     stack.enter_context(patch.object(TransferService, "_probe", return_value=probe))
+    target = "ssh_tools.transfers.service.run_sftp"
     entered = stack.enter_context(
-        patch.object(TransferService, "_run_sftp", **({"return_value": fake} if fake else {}))
+        patch(target, **({"return_value": fake} if fake else {}))
         if isinstance(fake, subprocess.CompletedProcess) or fake is None
-        else patch.object(TransferService, "_run_sftp", side_effect=fake)
+        else patch(target, side_effect=fake)
     )
     stack.fake = entered  # type: ignore[attr-defined]
     return stack
@@ -188,7 +189,7 @@ def test_upload_temp_then_rename_and_refusals(tmp_path: Path) -> None:
         )
     assert result["success"] is True and result["machine"] == "web1"
     assert result["bytes"] == len(b"payload")
-    assert ".release.tar.gz.hermes-upload-" in stack.fake.call_args.args[3]
+    assert ".release.tar.gz.hermes-upload-" in stack.fake.call_args.args[4]
     assert any("mv -n --" in c for c in manager.commands)
     # existing destination without overwrite
     with _faked(probe=("file", None)) as stack:
@@ -251,8 +252,8 @@ def test_download_concurrent_and_failed_cleanup(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     destination = tmp_path / "downloads" / "app.log"
 
-    def racing(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, remote_path
+    def racing(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, remote_path
         local_path.write_bytes(b"remote log")
         destination.write_bytes(b"concurrent writer")
         return _ok()
