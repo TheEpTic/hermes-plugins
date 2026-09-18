@@ -60,8 +60,8 @@ def _take_name(params: dict[str, Any]) -> tuple[str | None, str | None]:
 
 def _named(manager: SSHManager, params: dict[str, Any]) -> tuple[str | None, str | None]:
     """Validated machine name for remove/inspect/test, or (None, error)."""
-    name, error = _take_name(params)
-    return (None, error) if error or name is None else (name, None)
+    del manager
+    return _take_name(params)
 
 
 def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
