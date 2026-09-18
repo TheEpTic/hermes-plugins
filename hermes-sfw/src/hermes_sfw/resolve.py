@@ -201,6 +201,18 @@ def _candidate_sfw(candidate: Path) -> str | None:
     return str(candidate) if target is None or Path(target).exists() else None
 
 
+def _find_usable(candidates: list[str | None]) -> tuple[str | None, str | None]:
+    """First cache-healthy candidate, plus the first unusable one as fallback."""
+    fallback: str | None = None
+    for found in candidates:
+        if found is None:
+            continue
+        if cache_fault(found) is None:
+            return found, fallback
+        fallback = fallback or found
+    return None, fallback
+
+
 def find_sfw(sfw_bin: str) -> str | None:
     """Locate a sfw binary.
 
@@ -218,20 +230,8 @@ def find_sfw(sfw_bin: str) -> str | None:
     # is unreachable. When nothing usable exists the unusable candidate is
     # still returned, so the failure carries its own repair note instead of
     # hiding behind "sfw is not installed".
-    fallback: str | None = None
     path = shutil.which(sfw_bin)
-    candidate = _candidate_sfw(Path(path)) if path else None
-    if candidate is not None and cache_fault(candidate) is None:
-        return candidate
-    fallback = candidate
-    # Check common locations. A candidate that exists but is a wrapper
-    # shim whose real target is missing is skipped, like the one that
-    # broke a machine even though ``npm ci`` succeeded.
-    for known in known_candidates():
-        found = _candidate_sfw(known)
-        if found is None:
-            continue
-        if cache_fault(found) is None:
-            return found
-        fallback = fallback or found
-    return fallback
+    pool = [_candidate_sfw(Path(path)) if path else None]
+    pool += [_candidate_sfw(known) for known in known_candidates()]
+    usable, fallback = _find_usable(pool)
+    return usable or fallback
