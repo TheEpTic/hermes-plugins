@@ -34,15 +34,20 @@ class MachineRegistry:
     def _save(self, machines: dict[str, dict[str, Any]]) -> None:
         self._store.write("machines.json", {"machines": machines})
 
+    @staticmethod
+    def _alias_of(machines: dict[str, dict[str, Any]], name: str) -> str:
+        """Canonical name for an alias, or '' when no machine carries it."""
+        return next(
+            (mname for mname, mdata in machines.items() if name in mdata.get("aliases", [])),
+            "",
+        )
+
     def resolve_name(self, name: str) -> str | None:
         """Resolve a name or alias to canonical machine name."""
         machines = self._load()
         if name in machines:
             return name
-        for mname, mdata in machines.items():
-            if name in mdata.get("aliases", []):
-                return mname
-        return None
+        return self._alias_of(machines, name) or None
 
     def get(self, name: str) -> Machine | None:
         canonical = self.resolve_name(name)
@@ -69,14 +74,7 @@ class MachineRegistry:
     def remove(self, name: str) -> bool:
         with self._lock:
             machines = self._load()
-            canonical = (
-                name
-                if name in machines
-                else next(
-                    (mn for mn, md in machines.items() if name in md.get("aliases", [])),
-                    "",
-                )
-            )
+            canonical = name if name in machines else self._alias_of(machines, name)
             if canonical and canonical in machines:
                 del machines[canonical]
                 self._save(machines)
