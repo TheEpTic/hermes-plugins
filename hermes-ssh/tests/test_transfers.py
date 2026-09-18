@@ -10,15 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from ssh_tools.transfers import (
-    TransferRequest,
-    TransferService,
-    _prepare_upload_source,
-    _remote_path,
-    _sftp_args,
-    _sftp_batch,
-    execute_transfer,
-)
+from ssh_tools.transfers import TransferRequest, TransferService, execute_transfer
+from ssh_tools.transfers.policy import prepare_upload_source, remote_path
+from ssh_tools.transfers.transport import sftp_args, sftp_batch
 
 
 class StubManager:
@@ -113,15 +107,15 @@ def _up_source(tmp_path: Path, name: str = "release.tar.gz") -> Path:
 
 def test_sftp_args_reuse_machine_connection(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
-    args = _sftp_args(manager.machine, manager.config, timeout=300)
+    args = sftp_args(manager.machine, manager.config, timeout=300)
     assert args[0] == "sftp" and args[1:3] == ["-b", "-"]
     for flag in ("-P", "2222", "-i", "/keys/id_ed25519", "ControlMaster=auto"):
         assert flag in args
     assert any(v.startswith("ControlPath=") for v in args)
     assert args[-1] == "deploy@192.0.2.10"
     manager.machine.host = "2001:db8::10"  # ipv6 brackets
-    assert _sftp_args(manager.machine, manager.config, timeout=30)[-1] == "deploy@[2001:db8::10]"
-    batch = _sftp_batch(
+    assert sftp_args(manager.machine, manager.config, timeout=30)[-1] == "deploy@[2001:db8::10]"
+    batch = sftp_batch(
         action="upload",
         local_path=tmp_path / "release.tar.gz",
         remote_path="/srv/releases/release.tar.gz",
@@ -136,7 +130,7 @@ def test_sftp_args_reuse_machine_connection(tmp_path: Path) -> None:
 )
 def test_remote_path_validation_fails_closed(path: str) -> None:
     with pytest.raises(ValueError):
-        _remote_path(path, "source")
+        remote_path(path, "source")
 
 
 @pytest.mark.parametrize(
@@ -147,9 +141,9 @@ def test_upload_credential_screening(tmp_path: Path, name: str, blocked: bool) -
     source.write_text("TOKEN=secret")
     if blocked:
         with pytest.raises(ValueError, match="credential file"):
-            _prepare_upload_source(str(source), recursive=False)
+            prepare_upload_source(str(source), recursive=False)
     else:
-        assert _prepare_upload_source(str(source), recursive=False).path == source.resolve()
+        assert prepare_upload_source(str(source), recursive=False).path == source.resolve()
 
 
 def test_recursive_upload_rejects_symlink(tmp_path: Path) -> None:
@@ -158,7 +152,7 @@ def test_recursive_upload_rejects_symlink(tmp_path: Path) -> None:
     (source / "app.js").write_text("ok")
     (source / "linked").symlink_to(source / "app.js")
     with pytest.raises(ValueError, match="symbolic link"):
-        _prepare_upload_source(str(source), recursive=True)
+        prepare_upload_source(str(source), recursive=True)
 
 
 def _xfer(manager: Any, **kw: Any) -> dict:
