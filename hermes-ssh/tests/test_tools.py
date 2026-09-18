@@ -196,21 +196,24 @@ def test_sessions_bypass_approval(tmp_path: Path) -> None:
     mock_check.assert_not_called()
 
 
-@pytest.mark.parametrize("approval", [None, {"approved": True, "message": None}])
-def test_approval_allows(tmp_path: Path, approval: Any) -> None:
-    """None or approved approval passes the command through."""
+@pytest.mark.parametrize(
+    "approval,success,fragment",
+    [
+        (None, True, "success"),
+        ({"approved": True, "message": None}, True, "success"),
+        (
+            {"approved": False, "message": "BLOCKED: recursive delete flagged"},
+            False,
+            "BLOCKED",
+        ),
+    ],
+)
+def test_approval_verdicts(tmp_path: Path, approval: Any, success: bool, fragment: str) -> None:
+    """Allowed approvals run the command; denials surface the message without ssh."""
     mgr = _add_h(tmp_path)
-    result, mock_run = _ran_via_terminal(mgr, approval, "ls")
-    assert result["success"] is True
-    mock_run.assert_called()
-
-
-def test_approval_denies_without_executing(tmp_path: Path) -> None:
-    mgr = _add_h(tmp_path)
-    deny = {"approved": False, "message": "BLOCKED: recursive delete flagged"}
-    result, mock_run = _ran_via_terminal(mgr, deny, "rm -rf /home")
-    assert result["success"] is False and "BLOCKED" in result["error"]
-    mock_run.assert_not_called()
+    result, mock_run = _ran_via_terminal(mgr, approval, "rm -rf /home" if not success else "ls")
+    assert result["success"] is success and fragment in json.dumps(result)
+    (mock_run.assert_called if success else mock_run.assert_not_called)()
 
 
 def test_approval_mode_off_bypasses(tmp_path: Path) -> None:
@@ -224,24 +227,6 @@ def test_approval_mode_off_bypasses(tmp_path: Path) -> None:
         result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "rm -rf /tmp/test"})
     assert result["success"] is True
     mock_run.assert_called_once()
-    # gateway wording tells the user to reply with /approve or /deny
-    waiting = {
-        "approved": False,
-        "status": "approval_required",
-        "description": "recursive delete",
-        "message": "approval required: recursive delete. the user must reply with "
-        "/approve or /deny.",
-    }
-    with (
-        patch("ssh_tools.handlers.terminal.check_approval", return_value=waiting),
-        patch("ssh_tools.exec.subprocess.run") as mock_run,
-    ):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "rm -rf /tmp/test"})
-    assert "/approve" in result["error"] and "/deny" in result["error"]
-    mock_run.assert_not_called()
-    # unknown names get their own error, distinct from unknown slash subcommands
-    assert "not found" in _slash(tmp_path)("nonexistent").lower()
 
 
 @pytest.mark.parametrize(
@@ -252,6 +237,24 @@ def test_slash_builtins(tmp_path: Path, args: str, fragment: str) -> None:
     result = _slash(tmp_path)(args)
     assert result is not None
     assert fragment in result or fragment in result.lower()
+    # unknown names get their own error, distinct from unknown slash subcommands
+    unknown = _slash(tmp_path)("nonexistent")
+    assert unknown is not None and "not found" in unknown.lower()
+
+
+def test_approval_required_wording(tmp_path: Path) -> None:
+    """Gateway wording tells the user to reply with /approve or /deny."""
+    mgr = _add_h(tmp_path)
+    waiting = {
+        "approved": False,
+        "status": "approval_required",
+        "description": "recursive delete",
+        "message": "approval required: recursive delete. the user must reply with "
+        "/approve or /deny.",
+    }
+    result, mock_run = _ran_via_terminal(mgr, waiting, "rm -rf /tmp/test")
+    assert "/approve" in result["error"] and "/deny" in result["error"]
+    mock_run.assert_not_called()
 
 
 @pytest.mark.parametrize(
