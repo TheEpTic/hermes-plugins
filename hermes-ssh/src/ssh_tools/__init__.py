@@ -48,6 +48,34 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# (tool name, schema, handler factory, description)
+_TOOLS = (
+    (
+        "ssh_terminal",
+        SSH_TERMINAL_SCHEMA,
+        handle_ssh_terminal,
+        "Run a command on a remote machine via SSH.",
+    ),
+    (
+        "ssh_transfer",
+        SSH_TRANSFER_SCHEMA,
+        handle_ssh_transfer,
+        "Upload or download files using a registered SSH machine.",
+    ),
+    (
+        "ssh_machines",
+        SSH_MACHINES_SCHEMA,
+        handle_ssh_machines,
+        "Manage the SSH machine registry.",
+    ),
+    (
+        "ssh_sessions",
+        SSH_SESSIONS_SCHEMA,
+        handle_ssh_sessions,
+        "Manage active SSH sessions.",
+    ),
+)
+
 # Module-level manager — initialized in register()
 _manager: SSHManager | None = None
 
@@ -59,11 +87,6 @@ def _get_manager() -> SSHManager:
     return _manager
 
 
-# ---------------------------------------------------------------------------
-# Plugin registration
-# ---------------------------------------------------------------------------
-
-
 def register(ctx: Any) -> None:
     """Register SSH tools with Hermes."""
     global _manager
@@ -72,45 +95,21 @@ def register(ctx: Any) -> None:
         return
     _manager = SSHManager()
 
-    # Tools
-    ctx.register_tool(
-        name="ssh_terminal",
-        toolset="ssh_tools",
-        schema=SSH_TERMINAL_SCHEMA,
-        handler=handle_ssh_terminal(_manager),
-        description="Run a command on a remote machine via SSH.",
-    )
-    ctx.register_tool(
-        name="ssh_transfer",
-        toolset="ssh_tools",
-        schema=SSH_TRANSFER_SCHEMA,
-        handler=handle_ssh_transfer(_manager),
-        description="Upload or download files using a registered SSH machine.",
-    )
-    ctx.register_tool(
-        name="ssh_machines",
-        toolset="ssh_tools",
-        schema=SSH_MACHINES_SCHEMA,
-        handler=handle_ssh_machines(_manager),
-        description="Manage the SSH machine registry.",
-    )
-    ctx.register_tool(
-        name="ssh_sessions",
-        toolset="ssh_tools",
-        schema=SSH_SESSIONS_SCHEMA,
-        handler=handle_ssh_sessions(_manager),
-        description="Manage active SSH sessions.",
-    )
+    for name, schema, handler_factory, description in _TOOLS:
+        ctx.register_tool(
+            name=name,
+            toolset="ssh_tools",
+            schema=schema,
+            handler=handler_factory(_manager),
+            description=description,
+        )
 
-    # Slash command
-    slash_handler = create_slash_handler(_get_manager)
     ctx.register_command(
         "ssh",
-        handler=slash_handler,
+        handler=create_slash_handler(_get_manager),
         description="SSH session management — machines, sessions, idle alerts.",
     )
 
-    # Start background idle checker
     _manager.start_idle_checker()
 
     logger.info("hermes-ssh plugin loaded")
