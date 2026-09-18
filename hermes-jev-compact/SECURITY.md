@@ -8,8 +8,11 @@ state budget, and call arguments are included (truncated per the fit stage).
 Prompt the operator before enabling on sessions carrying secrets outside the
 trust boundary of the Jev endpoint.
 
-Any OpenAI-style `POST {base_url}/systemone` endpoint works; TypeSafe's own
-API (https://api.typesafe.ai/v1) is the reference. Self-hosted routers keep
+Any OpenAI-style `POST {base_url}{endpoint_path}` Decisions endpoint
+works; TypeSafe's own API (https://api.typesafe.ai/v1 + `/systemone`) is the
+reference, and OpenRouter's Decisions API (https://openrouter.ai +
+`/api/alpha/decisions`, model `typesafe/jev-1.13`) speaks the same shape.
+Self-hosted routers keep
 the data in-house — point `base_url` at them.
 
 ## key handling

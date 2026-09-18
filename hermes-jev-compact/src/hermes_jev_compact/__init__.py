@@ -1,8 +1,10 @@
 """hermes-jev-compact — Jev-powered smart tool-prune context engine for Hermes.
 
 A ContextCompressor subclass named ``jev`` that scores stale tool call/result
-units with TypeSafe Jev (any OpenAI-style ``POST {base_url}/systemone``
-endpoint — TypeSafe's own API at https://api.typesafe.ai/v1 is the reference)
+units with TypeSafe Jev (any Decisions-shaped ``POST {base_url}{endpoint_path}``
+endpoint — TypeSafe's own API at https://api.typesafe.ai/v1 + /systemone is the
+reference, OpenRouter's Decisions API at https://openrouter.ai +
+/api/alpha/decisions speaks the same shape)
 and keeps/drops them by probability, falling back to the built-in
 deterministic prune on any failure.
 """
