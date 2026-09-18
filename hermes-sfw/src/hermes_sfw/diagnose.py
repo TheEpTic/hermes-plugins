@@ -12,80 +12,24 @@ from .models import SFWDiagnosis
 from .resolve import classify_binary, resolve_shim_target
 
 
-def _override_missing(override: Path, checked: list[str], errors: list[str]) -> SFWDiagnosis:
-    return SFWDiagnosis(
-        healthy=False,
-        binary=None,
-        binary_kind=None,
-        version=None,
-        why=(
-            f"configured sfw_bin override does not exist: {override}. "
-            "Reinstall with: npm i -g sfw"
-        ),
-        checked=checked,
-        errors=errors,
-    )
-
-
-def _broken_shim(
-    candidate: Path, target: str, checked: list[str], errors: list[str]
-) -> SFWDiagnosis:
-    return SFWDiagnosis(
-        healthy=False,
-        binary=str(candidate),
-        binary_kind="npm-shim",
-        version=None,
-        why=(
-            f"shim {candidate} points at missing target {target}. " "Reinstall with: npm i -g sfw"
-        ),
-        target=target,
-        checked=checked,
-        errors=errors,
-    )
-
-
-def _not_found(checked: list[str], errors: list[str]) -> SFWDiagnosis:
-    return SFWDiagnosis(
-        healthy=False,
-        binary=None,
-        binary_kind=None,
-        version=None,
-        why=(
-            "sfw binary not found: checked PATH and "
-            + ", ".join(checked)
-            + ". Install with: npm i -g sfw"
-        ),
-        checked=checked,
-        errors=errors,
-    )
-
-
-def _binary_diagnosis(
-    binary: str,
-    failure_reason: str,
+def _build_diagnosis(
+    *,
+    healthy: bool,
+    binary: str | None,
+    binary_kind: str | None,
+    version: str | None,
+    why: str,
     checked: list[str],
     errors: list[str],
-    version: str | None,
+    target: str | None = None,
 ) -> SFWDiagnosis:
-    info = classify_binary(binary)
-    if version is None:
-        return SFWDiagnosis(
-            healthy=False,
-            binary=binary,
-            binary_kind=info.binary_kind,
-            version=None,
-            why=failure_reason,
-            target=info.target,
-            checked=checked,
-            errors=errors,
-        )
     return SFWDiagnosis(
-        healthy=True,
+        healthy=healthy,
         binary=binary,
-        binary_kind=info.binary_kind,
+        binary_kind=binary_kind,
         version=version,
-        why="ok",
-        target=info.target,
+        why=why,
+        target=target,
         checked=checked,
         errors=errors,
     )
@@ -100,7 +44,18 @@ def diagnose_override(
     override = Path(sfw_bin)
     checked.append(str(override))
     if not override.exists():
-        return _override_missing(override, checked, errors)
+        return _build_diagnosis(
+            healthy=False,
+            binary=None,
+            binary_kind=None,
+            version=None,
+            why=(
+                f"configured sfw_bin override does not exist: {override}. "
+                "Reinstall with: npm i -g sfw"
+            ),
+            checked=checked,
+            errors=errors,
+        )
     return binary_at(str(override), "the binary exists but its --version query failed")
 
 
@@ -117,7 +72,19 @@ def diagnose_candidate(
         return None
     target = resolve_shim_target(str(candidate))
     if target is not None and not Path(target).exists():
-        return _broken_shim(candidate, target, checked, errors)
+        return _build_diagnosis(
+            healthy=False,
+            binary=str(candidate),
+            binary_kind="npm-shim",
+            version=None,
+            why=(
+                f"shim {candidate} points at missing target {target}. "
+                "Reinstall with: npm i -g sfw"
+            ),
+            target=target,
+            checked=checked,
+            errors=errors,
+        )
     return binary_at(str(candidate), f"binary {candidate} exists but its --version query failed")
 
 
@@ -144,7 +111,18 @@ def diagnose(
     errors: list[str] = []
 
     def binary_at(binary: str, failure_reason: str) -> SFWDiagnosis:
-        return _binary_diagnosis(binary, failure_reason, checked, errors, version_fn())
+        version = version_fn()
+        info = classify_binary(binary)
+        return _build_diagnosis(
+            healthy=version is not None,
+            binary=binary,
+            binary_kind=info.binary_kind,
+            version=version,
+            why="ok" if version is not None else failure_reason,
+            target=info.target,
+            checked=checked,
+            errors=errors,
+        )
 
     if sfw_bin != "sfw":
         return diagnose_override(sfw_bin, checked, errors, binary_at)
@@ -160,4 +138,16 @@ def diagnose(
         if candidate_diagnosis is not None:
             return candidate_diagnosis
 
-    return _not_found(checked, errors)
+    return _build_diagnosis(
+        healthy=False,
+        binary=None,
+        binary_kind=None,
+        version=None,
+        why=(
+            "sfw binary not found: checked PATH and "
+            + ", ".join(checked)
+            + ". Install with: npm i -g sfw"
+        ),
+        checked=checked,
+        errors=errors,
+    )
