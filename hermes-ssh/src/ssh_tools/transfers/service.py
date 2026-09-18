@@ -263,25 +263,9 @@ class TransferService:
             f"{request.destination.rstrip('/')}/{temporary_name}"
         )
         expected = f"[ -d {destination_arg} ]" if is_directory else f"[ -f {destination_arg} ]"
-        can_replace = request.overwrite and not is_directory
-        if can_replace:
-            precondition = (
-                f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
-                f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
-            )
-            move_command = f"mv -f -- {temporary_arg} {destination_arg} || exit $?; "
-            no_clobber_check = ""
-        else:
-            precondition = (
-                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
-            )
-            move_command = f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; "
-            no_clobber_check = (
-                f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
-                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
-                "exit $move_status; fi; "
-                "if [ $move_status -ne 0 ]; then exit $move_status; fi; "
-            )
+        precondition, move_command, no_clobber_check = self._move_fragments(
+            temporary_arg, destination_arg, request.overwrite and not is_directory
+        )
         command = (
             f"{precondition}{move_command}{no_clobber_check}"
             f"if {expected} && [ ! -L {destination_arg} ] && "
@@ -293,6 +277,27 @@ class TransferService:
             command,
             timeout=min(request.timeout, 60),
             max_output_chars=2_000,
+        )
+
+    @staticmethod
+    def _move_fragments(
+        temporary_arg: str, destination_arg: str, can_replace: bool
+    ) -> tuple[str, str, str]:
+        """Shell fragments for the upload finalise: overwrite uses mv -f, else mv -n."""
+        if can_replace:
+            return (
+                f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
+                f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; ",
+                f"mv -f -- {temporary_arg} {destination_arg} || exit $?; ",
+                "",
+            )
+        return (
+            f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; ",
+            f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; ",
+            f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
+            f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+            "exit $move_status; fi; "
+            "if [ $move_status -ne 0 ]; then exit $move_status; fi; ",
         )
 
     @staticmethod
