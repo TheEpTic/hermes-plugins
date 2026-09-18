@@ -227,40 +227,35 @@ class _StateFitter:
     def done(self, stage: str) -> dict[str, Any]:
         return {"state": self._state_of(self.history), "tokens": self.tokens, "stage": stage}
 
-    def _abridge_texts(self) -> dict[str, Any] | None:
+    def _rewrite_entries(self, kind: str) -> dict[str, Any] | None:
+        original_len = {m.index: len(m.text) for m in self._messages} if kind == "collapse" else {}
+        by_message = _calls_by_index(self._calls) if kind == "compact" else {}
+        stages = ("texts abridged", "old messages collapsed", "old calls compacted")
+        value: str | list[str]
         for index in self._order():
             entry = self.history[index]
-            if len(entry.get("text", "")) <= TEXT_HEAD + TEXT_TAIL + 40:
-                continue
-            abridged = abridge(str(entry.get("text", "")), TEXT_HEAD, TEXT_TAIL)
-            self._shrink(index, lambda e, a=abridged: e.update(text=a))
+            if kind == "abridge":
+                if len(entry.get("text", "")) <= TEXT_HEAD + TEXT_TAIL + 40:
+                    continue
+                value = abridge(str(entry.get("text", "")), TEXT_HEAD, TEXT_TAIL)
+            elif kind == "collapse":
+                if self._pinned(entry) or not entry.get("text"):
+                    continue
+                n = original_len.get(int(entry.get("i", -1)), len(str(entry.get("text", ""))))
+                value = f"[… {n} chars omitted …]"
+            else:
+                own = by_message.get(int(entry.get("i", -1))) or []
+                if self._pinned(entry) or not own:
+                    continue
+                value = [_compact_call(c) for c in own]
+            self._shrink(
+                index,
+                lambda e, v=value, k=kind: (
+                    e.update(text=v) if k != "compact" else e.update(tool_calls=v)
+                ),
+            )
             if self._fits():
-                return self.done("texts abridged")
-        return None
-
-    def _collapse_texts(self) -> dict[str, Any] | None:
-        original_len = {m.index: len(m.text) for m in self._messages}
-        for index in self._order():
-            entry = self.history[index]
-            if self._pinned(entry) or not entry.get("text"):
-                continue
-            n = original_len.get(int(entry.get("i", -1)), len(str(entry.get("text", ""))))
-            self._shrink(index, lambda e, note=f"[… {n} chars omitted …]": e.update(text=note))
-            if self._fits():
-                return self.done("old messages collapsed")
-        return None
-
-    def _compact_calls(self) -> dict[str, Any] | None:
-        by_message = _calls_by_index(self._calls)
-        for index in self._order():
-            entry = self.history[index]
-            own = by_message.get(int(entry.get("i", -1))) or []
-            if self._pinned(entry) or not own:
-                continue
-            compacted = [_compact_call(c) for c in own]
-            self._shrink(index, lambda e, c=compacted: e.update(tool_calls=c))
-            if self._fits():
-                return self.done("old calls compacted")
+                return self.done(stages[("abridge", "collapse", "compact").index(kind)])
         return None
 
     def _drop_text_only(self) -> tuple[dict[str, Any] | None, set[int]]:
@@ -316,8 +311,8 @@ class _StateFitter:
             self._rebuild(limit)
             if self._fits():
                 return self.done(f"inputs<={limit}")
-        for stage in (self._abridge_texts, self._collapse_texts, self._compact_calls):
-            if (result := stage()) is not None:
+        for kind in ("abridge", "collapse", "compact"):
+            if (result := self._rewrite_entries(kind)) is not None:
                 return result
         result, left = self._drop_text_only()
         if result is not None:
