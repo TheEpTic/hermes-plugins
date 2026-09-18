@@ -167,11 +167,12 @@ def _faked(probe: tuple = ("missing", None), fake: Any = None, which: str = "/us
     stack.enter_context(patch(_WHICH, return_value=which))
     stack.enter_context(patch.object(TransferService, "_probe", return_value=probe))
     target = "ssh_tools.transfers.service.run_sftp"
-    entered = stack.enter_context(
-        patch(target, **({"return_value": fake} if fake else {}))
-        if isinstance(fake, subprocess.CompletedProcess) or fake is None
-        else patch(target, side_effect=fake)
-    )
+    if isinstance(fake, subprocess.CompletedProcess):
+        entered = stack.enter_context(patch(target, return_value=fake))
+    elif fake is None:
+        entered = stack.enter_context(patch(target))
+    else:
+        entered = stack.enter_context(patch(target, side_effect=fake))
     stack.fake = entered  # type: ignore[attr-defined]
     return stack
 
