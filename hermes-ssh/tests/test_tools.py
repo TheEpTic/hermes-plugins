@@ -46,6 +46,17 @@ def _add_h(tmp_path: Path):
     return mgr
 
 
+def _ran_via_terminal(mgr: Any, approval: Any, command: str) -> tuple[dict, Any]:
+    """Run one sync command through the terminal handler with faked approval+ssh."""
+    with (
+        patch("ssh_tools.handlers.terminal.check_approval", return_value=approval),
+        patch("ssh_tools.exec.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": command})
+    return result, mock_run
+
+
 @pytest.mark.parametrize(
     "params,fragment",
     [
@@ -128,12 +139,20 @@ def test_machines_schema_no_root_default() -> None:
 def test_sessions_list(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     result = _call(handle_ssh_sessions(mgr), {"action": "list"})
-    assert result["success"] is True and result["count"] == 0
+    assert result["success"] is True and result["count"] == 0 and "idle_secs" not in result
     mgr.register_session(Session(id="s1", machine="host1"))
     result = _call(handle_ssh_sessions(mgr), {"action": "list"})
-    assert result["count"] == 1 and "idle_secs" in result["sessions"]["s1"]
-    assert "idle_human" in result["sessions"]["s1"]
-    assert _call(handle_ssh_sessions(mgr), {"action": "cleanup"})["cleaned"] == 0
+    assert result["count"] == 1
+    entry = result["sessions"]["s1"]
+    assert entry["idle_human"] == f"{entry['idle_secs']}s"
+
+
+def test_sessions_cleanup_shortcut(tmp_path: Path) -> None:
+    assert _call(handle_ssh_sessions(_make_manager(tmp_path)), {"action": "cleanup"}) == {
+        "success": True,
+        "cleaned": 0,
+        "details": [],
+    }
 
 
 @pytest.mark.parametrize(
@@ -188,12 +207,7 @@ def test_sessions_bypass_approval(tmp_path: Path) -> None:
 def test_approval_allows(tmp_path: Path, approval: Any) -> None:
     """None or approved approval passes the command through."""
     mgr = _add_h(tmp_path)
-    with (
-        patch("ssh_tools.handlers.terminal.check_approval", return_value=approval),
-        patch("ssh_tools.exec.subprocess.run") as mock_run,
-    ):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "ls"})
+    result, mock_run = _ran_via_terminal(mgr, approval, "ls")
     assert result["success"] is True
     mock_run.assert_called()
 
@@ -201,11 +215,7 @@ def test_approval_allows(tmp_path: Path, approval: Any) -> None:
 def test_approval_denies_without_executing(tmp_path: Path) -> None:
     mgr = _add_h(tmp_path)
     deny = {"approved": False, "message": "BLOCKED: recursive delete flagged"}
-    with (
-        patch("ssh_tools.handlers.terminal.check_approval", return_value=deny),
-        patch("ssh_tools.exec.subprocess.run") as mock_run,
-    ):
-        result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "rm -rf /home"})
+    result, mock_run = _ran_via_terminal(mgr, deny, "rm -rf /home")
     assert result["success"] is False and "BLOCKED" in result["error"]
     mock_run.assert_not_called()
 
@@ -237,9 +247,12 @@ def test_approval_required_names_commands(tmp_path: Path) -> None:
         patch("ssh_tools.handlers.terminal.check_approval", return_value=waiting),
         patch("ssh_tools.exec.subprocess.run") as mock_run,
     ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "rm -rf /tmp/test"})
     assert "/approve" in result["error"] and "/deny" in result["error"]
     mock_run.assert_not_called()
+    # unknown names get their own error, distinct from unknown slash subcommands
+    assert "not found" in _slash(tmp_path)("nonexistent").lower()
 
 
 @pytest.mark.parametrize(
@@ -275,8 +288,3 @@ def test_slash_inspect(tmp_path: Path, name: str, fields: list) -> None:
     result = create_slash_handler(ssh_tools._get_manager)(name)
     assert result is not None
     assert all(f in result for f in fields)
-
-
-def test_slash_unknown_machine_is_a_separate_error(tmp_path: Path) -> None:
-    result = _slash(tmp_path)("nonexistent")
-    assert result is not None and "not found" in result.lower()

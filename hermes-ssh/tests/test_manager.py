@@ -190,10 +190,8 @@ def test_session_lifecycle(tmp_path: Path) -> None:
 
 
 def _age_session(mgr: Any, sid: str, age: timedelta, field: str = "last_active") -> None:
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        sessions[sid][field] = (datetime.now(UTC) - age).isoformat()
-        mgr._save_sessions(sessions)
+    stamp = (datetime.now(UTC) - age).isoformat()
+    _rewrite_sessions_blob(mgr, lambda sessions: sessions[sid].__setitem__(field, stamp))
 
 
 def test_register_session_preserves_started(tmp_path: Path) -> None:
@@ -244,10 +242,7 @@ def test_prune_closed(tmp_path: Path, status: str, started: str, expected: int) 
     mgr.register_session(Session(id="s1", machine="host1"))
     if status == "closed":
         mgr.close_session("s1")
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        sessions["s1"]["started"] = started
-        mgr._save_sessions(sessions)
+    _rewrite_sessions_blob(mgr, lambda sessions: sessions["s1"].__setitem__("started", started))
     assert mgr.prune_closed(max_age_hours=24) == expected
 
 
@@ -263,6 +258,13 @@ def test_prune_uses_config_default(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # json persistence
 # ---------------------------------------------------------------------------
+
+
+def _rewrite_sessions_blob(mgr: Any, mutate: Any) -> None:
+    with mgr._lock:
+        sessions = mgr._load_sessions()
+        mutate(sessions)
+        mgr._save_sessions(sessions)
 
 
 @pytest.mark.parametrize(
@@ -355,6 +357,9 @@ def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
         assert mgr.run_command("h", "echo ok", timeout=0)["success"] is True
     bad = mgr.run_command("h", "echo ok", timeout="abc")
     assert bad["success"] is False and "timeout" in bad["error"]
+    # main behaviour: a bool timeout is garbage and raises, not silently coerced.
+    bool_bad = mgr.run_command("h", "echo ok", timeout=True)
+    assert bool_bad["success"] is False and "positive integer" in bool_bad["error"]
 
 
 def test_run_command_clamps_output(tmp_path: Path) -> None:
@@ -399,38 +404,42 @@ def test_output_sizes_inline_vs_file(tmp_path: Path) -> None:
 
 
 def _fake_running_popen() -> MagicMock:
-    proc = MagicMock(pid=12345, returncode=None)
-    proc.stdout = MagicMock()
-    proc.stderr = MagicMock()
-    proc.poll.return_value = None
-    return proc
+    return MagicMock(
+        pid=12345,
+        stdout=MagicMock(),
+        stderr=MagicMock(),
+        returncode=None,
+        **{"poll.return_value": None},
+    )
 
 
-def _bg_ready(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
+def _bg_ready(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any, Any]:
+    """Start a faked bg command; returns (mgr, session_id, proc, popen_mock)."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     proc = _fake_running_popen()
-    with patch("ssh_tools.exec.subprocess.Popen", return_value=proc):
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=proc) as popen:
         started = mgr.run_command("h", cmd, background=True, **kw)
-    return mgr, started["session_id"], proc
+    return mgr, started["session_id"], proc, popen
+
+
+def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
+    mgr, sid, proc, _ = _bg_ready(tmp_path, cmd, **kw)
+    return mgr, sid, proc
 
 
 def test_run_command_background(tmp_path: Path) -> None:
-    mgr, sid, proc = _bg_ready(tmp_path, "long command")
+    mgr, sid, proc = _bg(tmp_path, "long command")
     assert proc.pid == 12345
     assert mgr.get_session(sid).status == "active"
     assert sid in mgr._processes
 
 
 def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.exec.subprocess.Popen") as popen:
-        popen.return_value = _fake_running_popen()
-        result = mgr.run_command("h", "verbose", background=True)
-    assert popen.call_args.kwargs["stdout"] is not subprocess.PIPE
-    assert popen.call_args.kwargs["stderr"] is not subprocess.PIPE
-    assert result["session_id"] in mgr._background_outputs
+    mgr, sid, _, popen = _bg_ready(tmp_path, "verbose")
+    kwargs = popen.call_args.kwargs
+    assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
+    assert sid in mgr._background_outputs
 
 
 @pytest.mark.parametrize(
@@ -438,7 +447,7 @@ def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
     [(0, "stdout", "hello world\n"), (1, "stderr", "command failed\n")],
 )
 def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: str) -> None:
-    mgr, sid, proc = _bg_ready(tmp_path)
+    mgr, sid, proc = _bg(tmp_path)
     proc.poll.return_value = exit_code
     proc.stdout.read.return_value = b"hello world\n" if exit_code == 0 else b""
     proc.stderr.read.return_value = b"" if exit_code == 0 else b"command failed\n"
@@ -455,21 +464,17 @@ def test_poll_and_read_errors(tmp_path: Path) -> None:
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     assert "No background process" in mgr.poll_session("nope")["error"]
     assert "No background process" in mgr.read_output("nope")["error"]
-    mgr2, sid, _ = _bg_ready(tmp_path / "bg2")
+    mgr2, sid, _ = _bg(tmp_path / "bg2")
     assert mgr2.poll_session(sid)["running"] is True
     running = mgr2.read_output(sid)
     assert running["success"] is False and "still running" in running["error"]
 
 
-def _audited_run(mgr: Any, cmd: str, **kw: Any) -> None:
-    _run_ok(mgr, cmd=cmd, **kw)
-
-
 def test_audit_log_modes(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    _audited_run(mgr, "echo 1")
-    _audited_run(mgr, "echo 2")
+    _run_ok(mgr, cmd="echo 1")
+    _run_ok(mgr, cmd="echo 2")
     entries = mgr.list_command_log()
     assert entries[-2]["command"] == "echo 1" and entries[-1]["command"] == "echo 2"
     assert {"timestamp", "elapsed_secs", "session_id"} <= entries[-1].keys()
@@ -532,23 +537,26 @@ def _tracked_session(tmp_path: Path, sid: str = "s1", status: int | None = None)
     return mgr
 
 
-def test_kill_session_tracked(tmp_path: Path) -> None:
-    mgr = _tracked_session(tmp_path)
+@pytest.mark.parametrize(
+    "tracked,success,fragment",
+    [(True, True, "pid_killed"), (False, False, "orphaned")],
+)
+def test_kill_session_tracked_vs_untracked(
+    tmp_path: Path, tracked: bool, success: bool, fragment: str
+) -> None:
+    """Tracked procs get SIGTERM; untracked pids are never signalled (orphaned)."""
+    mgr = _tracked_session(tmp_path) if tracked else _make_manager(tmp_path)
+    if not tracked:
+        mgr.register_session(Session(id="s1", machine="h", pid=99999))
     with patch("ssh_tools.exec.os.killpg") as mock_killpg:
         result = mgr.kill_session("s1")
-    assert result["success"] is True and result["pid_killed"] is True
-    mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
-    assert mgr.get_session("s1").status == "closed"
-
-
-def test_kill_session_refuses_untracked(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=99999))
-    with patch("ssh_tools.exec.os.killpg") as mock_killpg:
-        result = mgr.kill_session("s1")
-    assert result["success"] is False and result["status"] == "orphaned"
-    mock_killpg.assert_not_called()
-    assert mgr.get_session("s1").status == "orphaned"
+    assert result["success"] is success and fragment in json.dumps(result)
+    if tracked:
+        mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
+        assert mgr.get_session("s1").status == "closed"
+    else:
+        mock_killpg.assert_not_called()
+        assert mgr.get_session("s1").status == "orphaned"
 
 
 def test_kill_session_socket_and_missing(tmp_path: Path) -> None:
@@ -594,7 +602,7 @@ def test_idle_checker_lifecycle(tmp_path: Path) -> None:
 @pytest.mark.parametrize("large", [True, False])
 def test_spool_lifecycle(tmp_path: Path, large: bool) -> None:
     """Large bg output keeps its spool file; short output deletes both spools."""
-    mgr, sid, proc = _bg_ready(tmp_path, "command", **({"max_output_chars": 10} if large else {}))
+    mgr, sid, proc = _bg(tmp_path, "command", **({"max_output_chars": 10} if large else {}))
     stdout_path, stderr_path, _ = mgr._background_outputs[sid]
     stdout_path.write_text("x" * 100 if large else "done")
     stderr_path.write_text("")
@@ -609,7 +617,7 @@ def test_spool_lifecycle(tmp_path: Path, large: bool) -> None:
 
 
 def test_background_registered_before_process(tmp_path: Path) -> None:
-    mgr, sid, proc = _bg_ready(tmp_path, "sleep 99")
+    mgr, sid, proc = _bg(tmp_path, "sleep 99")
     assert mgr.get_session(sid) is not None
     assert mgr.get_session(sid).pid == 12345
     assert sid in mgr._processes
