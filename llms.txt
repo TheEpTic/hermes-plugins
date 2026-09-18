@@ -8,7 +8,7 @@ Repository: https://github.com/TheEpTic/hermes-plugins
 
 - `hermes-ssh`: named multi-host SSH inventory, command execution, reusable connections, sessions, and audit history
 - `hermes-sfw`: restricted dependency operations through Socket Firewall Free
-- `hermes-jev-compact`: Jev-scored tool-prune context engine (`context.engine: jev`), needs a System One `/v1/systemone` endpoint + key
+- `hermes-jev-compact`: Jev-scored tool-prune context engine (`context.engine: jev`), needs a System One `/v1/systemone` endpoint + key; see its README for the scoring pipeline
 
 ## installation contract
 

@@ -99,9 +99,10 @@ def test_compact_call_vector():
         preserve_recent=1,
     )
     assert compacted["stage"] == "old calls compacted"
-    # TS parity (state.ts:110-120): whole input JSON, whitespace-flattened.
+    # TS parity (state.ts:110-120): key=value per entry, raw strings, the
+    # JOINED line truncated to 60 — not whole-object JSON.
     assert compacted["state"]["history"][1]["tool_calls"][0] == (
-        't1 Read {"file_path":"/repo/src/module-0.ts"} → ok 1ch'
+        "t1 Read file_path=/repo/src/module-0.ts → ok 1ch"
     )
 
 
@@ -231,6 +232,58 @@ def test_truncated_result_text_short_passthrough_and_zero_head():
         out
         == "[fast-jev-compaction truncated 500 chars of this tool result; re-run the tool if needed]"
     )
+    # Negative head clamps to 0 (marker-only) instead of corrupting the count.
+    assert truncated_result_text("z" * 500, False, -1) == out
+
+
+def test_compact_call_multikey_ts_vector():
+    # TS state.ts:110-120 verbatim semantics: key=value per entry, string
+    # values raw (no JSON quotes), non-strings via inputText({k: v}, 200),
+    # whitespace flattened PER ENTRY, joined line truncated to 60.
+    from hermes_jev_compact.protocol import JevToolCall
+    from hermes_jev_compact.pruner import _compact_call
+
+    call = JevToolCall(
+        id="t1",
+        tool_call_id="a",
+        tool="Read",
+        input={"file_path": "/repo/src/a.ts", "limit": 50},
+        call_index=1,
+        result_index=2,
+        result_chars=100,
+        is_error=False,
+    )
+    assert _compact_call(call) == 't1 Read file_path=/repo/src/a.ts limit={"limit":50} → ok 100ch'
+    wsy = JevToolCall(
+        id="t2",
+        tool_call_id="b",
+        tool="Grep",
+        input={"pattern": "a\n  b"},
+        call_index=1,
+        result_index=2,
+        result_chars=5,
+        is_error=True,
+    )
+    assert _compact_call(wsy) == "t2 Grep pattern=a b → error 5ch"
+
+
+def test_apply_rejects_ambiguous_input():
+    from hermes_jev_compact.protocol import JevCallDecision, JevError
+
+    messages, calls = _calls(n=2, chars=2000)
+    dup_calls = [calls[0], calls[0]]
+    dec = [JevCallDecision(id=calls[0].id, tool="t", action="drop_result", reason="x")]
+    with pytest.raises(JevError, match="duplicate jev call id"):
+        apply_decisions_openai(messages, dec, dup_calls, 300)
+    dup_dec = [
+        JevCallDecision(id=calls[0].id, tool="t", action="drop_result", reason="x"),
+        JevCallDecision(id=calls[0].id, tool="t", action="drop_call", reason="x"),
+    ]
+    with pytest.raises(JevError, match="duplicate jev decision id"):
+        apply_decisions_openai(messages, dup_dec, calls, 300)
+    # Unknown decision ids are ignored, not applied.
+    unknown = [JevCallDecision(id="tX", tool="t", action="drop_call", reason="x")]
+    assert apply_decisions_openai(messages, unknown, calls, 300) == messages
 
 
 def test_fit_state_throws_when_impossible():

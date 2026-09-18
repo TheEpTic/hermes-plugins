@@ -4,7 +4,8 @@ Traceability: test_estimate_tokens_vectors == test.ts 'token estimate' block
 verbatim; test_estimate_tokens_exact_mixed_vectors is computed independently
 from state.ts:28-37 (pieces/regex + class rule + ceil); test_truncate_matches_ts
 / test_abridge_matches_ts pin the exact TS truncate/abridge semantics
-(state.ts:40-47); the unicode + tail=0 tests pin the two DOCUMENTED drifts
+(state.ts:40-47); the astral tests pin UTF-16-unit parity (surrogate halves
+count as TS counts them); the tail=0 test pins the one DOCUMENTED drift
 (see shaping.py).
 """
 
@@ -72,3 +73,18 @@ def test_abridge_zero_tail_documented_drift():
     assert out.startswith("x" * 400)
     assert out.endswith("…]\n")
     assert "[… 600 chars omitted …]" in out
+
+
+def test_astral_counts_as_two_utf16_units_like_ts():
+    # TS .length/regex count UTF-16 code units: one emoji = 2 surrogate
+    # chars = 2 symbol matches @0.9 = 1.8 tokens. Python len() would say 1.
+    assert estimate_tokens("😀" * 100) == 180
+    assert estimate_tokens("😀") == 2  # ceil(1.8)
+    # Truncation widths are units too, and never split a surrogate pair.
+    assert truncate("😀" * 100, 10) == "😀" * 4 + "…"
+    assert truncate("ab😀cd", 5) == "ab😀…"
+    # Abridge counts + slices in units.
+    out = abridge("😀" * 400, 400, 150)
+    assert "[… 250 chars omitted …]" in out
+    assert out.startswith("😀" * 200)
+    assert out.endswith("😀" * 75)

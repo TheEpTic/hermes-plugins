@@ -18,10 +18,15 @@ def test_pairs_calls_with_results_and_pins_tail():
     assert calls[0].input == {"path": "src/f0.ts"}
 
 
-def test_ignores_unpaired_and_short_and_multimodal():
+def test_ignores_unpaired_and_short_and_unusable():
     messages = make_tool_transcript(n_calls=1, result_chars=100)
     assert collect_candidates(messages, 99, 8000) == []
+    # Multimodal text parts ARE flattened now (host _part_text parity) — a
+    # 9000-char text part is a real candidate, not an exclusion.
     messages[3]["content"] = [{"type": "text", "text": "x" * 9000}]
+    assert [c.tool_call_id for c in collect_candidates(messages, 99, 8000)] == ["call_1"]
+    # Shapes with no text channel (bytes/numbers) are still excluded.
+    messages[3]["content"] = b"\x00\x01" * 5000
     assert collect_candidates(messages, 99, 8000) == []
     # unpaired call: no result row
     lonely = [
@@ -91,8 +96,8 @@ def test_skips_index_zero_call():
 
 def test_multi_call_row_and_duplicate_ids():
     # Two calls in ONE assistant row pair independently; a duplicate tool row
-    # for one call id resolves to the LAST row (dict overwrite) — bodies never
-    # leak into the fitted state either way.
+    # for one call id SKIPS that id entirely (all occurrences) — collapsing
+    # would score one occurrence while pruning every row sharing the id.
     messages = [
         {"role": "user", "content": "go"},
         {
@@ -109,8 +114,7 @@ def test_multi_call_row_and_duplicate_ids():
         {"role": "user", "content": "tail"},
     ]
     calls = collect_candidates(messages, 99, 1)
-    assert [(c.tool_call_id, c.call_index) for c in calls] == [("a", 1), ("b", 1)]
-    assert calls[0].result_chars == 9000  # last row wins, length same here
+    assert [(c.tool_call_id, c.call_index) for c in calls] == [("b", 1)]
 
 
 def test_pinned_bit_marks_index_zero_and_recent():
@@ -131,3 +135,55 @@ def test_to_internal_excludes_system():
     internal = to_internal(make_tool_transcript(1))
     assert all(m.role != "system" for m in internal)
     assert [m.role for m in internal] == ["user", "assistant", "tool", "user"]
+
+
+def test_skips_duplicate_result_ids_and_out_of_order():
+    # Duplicate RESULT ids skip (like duplicate assistant ids): scoring one
+    # occurrence while pruning all rows sharing the id would corrupt output.
+    dup = [
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_well_formed_call("a")],
+        },
+        {"role": "tool", "tool_call_id": "a", "content": "A" * 9000},
+        {"role": "tool", "tool_call_id": "a", "content": "A2" * 4500},
+        {"role": "user", "content": "tail"},
+    ]
+    assert collect_candidates(dup, 99, 1) == []
+    # Result BEFORE its call is malformed — never a candidate.
+    ooo = [
+        {"role": "tool", "tool_call_id": "a", "content": "A" * 9000},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [_well_formed_call("a")],
+        },
+        {"role": "user", "content": "tail"},
+    ]
+    assert collect_candidates(ooo, 99, 1) == []
+
+
+def test_flattens_multimodal_parts_like_host():
+    # Host parity (context_compressor _part_text): text parts join, image/file
+    # parts contribute nothing, and the row keeps its text for state.
+    from hermes_jev_compact.adapter import _flatten_text
+
+    assert _flatten_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "a\nb"
+    assert _flatten_text([{"type": "image_url", "image_url": {"url": "x"}}]) == ""
+    assert _flatten_text([{"type": "text", "text": "keep"}, {"type": "image_url"}]) == "keep"
+    assert _flatten_text(None) == ""
+    assert _flatten_text(b"\x00") is None
+    assert _flatten_text(42) is None
+
+
+def test_normalizes_boundary_and_preserve_recent():
+    from hermes_jev_compact.adapter import is_pinned
+
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    # Oversized boundary clamps to len (all eligible); negative clamps to 0.
+    assert len(collect_candidates(messages, 10**9, 1)) == 1
+    assert collect_candidates(messages, -5, 1) == []
+    assert is_pinned(3, 9, -1) is False
+    assert is_pinned(3, 9, 10**9) is True

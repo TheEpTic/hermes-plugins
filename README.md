@@ -7,7 +7,7 @@ Practical community plugins for [Hermes Agent](https://github.com/NousResearch/h
 
 - **hermes-ssh** gives Hermes named, multi-host SSH operations with a machine registry, reusable connections, background sessions, and audit history.
 - **hermes-sfw** routes dependency changes through Socket Firewall Free instead of trusting raw package-manager installs.
-- **hermes-jev-compact** scores stale tool results with TypeSafe Jev during context compression and drops the dead weight, falling back to the built-in prune on any failure.
+- **hermes-jev-compact** scores stale tool results with TypeSafe Jev during context compression — keeps what the conversation still needs, drops the dead weight — falling back to the built-in prune on any failure.
 
 Want the lazy route? Give your agent this repository and point it at [AGENTS.md](AGENTS.md).
 
@@ -51,7 +51,7 @@ hermes plugins enable hermes-jev-compact --no-allow-tool-override
 python -m pip show hermes-jev-compact
 ```
 
-Then opt in with `context.engine: jev` and `/reset`. See [hermes-jev-compact](hermes-jev-compact/) for settings (endpoint base URL, key env, thresholds).
+Then opt in with `context.engine: jev` and `/reset`. See [hermes-jev-compact](hermes-jev-compact/) for settings (endpoint base URL, key env, thresholds) and how the scoring works.
 
 Run `/reset` or restart Hermes, then confirm the selected plugin is enabled:
 
@@ -108,6 +108,23 @@ sfw action=run command="cargo fetch" workdir="/path/to/project"
 
 `hermes-sfw` is a guard, not a sandbox. Allowed package managers can still execute lifecycle scripts and build backends.
 
+### smarter compression
+
+```yaml
+context:
+  engine: jev
+```
+
+```text
+/reset
+```
+
+With `hermes-jev-compact` enabled and a System One key configured, the next
+compression scores stale tool results with Jev instead of truncating by age.
+Watch for the `jev prune:` line in the logs (calls scored, units
+dropped/truncated, fit stage); if Jev is unreachable the built-in prune runs
+instead and the fallback is logged.
+
 ## quick troubleshooting
 
 | symptom | likely cause | fix |
@@ -117,6 +134,7 @@ sfw action=run command="cargo fetch" workdir="/path/to/project"
 | `sfw` reports not installed | Socket Firewall Free is not on Hermes's `PATH` | run `npm i -g sfw`, then verify `sfw --version` from the same service environment |
 | SSH says permission denied | wrong user, key, or server authorization | verify the same connection with OpenSSH outside Hermes |
 | SSH host key changed | the saved host key no longer matches | investigate the host before changing `known_hosts` |
+| `jev` compression never fires | engine not selected, or key missing | set `context.engine: jev`, check `TYPESAFE_API_KEY` in `~/.hermes/.env`, `/reset` |
 
 ## security boundary
 
@@ -124,7 +142,9 @@ sfw action=run command="cargo fetch" workdir="/path/to/project"
 
 `hermes-sfw` only accepts a restricted dependency-operation grammar and sends accepted operations through Socket Firewall Free. It does not make package lifecycle code harmless.
 
-See [SECURITY.md](SECURITY.md) before exposing either plugin to untrusted prompts or repositories.
+`hermes-jev-compact` sends abridged conversation state (tool results replaced by short notes) to the configured System One endpoint; see its [SECURITY.md](hermes-jev-compact/SECURITY.md) before enabling on sessions carrying secrets outside that endpoint's trust boundary.
+
+See [SECURITY.md](SECURITY.md) before exposing any plugin to untrusted prompts or repositories.
 
 ## development
 
