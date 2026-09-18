@@ -85,6 +85,16 @@ class EncryptedStore:
 
     # ----- Read/Write -----
 
+    def _is_plaintext(self, raw: str) -> bool:
+        """True when the blob fails decryption — i.e. it is stored plaintext."""
+        try:
+            self._ensure_key().decrypt(raw.encode())
+            return False  # decryption succeeded — already encrypted
+        except InvalidToken:
+            return True
+        except Exception:
+            return False
+
     def read(self, filename: str, default: Any = None) -> Any:
         """Read and decrypt a JSON file.
 
@@ -100,11 +110,8 @@ class EncryptedStore:
             return default if default is not None else {}
 
         # Try encrypted first
-        try:
-            fernet = self._ensure_key()
-            decrypted = fernet.decrypt(raw.encode())
-            return json.loads(decrypted)
-        except InvalidToken:
+        fernet = self._ensure_key()
+        if self._is_plaintext(raw):
             # Not encrypted — treat as plaintext (migration path)
             logger.debug("%s is plaintext, treating as unencrypted", filename)
             try:
@@ -112,6 +119,8 @@ class EncryptedStore:
             except json.JSONDecodeError as exc:
                 logger.warning("Corrupt data in %s: %s", path, exc)
                 return default if default is not None else {}
+        try:
+            return json.loads(fernet.decrypt(raw.encode()))
         except Exception as exc:
             logger.warning("Failed to decrypt %s: %s", path, exc)
             return default if default is not None else {}
@@ -156,17 +165,7 @@ class EncryptedStore:
             return False
 
         raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return False
-
-        # Check if it's already encrypted by trying to decrypt
-        try:
-            fernet = self._ensure_key()
-            fernet.decrypt(raw.encode())
-            return False  # decryption succeeded — already encrypted
-        except InvalidToken:
-            pass  # not encrypted — proceed with migration
-        except Exception:
+        if not raw.strip() or not self._is_plaintext(raw):
             return False
 
         # It's plaintext — read it, encrypt, write back
