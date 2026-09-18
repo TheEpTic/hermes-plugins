@@ -95,6 +95,10 @@ def _is_env_file(name: str) -> bool:
     return lowered == ".env" or lowered == ".envrc" or lowered.startswith(".env.")
 
 
+_CREDENTIAL_DIRS = frozenset({"mcp-tokens", "pairing"})
+_GH_CONFIG = frozenset({"gh", "gcloud"})
+
+
 def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
     folded = tuple(part.casefold() for part in parts)
     credential_dir = set(folded).intersection(_SENSITIVE_PARTS | _CREDENTIAL_DIRS)
@@ -112,10 +116,6 @@ def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
 
 def local_sensitive_reason(path: Path) -> str | None:
     return _sensitive_reason(path.parts, path.name)
-
-
-_CREDENTIAL_DIRS = frozenset({"mcp-tokens", "pairing"})
-_GH_CONFIG = frozenset({"gh", "gcloud"})
 
 
 def remote_sensitive_reason(path: str) -> str | None:
