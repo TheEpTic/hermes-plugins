@@ -125,6 +125,8 @@ def test_asker_endpoint_path_override():
         "/sys temone",
         "/x@evil.example",
         "/",
+        "/%2f%2fevil.example/pwn",
+        "/x%3fy=1",
     ):
         assert (
             JevAsker(
@@ -214,8 +216,43 @@ def test_default_transport_rejects_oversize_body():
 
 def test_normalize_endpoint_path():
     assert _normalize_endpoint_path("/api/alpha/decisions") == "/api/alpha/decisions"
+    assert _normalize_endpoint_path("/v1/systemone") == "/v1/systemone"
+    assert _normalize_endpoint_path("/a.b_c-d~e") == "/a.b_c-d~e"
     assert _normalize_endpoint_path("  /systemone  ") == "/systemone"
-    for bad in ("", "relative", "https://x/y", "//x/y", "/a?b=c", "/a#f", "/a b", "/@x", "/"):
+    for bad in (
+        "",
+        "relative",
+        "https://x/y",
+        "//x/y",
+        "/a?b=c",
+        "/a#f",
+        "/a b",
+        "/@x",
+        "/",
+        # Review finding: escapes/unicode must not reach the URL — a proxy
+        # could reinterpret them as delimiters.
+        "/%2f%2fevil.com/pwn",
+        "/x%3fy=1",
+        "/x%00",
+        "/x\x00y",
+        "/x\ny",
+        "/x\ty",
+        "/x y",
+        "/x∕y",
+        "/x／y",
+        "/x\\y",
+        "/x;y",
+        "/x:y",
+        "/x,y",
+        "/x=y",
+        "/x+y",
+        "/x$y",
+        "/x!y",
+        "/x'y",
+        '/x"y',
+        "/x(y)",
+        "/x[y]",
+    ):
         assert _normalize_endpoint_path(bad) == "/systemone", bad
 
 

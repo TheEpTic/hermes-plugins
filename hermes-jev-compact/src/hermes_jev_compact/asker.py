@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
+import re
 import ssl
 import time
 import urllib.error
@@ -94,14 +95,24 @@ def _check_url(url: str) -> tuple[str, str]:
     return scheme, host
 
 
+# Conservative endpoint-path charset (review finding: percent-escapes like
+# %2f/%3f and unicode look-alikes must not reach the URL — a proxy/router
+# could reinterpret them as delimiters). Real Decisions paths (/systemone,
+# /api/alpha/decisions) are all in this set.
+_ENDPOINT_PATH_CHARS = re.compile(r"[A-Za-z0-9/._\-~]+")
+
+
 def _normalize_endpoint_path(endpoint_path: str) -> str:
     """Validate an operator-supplied endpoint path (fail closed to default).
 
     The path is operator config, not remote input — but it flows into the
-    request URL, so keep it to a plain absolute path: no scheme, host,
-    query, fragment, or credentials. Anything else returns the default,
-    so a typo degrades to TypeSafe-shaped behavior (key mismatch then fails
-    closed at auth) instead of building a surprising URL.
+    request URL, so keep it to a plain absolute path of unreserved chars:
+    ASCII letters, digits, and ``/._-~`` only. No scheme, host, query,
+    fragment, credentials — and no percent-escapes (``%2f``/``%3f`` smuggle
+    delimiters a proxy/router could reinterpret) or non-ASCII/control bytes.
+    Anything else returns the default, so a typo degrades to
+    TypeSafe-shaped behavior (key mismatch then fails closed at auth)
+    instead of building a surprising URL.
     """
     candidate = (endpoint_path or "").strip()
     if not candidate.startswith("/") or " " in candidate:
@@ -112,8 +123,13 @@ def _normalize_endpoint_path(endpoint_path: str) -> str:
         return DEFAULT_ENDPOINT_PATH
     if parts.scheme or parts.netloc or parts.query or parts.fragment or "@" in candidate:
         return DEFAULT_ENDPOINT_PATH
+    # Match against the raw candidate, not the parsed path: urlsplit strips
+    # ASCII newlines/tabs before parsing, so validating parts.path would let
+    # "/x\ny" through as "/xy" — a control byte that must fail closed.
+    if "%" in candidate or _ENDPOINT_PATH_CHARS.fullmatch(candidate) is None:
+        return DEFAULT_ENDPOINT_PATH
     # Drop a trailing slash so base "https://x/" + path stays clean.
-    return parts.path.rstrip("/") or DEFAULT_ENDPOINT_PATH
+    return candidate.rstrip("/") or DEFAULT_ENDPOINT_PATH
 
 
 def _join_systemone(base_url: str, endpoint_path: str = DEFAULT_ENDPOINT_PATH) -> str:
