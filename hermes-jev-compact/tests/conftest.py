@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -11,7 +12,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import pytest  # noqa: E402
 
-_HERMES_AGENT_DIR = Path("/home/agent/.hermes/hermes-agent")
+
+def _default_hermes_agent_dir() -> Path:
+    """Hermes checkout: $HERMES_AGENT_DIR, else ~/.hermes/hermes-agent."""
+    override = os.environ.get("HERMES_AGENT_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".hermes" / "hermes-agent"
+
+
+_HERMES_AGENT_DIR = _default_hermes_agent_dir()
 _HERMES_VENV_SITE = _HERMES_AGENT_DIR / "venv" / "lib"
 _HERMES_DEPS: list[str] = []  # importable third-party deps hermes pulls (yaml, ...)
 

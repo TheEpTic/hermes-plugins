@@ -14,7 +14,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from tests.conftest import HERMES_IMPORTABLE, make_tool_transcript, needs_hermes  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    HERMES_IMPORTABLE,
+    _default_hermes_agent_dir,
+    make_tool_transcript,
+    needs_hermes,
+)
 
 pytestmark = needs_hermes
 
@@ -26,7 +31,8 @@ if not HERMES_IMPORTABLE:  # pragma: no cover - hermes missing; tests skip via n
     ContextCompressor = eng_mod.ContextCompressor
     JevContextCompressor = eng_mod.JevContextCompressor
 else:
-    sys.path.insert(0, "/home/agent/.hermes/hermes-agent")
+    _HOST_DIR = str(_default_hermes_agent_dir())
+    sys.path.insert(0, _HOST_DIR)
     try:
         import importlib
 
@@ -39,7 +45,7 @@ else:
         JevContextCompressor = eng_mod.JevContextCompressor
     finally:
         with contextlib.suppress(ValueError):
-            sys.path.remove("/home/agent/.hermes/hermes-agent")
+            sys.path.remove(_HOST_DIR)
 
 
 def _engine(**kw: Any) -> Any:
