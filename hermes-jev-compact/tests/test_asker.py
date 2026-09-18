@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
-from hermes_jev_compact.asker import JevAsker
+from hermes_jev_compact.asker import JevAsker, _default_transport
 from hermes_jev_compact.protocol import JevError
 from hermes_jev_compact.request import build_jev_body, noul_answer, parse_jev_response
 
@@ -62,3 +63,37 @@ def test_asker_uses_transport_and_refuses_without_key():
 
     with pytest.raises(JevError, match="transport"):
         JevAsker("http://x:8765/v1", "k", "m", transport=failing).ask({}, {})
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///etc/passwd",
+        "gopher://x:70/1",
+        "ftp://x/f",
+        "http://192.168.0.25:8765/v1/systemone",  # cleartext off loopback
+        "http://conduit.lan:8765/v1/systemone",
+    ],
+)
+def test_default_transport_refuses_ssrf_and_cleartext(url: str):
+    with patch("hermes_jev_compact.asker.urllib.request.urlopen") as opened:
+        with pytest.raises(JevError, match="refusing"):
+            _default_transport(url, b"{}", {}, 5.0)
+    opened.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8765/v1/systemone",
+        "http://localhost:8765/v1/systemone",
+        "https://conduit.example.com/v1/systemone",
+    ],
+)
+def test_default_transport_allows_loopback_http_and_any_https(url: str):
+    with patch("hermes_jev_compact.asker.urllib.request.urlopen") as opened:
+        opened.return_value.__enter__.return_value.status = 200
+        opened.return_value.__enter__.return_value.read.return_value = b"{}"
+        status, _ = _default_transport(url, b"{}", {}, 5.0)
+    assert status == 200
+    opened.assert_called_once()

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ssl
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from .protocol import JevError
 from .request import SYSTEMONE_PATH, build_jev_body, parse_jev_response
@@ -17,9 +19,24 @@ Transport = Callable[[str, bytes, dict[str, str], float], tuple[int, str]]
 def _default_transport(
     url: str, body: bytes, headers: dict[str, str], timeout_s: float
 ) -> tuple[int, str]:
+    # Fail closed on scheme: https anywhere, http only for loopback
+    # (conduit2 defaults to http://127.0.0.1:8765). Anything else (file:,
+    # gopher:, remote http:) is a config error, not a request.
+    parts = urlsplit(url)
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
+    if scheme not in {"http", "https"}:
+        raise JevError(f"refusing non-http conduit url: {scheme or '(none)'}")
+    if scheme == "http" and host not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0:0:0:0:0:0:0:1",
+    }:
+        raise JevError(f"refusing cleartext conduit url for non-loopback host: {host}")
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    ctx = ssl.create_default_context() if scheme == "https" else None
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
             return (int(resp.status), resp.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         try:
