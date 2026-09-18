@@ -79,6 +79,14 @@ def _move_local_no_replace(temporary: Path, destination: Path) -> None:
     )
 
 
+def _install_local(temporary: Path, destination: Path, overwrite: bool) -> None:
+    """Install a staged download: replace, or atomically refuse an existing target."""
+    if overwrite:
+        os.replace(temporary, destination)
+    else:
+        _move_local_no_replace(temporary, destination)
+
+
 class TransferService:
     """Coordinates policy, OpenSSH transport, finalisation, and audit events."""
 
@@ -450,20 +458,12 @@ class TransferService:
         if failed is not None:
             return failed
         try:
-            if request.overwrite:
-                os.replace(temporary, destination)
-            else:
-                _move_local_no_replace(temporary, destination)
+            _install_local(temporary, destination, request.overwrite)
         except FileExistsError:
+            message = "download destination appeared during transfer; refusing to overwrite it"
             cleanup_local(temporary)
             return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                -1,
-                "download destination appeared during transfer; refusing to overwrite it",
+                request, machine.name, source, destination, started, -1, message
             )
         except OSError as exc:
             cleanup_local(temporary)
