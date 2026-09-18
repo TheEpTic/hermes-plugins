@@ -31,12 +31,19 @@ MAX_RESPONSE_BYTES = 1_000_000
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host in {"localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"}:
+    # localhost is the one permitted DNS alias (pre-existing behavior);
+    # all other names must use https. Canonical v4/v6 loopbacks match via
+    # is_loopback below — but NOT v4-mapped ::ffff:127.x (urllib may route
+    # those as v4, so they take the explicit-network path instead).
+    if host == "localhost":
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        ip = ipaddress.ip_address(host)
     except ValueError:
         return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return False
+    return ip.is_loopback
 
 
 # Cleartext http is allowed exactly for loopback + these non-routed ranges:
