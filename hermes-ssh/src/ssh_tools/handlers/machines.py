@@ -53,18 +53,13 @@ def _handle_list(manager: SSHManager) -> str:
     )
 
 
-def _take_name(params: dict[str, Any]) -> tuple[str | None, str | None]:
+def _named(params: dict[str, Any]) -> tuple[str | None, str | None]:
     """Machine name or (None, error); empty passes through to registry errors."""
     return param_str(params, "name", allow_empty=True)
 
 
-def _named(params: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Validated machine name for remove/inspect/test, or (None, error)."""
-    return _take_name(params)
-
-
 def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _take_name(params)
+    name, error = _named(params)
     host, host_error = param_str(params, "host", allow_empty=True)
     if error or name is None:
         return err(error or "unreachable")
