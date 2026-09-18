@@ -366,8 +366,8 @@ class Executor:
         max_chars: int,
     ) -> dict[str, Any]:
         del machine  # identity not needed; canonical name carries through
-        stdout_path = self._config.output_dir / f"ssh_output_{session_id}_stdout.txt"
-        stderr_path = self._config.output_dir / f"ssh_output_{session_id}_stderr.txt"
+        spool = self._sessions.output_path
+        stdout_path, stderr_path = spool(session_id, "stdout"), spool(session_id, "stderr")
         stdout_handle: BinaryIO | None = None
         stderr_handle: BinaryIO | None = None
         proc: subprocess.Popen[bytes] | None = None
@@ -412,7 +412,7 @@ class Executor:
         """Return (text_or_summary, file_path_or_None); oversize text spills to a file."""
         if len(text) <= max_chars:
             return text, None
-        path = self._config.output_dir / f"ssh_output_{session_id}_{stream}.txt"
+        path = self._sessions.output_path(session_id, stream)
         with _open_spool(path, exclusive=False) as f:
             f.write(text)
         return _summarize(text, path, max_chars), str(path)
@@ -487,9 +487,10 @@ class Executor:
                 return None
             outputs = self._outputs.get(session_id)
             if outputs is None:
+                spool = self._sessions.output_path
                 outputs = (
-                    self._config.output_dir / f"ssh_output_{session_id}_stdout.txt",
-                    self._config.output_dir / f"ssh_output_{session_id}_stderr.txt",
+                    spool(session_id, "stdout"),
+                    spool(session_id, "stderr"),
                     self._config.max_output_chars,
                 )
             self._processes.pop(session_id, None)

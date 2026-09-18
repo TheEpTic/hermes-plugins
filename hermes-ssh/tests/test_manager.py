@@ -148,7 +148,9 @@ def test_registry_crud(tmp_path: Path) -> None:
     ],
 )
 def test_validate_machine_name(name: str, valid: bool) -> None:
-    assert (SSHManager._validate_machine_name(name) is None) is valid
+    from ssh_tools.validate import validate_machine_name
+
+    assert (validate_machine_name(name) is None) is valid
 
 
 def test_add_machine_rejects_bad_name_and_unsafe_fields(tmp_path: Path) -> None:
@@ -261,17 +263,19 @@ def test_prune_uses_config_default(tmp_path: Path) -> None:
 
 
 def _rewrite_sessions_blob(mgr: Any, mutate: Any) -> None:
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        mutate(sessions)
-        mgr._save_sessions(sessions)
+    from ssh_tools.helpers import read_json, write_json_atomic
+
+    path = mgr._config.sessions_file
+    blob = read_json(path, {"sessions": {}})
+    mutate(blob["sessions"])
+    write_json_atomic(path, blob)
 
 
 @pytest.mark.parametrize(
     "filename,loader,blob",
     [
-        ("machines_file", "_load_machines", {"machines": [1, 2, 3]}),
-        ("sessions_file", "_load_sessions", {"sessions": "not a dict"}),
+        ("machines_file", "list_machines", {"machines": [1, 2, 3]}),
+        ("sessions_file", "list_sessions", {"sessions": "not a dict"}),
     ],
 )
 def test_load_corrupt_structure_resets(
@@ -281,12 +285,14 @@ def test_load_corrupt_structure_resets(
     getattr(mgr._config, filename).write_text(json.dumps(blob))
     assert getattr(mgr, loader)() == {}
     # direct json helpers
+    from ssh_tools.helpers import read_json, write_json_atomic
+
     corrupt = tmp_path / "machines.json"
     corrupt.write_text("NOT JSON {{{")
-    assert mgr._read_json(corrupt, {"default": True}) == {"default": True}
-    assert mgr._read_json(tmp_path / "missing.json", {"fallback": True}) == {"fallback": True}
+    assert read_json(corrupt, {"default": True}) == {"default": True}
+    assert read_json(tmp_path / "missing.json", {"fallback": True}) == {"fallback": True}
     target = tmp_path / "test.json"
-    mgr._write_json(target, {"key": "value"})
+    write_json_atomic(target, {"key": "value"})
     assert json.loads(target.read_text()) == {"key": "value"}
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -296,7 +302,7 @@ def test_close_sessions_batch_cleans_output_dir(tmp_path: Path) -> None:
     fake = mgr._config.output_dir / "ssh_output_test_batch_stdout.txt"
     fake.write_text("test")
     try:
-        mgr._close_sessions_batch(["test_batch"])
+        mgr.close_session("test_batch")
         assert not fake.exists()
     finally:
         with contextlib.suppress(OSError):
@@ -326,14 +332,16 @@ def test_run_command_validation(tmp_path: Path) -> None:
 
 
 def test_build_ssh_args(tmp_path: Path) -> None:
+    from ssh_tools.exec import build_ssh_args
+
     mgr = _make_manager(tmp_path)
     machine = Machine(name="h", host="10.0.0.1", user="admin", port=2222, key="~/.ssh/test")
-    args = mgr._build_ssh_args(machine, "uptime", "/tmp/c.sock", timeout=30)
+    args = build_ssh_args(mgr.config, machine, "uptime", "/tmp/c.sock", timeout=30)
     assert args[0] == "ssh" and "2222" in args and "~/.ssh/test" in args
     assert "ControlMaster=auto" in args and "admin@10.0.0.1" in args
     assert "bash" in args and "pipefail" in args[-1] and "uptime" in args[-1]
     assert "ConnectTimeout=10" in args  # min(30, 10)
-    bare = mgr._build_ssh_args(Machine(name="h", host="10.0.0.1"), "uptime")
+    bare = build_ssh_args(mgr.config, Machine(name="h", host="10.0.0.1"), "uptime")
     assert "ControlMaster" not in str(bare) and "-i" not in bare
 
 
@@ -374,7 +382,7 @@ def test_run_command_clamps_output(tmp_path: Path) -> None:
 @pytest.mark.parametrize("text,limit", [("hello", 100), ("x" * 100, 10)])
 def test_maybe_save_output(tmp_path: Path, text: str, limit: int) -> None:
     mgr = _make_manager(tmp_path)
-    summary, path = mgr._maybe_save_output(text, limit, "s1", "stdout")
+    summary, path = mgr._exec._maybe_save_output(text, limit, "s1", "stdout")
     if len(text) <= limit:
         assert (summary, path) == (text, None)
     else:
@@ -432,14 +440,14 @@ def test_run_command_background(tmp_path: Path) -> None:
     mgr, sid, proc = _bg(tmp_path, "long command")
     assert proc.pid == 12345
     assert mgr.get_session(sid).status == "active"
-    assert sid in mgr._processes
+    assert mgr.poll_session(sid)["running"] is True
 
 
 def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
-    mgr, sid, _, popen = _bg_ready(tmp_path, "verbose")
+    _, sid, _, popen = _bg_ready(tmp_path, "verbose")
     kwargs = popen.call_args.kwargs
     assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
-    assert sid in mgr._background_outputs
+    assert isinstance(sid, str) and sid.startswith("ssh_h_")
 
 
 @pytest.mark.parametrize(
@@ -455,7 +463,7 @@ def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: st
     assert result["success"] is (exit_code == 0)
     assert result["running"] is False
     assert result[stream] == expected
-    assert sid not in mgr._processes
+    assert mgr.poll_session(sid)["success"] is False  # collected once
     assert mgr.get_session(sid).status == "closed"
 
 
@@ -517,9 +525,9 @@ def test_audit_redaction_and_metadata(tmp_path: Path) -> None:
     ],
 )
 def test_redact_command(command: str, secret: str) -> None:
-    from ssh_tools.manager import _redact_command
+    from ssh_tools.audit import redact_command
 
-    redacted = _redact_command(command)
+    redacted = redact_command(command)
     assert secret not in redacted and "<redacted>" in redacted
 
 
@@ -531,10 +539,14 @@ def test_redact_command(command: str, secret: str) -> None:
 def _tracked_session(tmp_path: Path, sid: str = "s1", status: int | None = None) -> Any:
     mgr = _make_manager(tmp_path)
     mgr.register_session(Session(id=sid, machine="h", pid=99999))
+    mgr._exec._processes[sid] = _proc_with_status(status)
+    return mgr
+
+
+def _proc_with_status(status: int | None) -> MagicMock:
     proc = MagicMock(pid=99999)
     proc.poll.return_value = status
-    mgr._processes[sid] = proc
-    return mgr
+    return proc
 
 
 @pytest.mark.parametrize(
@@ -564,9 +576,7 @@ def test_kill_session_socket_and_missing(tmp_path: Path) -> None:
     ctrl = tmp_path / "prod.sock"
     ctrl.touch()
     mgr.register_session(Session(id="s1", machine="prod", pid=123, control_path=str(ctrl)))
-    proc = MagicMock(pid=123)
-    proc.poll.return_value = 0
-    mgr._processes["s1"] = proc
+    mgr._exec._processes["s1"] = _proc_with_status(0)
     with patch("ssh_tools.exec.subprocess.run") as mock_sub:
         result = mgr.kill_session("s1")
     assert result["success"] is True and result["socket_closed"] is False
@@ -603,7 +613,7 @@ def test_idle_checker_lifecycle(tmp_path: Path) -> None:
 def test_spool_lifecycle(tmp_path: Path, large: bool) -> None:
     """Large bg output keeps its spool file; short output deletes both spools."""
     mgr, sid, proc = _bg(tmp_path, "command", **({"max_output_chars": 10} if large else {}))
-    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
+    stdout_path, stderr_path, _ = mgr._exec._outputs[sid]
     stdout_path.write_text("x" * 100 if large else "done")
     stderr_path.write_text("")
     proc.poll.return_value = proc.returncode = 0
@@ -620,4 +630,4 @@ def test_background_registered_before_process(tmp_path: Path) -> None:
     mgr, sid, proc = _bg(tmp_path, "sleep 99")
     assert mgr.get_session(sid) is not None
     assert mgr.get_session(sid).pid == 12345
-    assert sid in mgr._processes
+    assert mgr.poll_session(sid)["running"] is True

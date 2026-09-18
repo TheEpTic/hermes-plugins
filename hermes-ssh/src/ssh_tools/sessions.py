@@ -111,19 +111,6 @@ class SessionStore:
             sessions.pop(session_id, None)
             self._save(sessions)
 
-    def mark_many(self, session_ids: list[str], status: str) -> None:
-        """Mark multiple sessions in a single file write."""
-        if not session_ids:
-            return
-        for sid in session_ids:
-            self.cleanup_output_files(sid)
-        with self._lock:
-            sessions = self._load()
-            for sid in session_ids:
-                if sid in sessions:
-                    sessions[sid]["status"] = status
-            self._save(sessions)
-
     def prune_closed(self, max_age_hours: int | None, default_hours: int) -> int:
         """Remove closed sessions older than max_age_hours. Returns count removed."""
         hours = max_age_hours or default_hours
@@ -138,4 +125,5 @@ class SessionStore:
         return len(to_remove)
 
     def output_path(self, session_id: str, stream: str) -> Path:
+        """Path for a saved output file (stdout/stderr spill + bg spools)."""
         return self._config.output_dir / f"ssh_output_{session_id}_{stream}.txt"

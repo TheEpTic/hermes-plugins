@@ -13,22 +13,17 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .audit import AuditLog, redact_command
+from .audit import AuditLog
 from .config import DEFAULT_CONFIG, SSHConfig
-from .exec import Executor, build_ssh_args
-from .helpers import read_json, write_json_atomic
+from .exec import Executor
 from .models import Machine, Session
 from .registry import MachineRegistry
 from .sessions import SessionStore
 from .storage import EncryptedStore
-from .validate import validate_machine_name
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["SSHManager"]
-
-# Backwards-compatible alias for tests importing the private seam.
-_redact_command = redact_command
 
 
 class SSHManager:
@@ -59,37 +54,7 @@ class SSHManager:
     def _audit_log_path(self) -> Path:
         return self._audit.path
 
-    # ----- Backwards-compatible views into the executor (kept for tests) -----
-
-    @property
-    def _processes(self) -> dict[str, Any]:
-        return self._exec._processes
-
-    @property
-    def _background_outputs(self) -> dict[str, tuple[Path, Path, int]]:
-        return self._exec._outputs
-
-    @property
-    def _background_meta(self) -> dict[str, tuple[str, str, float, float]]:
-        return self._exec._meta
-
-    # ----- JSON persistence (backwards-compatible seams for tests) -----
-
-    def _read_json(self, path: Path, default: Any) -> Any:
-        return read_json(path, default)
-
-    def _write_json(self, path: Path, data: Any) -> None:
-        write_json_atomic(path, data)
-
     # ----- Machine registry -----
-
-    _validate_machine_name = staticmethod(validate_machine_name)
-
-    def _load_machines(self) -> dict[str, dict[str, Any]]:
-        return self._registry._load()
-
-    def _save_machines(self, machines: dict[str, dict[str, Any]]) -> None:
-        self._registry._save(machines)
 
     def list_machines(self) -> dict[str, Machine]:
         return self._registry.list_machines()
@@ -112,13 +77,6 @@ class SSHManager:
         return self._exec.test_machine(name)
 
     # ----- Session tracking -----
-
-    def _load_sessions(self) -> dict[str, dict[str, Any]]:
-        return self._sessions._load()
-
-    def _save_sessions(self, sessions: dict[str, dict[str, Any]]) -> None:
-        self._sessions._save(sessions)
-
     def list_sessions(self, status: str = "active") -> dict[str, Session]:
         return self._sessions.list_sessions(status)
 
@@ -130,9 +88,6 @@ class SSHManager:
 
     def touch_session(self, session_id: str) -> None:
         self._sessions.touch(session_id)
-
-    def _cleanup_output_files(self, session_id: str) -> None:
-        self._sessions.cleanup_output_files(session_id)
 
     def close_session(self, session_id: str, *, cleanup_output_files: bool = True) -> None:
         if cleanup_output_files:
@@ -155,9 +110,6 @@ class SSHManager:
             self.close_session(session_id)
         return result
 
-    def _mark_session_orphaned(self, session_id: str) -> None:
-        self._sessions.mark(session_id, "orphaned")
-
     def cleanup_idle(self, max_idle_minutes: int | None = None) -> dict[str, Any]:
         """Kill all sessions idle for more than max_idle_minutes."""
         threshold = (max_idle_minutes or self._config.idle_timeout_minutes) * 60
@@ -173,20 +125,11 @@ class SSHManager:
         ]
         return {"killed": killed, "count": len(killed)}
 
-    def _close_sessions_batch(self, session_ids: list[str]) -> None:
-        """Mark multiple sessions as closed in a single file write."""
-        self._sessions.mark_many(session_ids, "closed")
-
     def prune_closed(self, max_age_hours: int | None = None) -> int:
         """Remove closed sessions older than max_age_hours."""
         return self._sessions.prune_closed(max_age_hours, self._config.closed_prune_hours)
 
     # ----- SSH execution -----
-
-    def _build_ssh_args(
-        self, machine: Machine, command: str, control_path: str = "", timeout: int = 30
-    ) -> list[str]:
-        return build_ssh_args(self._config, machine, command, control_path, timeout)
 
     def run_command(
         self,
@@ -210,21 +153,6 @@ class SSHManager:
         return self._exec.run_command(
             machine_name, command, timeout, new_session, background, max_output_chars
         )
-
-    def _maybe_save_output(
-        self, text: str, max_chars: int, session_id: str, stream: str
-    ) -> tuple[str, str | None]:
-        return self._exec._maybe_save_output(text, max_chars, session_id, stream)
-
-    def _log_command(
-        self,
-        machine: str,
-        command: str,
-        exit_code: int | None,
-        elapsed: float,
-        session_id: str,
-    ) -> None:
-        self._audit.log_command(machine, command, exit_code, elapsed, session_id)
 
     # ----- Background process helpers -----
 
