@@ -124,21 +124,13 @@ def test_registry_crud(tmp_path: Path) -> None:
     assert kept is not None and kept.host == "2.2.2.2"
 
 
-def test_validate_machine_name_good() -> None:
+def test_validate_machine_name() -> None:
     from ssh_tools.validate import validate_machine_name
 
     for good in ("myserver", "web-01", "grid1.example.com", "a"):
         assert validate_machine_name(good) is None
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["../../etc/passwd", "my server", "test*", "", "a" * 65],
-)
-def test_validate_machine_name_bad(name: str) -> None:
-    from ssh_tools.validate import validate_machine_name
-
-    assert validate_machine_name(name) is not None
+    for bad in ("../../etc/passwd", "my server", "test*", "", "a" * 65):
+        assert validate_machine_name(bad) is not None
 
 
 def test_add_machine_rejects_bad_name_and_unsafe_fields(tmp_path: Path) -> None:
@@ -177,17 +169,28 @@ def test_session_lifecycle(tmp_path: Path) -> None:
     assert set(mgr.list_sessions("closed")) == {"s2"}
     mgr.remove_session("s2")
     assert mgr.get_session("s2") is None
+    mgr.register_session(Session(id="s3", machine="host1", started="2026-01-01T00:00:00+00:00"))
+    assert mgr.get_session("s3").started == "2026-01-01T00:00:00+00:00"
 
 
-def _age_session(mgr: Any, sid: str, age: timedelta, field: str = "last_active") -> None:
-    stamp = (datetime.now(UTC) - age).isoformat()
-    _rewrite_sessions_blob(mgr, lambda sessions: sessions[sid].__setitem__(field, stamp))
-
-
-def test_register_session_preserves_started(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1", started="2026-01-01T00:00:00+00:00"))
-    assert mgr.get_session("s1").started == "2026-01-01T00:00:00+00:00"
+def _aged_session_blob(mgr: Any, sid: str, age_hours: float, *, status: str = "active") -> None:
+    """Write a session with an aged timestamp straight into the sessions blob."""
+    stamp = (datetime.now(UTC) - timedelta(hours=age_hours)).isoformat()
+    fresh = datetime.now(UTC).isoformat()
+    _rewrite_sessions_blob(
+        mgr,
+        lambda sessions: sessions.update(
+            {
+                sid: {
+                    "machine": "host1",
+                    "pid": 101,
+                    "started": stamp if status == "closed" else fresh,
+                    "last_active": stamp if status == "active" else fresh,
+                    "status": status,
+                }
+            }
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -196,8 +199,7 @@ def test_register_session_preserves_started(tmp_path: Path) -> None:
 )
 def test_cleanup_idle(tmp_path: Path, age: timedelta, expected: int) -> None:
     mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    _age_session(mgr, "s1", age)
+    _aged_session_blob(mgr, "s1", age.total_seconds() / 3600)
     assert mgr.cleanup_idle(max_idle_minutes=30)["count"] == expected
 
 
@@ -212,8 +214,7 @@ def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     for sid in ("s1", "s2"):
-        mgr.register_session(Session(id=sid, machine="h", pid=101))
-        _age_session(mgr, sid, timedelta(hours=1))
+        _aged_session_blob(mgr, sid, 1)
     with (
         patch("ssh_tools.exec.time.sleep"),
         patch("ssh_tools.exec.os.kill", side_effect=OSError("gone")),
@@ -242,9 +243,7 @@ def test_prune_closed_keeps(tmp_path: Path) -> None:
 
 def test_prune_uses_config_default(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="old", machine="h"))
-    mgr.close_session("old")
-    _age_session(mgr, "old", timedelta(hours=48), "started")
+    _aged_session_blob(mgr, "old", 48, status="closed")
     assert mgr.prune_closed() == 1  # config default 24h
     assert mgr.get_session("old") is None
 
@@ -261,26 +260,6 @@ def _rewrite_sessions_blob(mgr: Any, mutate: Any) -> None:
     blob = read_json(path, {"sessions": {}})
     mutate(blob["sessions"])
     write_json_atomic(path, blob)
-
-
-def _aged_session_blob(mgr: Any, sid: str, age_hours: float, *, status: str = "active") -> None:
-    """Write a session with an aged timestamp straight into the sessions blob."""
-    stamp = (datetime.now(UTC) - timedelta(hours=age_hours)).isoformat()
-    fresh = datetime.now(UTC).isoformat()
-    _rewrite_sessions_blob(
-        mgr,
-        lambda sessions: sessions.update(
-            {
-                sid: {
-                    "machine": "host1",
-                    "pid": 101,
-                    "started": stamp if status == "closed" else fresh,
-                    "last_active": stamp if status == "active" else fresh,
-                    "status": status,
-                }
-            }
-        ),
-    )
 
 
 def _session_blob(mgr: Any, sid: str, **fields: Any) -> None:
@@ -364,27 +343,19 @@ def test_build_ssh_args(tmp_path: Path) -> None:
     assert "ControlMaster" not in str(bare) and "-i" not in bare
 
 
-def _run_ok(
-    mgr: Any, machine: str = "h", stdout: str = "ok", code: int = 0, cmd: str = "echo ok"
-) -> dict:
+def _ran(mgr: Any, *args: Any, stdout: str = "ok", code: int = 0, **kw: Any) -> dict:
+    """One sync run under a faked subprocess.run; asserts no session leaked."""
     with patch("ssh_tools.exec.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=code, stdout=stdout, stderr="")
-        result = mgr.run_command(machine, cmd)
+        result = mgr.run_command(*args, **kw)
     assert mgr.list_sessions("active") == {}
     return result
-
-
-def _ran(mgr: Any, *args: Any, **kw: Any) -> dict:
-    """One successful sync run under a faked subprocess.run."""
-    with patch("ssh_tools.exec.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        return mgr.run_command(*args, **kw)
 
 
 def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    assert _run_ok(mgr)["success"] is True
+    assert _ran(mgr, "h", "echo ok")["success"] is True
     assert _ran(mgr, "h", "echo ok", timeout="5")["success"] is True
     assert _ran(mgr, "h", "echo ok", timeout=0)["success"] is True
     assert _ran(mgr, "h", "echo ok", timeout=-1)["success"] is True
@@ -398,9 +369,9 @@ def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
 def test_run_command_clamps_output(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    result = _run_ok(mgr, stdout="x" * 600_000, cmd="echo ok")
+    result = _ran(mgr, "h", "echo ok", stdout="x" * 600_000)
     assert len(result["stdout"]) < 600_000 and "stdout_file" in result
-    clamped = _run_ok(mgr, stdout="y" * 100, cmd="echo ok")
+    clamped = _ran(mgr, "h", "echo ok", stdout="y" * 100)
     assert clamped["stdout"] == "y" * 100  # under the clamp, stays inline
 
 
@@ -425,7 +396,7 @@ def test_output_sizes_inline_vs_file(tmp_path: Path) -> None:
     assert "output saved to" in result["stdout"]
     assert result["stdout_file"].endswith("_stdout.txt")
     assert Path(result["stdout_file"]).read_text() == "x" * 1000
-    short = _run_ok(mgr, stdout="hi\n", cmd="echo hi")
+    short = _ran(mgr, "h", "echo hi", stdout="hi\n")
     assert short["stdout"] == "hi\n" and "stdout_file" not in short
 
 
@@ -444,19 +415,14 @@ def _fake_running_popen() -> MagicMock:
     )
 
 
-def _bg_ready(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any, Any]:
-    """Start a faked bg command; returns (mgr, session_id, proc, popen_mock)."""
+def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
+    """Start a faked bg command; returns (mgr, session_id, proc)."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     proc = _fake_running_popen()
-    with patch("ssh_tools.exec.subprocess.Popen", return_value=proc) as popen_mock:
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=proc):
         started = mgr.run_command("h", cmd, background=True, **kw)
-    return mgr, started["session_id"], proc, popen_mock
-
-
-def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
-    mgr, sid, proc, _ = _bg_ready(tmp_path, cmd, **kw)
-    return mgr, sid, proc
+    return mgr, started["session_id"], proc
 
 
 def test_run_command_background(tmp_path: Path) -> None:
@@ -468,10 +434,13 @@ def test_run_command_background(tmp_path: Path) -> None:
 
 
 def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
-    _, sid, _, popen = _bg_ready(tmp_path, "verbose")
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()) as popen:
+        started = mgr.run_command("h", "verbose", background=True)
+    assert started["session_id"].startswith("ssh_h_")
     kwargs = popen.call_args.kwargs
     assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
-    assert isinstance(sid, str) and sid.startswith("ssh_h_")
 
 
 @pytest.mark.parametrize(
@@ -494,19 +463,20 @@ def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: st
 def test_poll_and_read_errors(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()):
+        sid = mgr.run_command("h", "sleep", background=True)["session_id"]
     assert "No background process" in mgr.poll_session("nope")["error"]
     assert "No background process" in mgr.read_output("nope")["error"]
-    mgr2, sid, _ = _bg(tmp_path / "bg2")
-    assert mgr2.poll_session(sid)["running"] is True
-    running = mgr2.read_output(sid)
+    assert mgr.poll_session(sid)["running"] is True
+    running = mgr.read_output(sid)
     assert running["success"] is False and "still running" in running["error"]
 
 
 def test_audit_log_modes(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    _run_ok(mgr, cmd="echo 1")
-    _run_ok(mgr, cmd="echo 2")
+    _ran(mgr, "h", "echo 1")
+    _ran(mgr, "h", "echo 2")
     entries = mgr.list_command_log()
     assert entries[-2]["command"] == "echo 1" and entries[-1]["command"] == "echo 2"
     assert {"timestamp", "elapsed_secs", "session_id"} <= entries[-1].keys()
@@ -520,20 +490,20 @@ def test_audit_log_modes(tmp_path: Path) -> None:
 def test_audit_redaction_and_metadata(tmp_path: Path) -> None:
     redacted = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
     redacted.add_machine(Machine(name="h", host="1.1.1.1"))
-    _run_ok(redacted, cmd="TOKEN=super-secret deploy --password hunter2")
+    _ran(redacted, "h", "TOKEN=super-secret deploy --password hunter2")
     entry = redacted.list_command_log()[-1]
     assert "super-secret" not in entry["command"] and "hunter2" not in entry["command"]
     assert "<redacted>" in entry["command"] and len(entry["command_sha256"]) == 64
     meta = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
-    _run_ok(meta, cmd="GITHUB_TOKEN=short deploy")
-    _run_ok(meta, cmd="GITHUB_TOKEN=a-much-longer-secret deploy")
+    _ran(meta, "h", "GITHUB_TOKEN=short deploy")
+    _ran(meta, "h", "GITHUB_TOKEN=a-much-longer-secret deploy")
     first, second = meta.list_command_log(limit=2)
     assert "command" not in first
     assert first["command_length"] == second["command_length"]
     assert first["command_sha256"] == second["command_sha256"]
     off = SSHManager(SSHConfig(data_dir=tmp_path / "off", audit_log_mode="off"))
     off.add_machine(Machine(name="h", host="1.1.1.1"))
-    _run_ok(off, cmd="echo private")
+    _ran(off, "h", "echo private")
     assert not (tmp_path / "off" / "command_log.jsonl").exists()
 
 
@@ -563,14 +533,10 @@ def test_redact_command(command: str, secret: str) -> None:
 def _tracked_session(tmp_path: Path, sid: str = "s1", status: int | None = None) -> Any:
     mgr = _make_manager(tmp_path)
     mgr.register_session(Session(id=sid, machine="h", pid=99999))
-    mgr._exec._processes[sid] = _proc_with_status(status)
-    return mgr
-
-
-def _proc_with_status(status: int | None) -> MagicMock:
     proc = MagicMock(pid=99999)
     proc.poll.return_value = status
-    return proc
+    mgr._exec._processes[sid] = proc
+    return mgr
 
 
 @pytest.mark.parametrize(
