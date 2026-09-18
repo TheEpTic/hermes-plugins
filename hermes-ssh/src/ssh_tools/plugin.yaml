@@ -8,6 +8,8 @@ provides_tools:
   - ssh_transfer
   - ssh_machines
   - ssh_sessions
+python_dependencies:
+  - cryptography==50.0.0
 platforms:
   - linux
   - macos

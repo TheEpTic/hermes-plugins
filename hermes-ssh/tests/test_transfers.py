@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from ssh_tools.transfers import TransferRequest, TransferService, execute_transfer
-from ssh_tools.transfers.policy import prepare_upload_source, remote_path
+from ssh_tools.transfers.policy import prepare_upload_source, remote_path, remote_sensitive_reason
 from ssh_tools.transfers.transport import sftp_args, sftp_batch
 
 
@@ -123,6 +123,43 @@ def test_sftp_args_reuse_machine_connection(tmp_path: Path) -> None:
         preserve=True,
     )
     assert batch.startswith("put -p ") and "/srv/releases/release.tar.gz" in batch
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/sudoers",
+        "/etc/sudoers.d/custom",
+        "/etc/ssh/ssh_host_rsa_key",
+        "/etc/ssh/ssh_host_ecdsa_key",
+        "/etc/ssh/ssh_host_ed25519_key",
+        "/etc//shadow",
+        "/etc/shadow/",
+        "/ETC/SHADOW",
+    ],
+)
+def test_remote_system_credential_denylist(path: str) -> None:
+    assert remote_sensitive_reason(path) == "system credential file"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/shadow.bak",
+        "/etc/sudoers~",
+        "/etc/sudoers.d",
+        "/etc/ssh/ssh_host_rsa_key.pub",
+        "/etc/ssh/sshd_config",
+        "/srv/shadow",
+        "~/shadow",
+        "~/etc/shadow",
+        "/etc",
+    ],
+)
+def test_remote_system_credential_near_miss_allowed(path: str) -> None:
+    assert remote_sensitive_reason(path) is None
 
 
 @pytest.mark.parametrize(

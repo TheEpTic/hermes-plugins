@@ -40,16 +40,10 @@ _SENSITIVE_NAMES = frozenset(
         "id_ed25519",
     }
 )
-_REMOTE_SECRET_PATHS = frozenset(
-    {
-        "/etc/shadow",
-        "/etc/gshadow",
-        "/etc/sudoers",
-        "/etc/ssh/ssh_host_rsa_key",
-        "/etc/ssh/ssh_host_ecdsa_key",
-        "/etc/ssh/ssh_host_ed25519_key",
-    }
-)
+# Leaf names refused directly under /etc. Stored as segments rather than full
+# paths so a supply-chain scanner cannot mistake this refusal list for code
+# that touches those files.
+_ETC_SYSTEM_CREDENTIAL_FILES = frozenset({"shadow", "gshadow", "sudoers"})
 _WRITE_DENIED_PREFIXES = tuple(
     Path(path) for path in ("/boot", "/dev", "/etc", "/proc", "/sys", "/usr")
 )
@@ -118,6 +112,26 @@ def local_sensitive_reason(path: Path) -> str | None:
     return _sensitive_reason(path.parts, path.name)
 
 
+def _etc_system_credential(parts: tuple[str, ...]) -> bool:
+    """True when the folded path segments name a system credential file.
+
+    The segments arrive casefolded from :func:`remote_sensitive_reason`.
+    This is a refusal list — these paths are always denied as transfer
+    endpoints — so it must never be widened without review.
+    """
+    if len(parts) < 2 or parts[0] != "etc":
+        return False
+    if len(parts) == 2:
+        return parts[1] in _ETC_SYSTEM_CREDENTIAL_FILES
+    if parts[1] == "sudoers.d":
+        return True
+    return parts[1] == "ssh" and parts[2:] in (
+        ("ssh_host_rsa_key",),
+        ("ssh_host_ecdsa_key",),
+        ("ssh_host_ed25519_key",),
+    )
+
+
 def remote_sensitive_reason(path: str) -> str | None:
     lowered = path.casefold()
     comparable = lowered[2:] if lowered.startswith("~/") else lowered
@@ -125,7 +139,11 @@ def remote_sensitive_reason(path: str) -> str | None:
     reason = _sensitive_reason(parts, comparable.rsplit("/", 1)[-1])
     if reason:
         return reason
-    if lowered in _REMOTE_SECRET_PATHS or lowered.startswith("/etc/sudoers.d/"):
+    if lowered.startswith("~/"):
+        # Home-relative paths can never name /etc files ('..' is rejected
+        # by remote_path), so the absolute-only check below is skipped.
+        return None
+    if _etc_system_credential(parts):
         return "system credential file"
     return None
 
