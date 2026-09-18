@@ -74,18 +74,17 @@ def test_session_model() -> None:
 @pytest.mark.parametrize(
     "age,expected",
     [
-        (timedelta(minutes=5), "5m 0s"),
-        (timedelta(seconds=30), "30s"),
-        (timedelta(hours=2, minutes=15), "2h 15m"),
-        (None, "unknown"),  # closed session: idle is unknowable
+        (timedelta(minutes=5), ("5m 0s", True)),
+        (timedelta(seconds=30), ("30s", True)),
+        (timedelta(hours=2, minutes=15), ("2h 15m", True)),
+        (None, ("unknown", False)),  # closed session: idle is unknowable
     ],
 )
-def test_session_idle_human(age: timedelta | None, expected: str) -> None:
+def test_session_idle_human(age: timedelta | None, expected: tuple[str, bool]) -> None:
     session = (
         _active_session(age) if age is not None else Session(id="s1", machine="h", status="closed")
     )
-    assert session.idle_human == expected
-    assert (session.idle_seconds is None) == (expected == "unknown")
+    assert (session.idle_human, session.idle_seconds is not None) == expected
 
 
 def test_session_idle_seconds_bounds() -> None:
@@ -105,13 +104,10 @@ def test_registry_crud(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="host1", host="10.0.0.1", user="admin", port=2222, aliases=["h1"]))
     mgr.add_machine(Machine(name="b", host="2.2.2.2"))
-    assert mgr.resolve_name("h1") == "host1"
-    assert mgr.resolve_name("host1") == "host1"
-    assert mgr.resolve_name("nope") is None
+    assert [mgr.resolve_name(n) for n in ("h1", "host1", "nope")] == ["host1", "host1", None]
     assert mgr.get_machine("h1").name == "host1"
     assert set(mgr.list_machines()) == {"host1", "b"}
-    assert mgr.remove_machine("h1") is True
-    assert mgr.remove_machine("nope") is False
+    assert (mgr.remove_machine("h1"), mgr.remove_machine("nope")) == (True, False)
     assert mgr.get_machine("nope") is None
     # persist + overwrite keeps original added timestamp
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
@@ -173,9 +169,11 @@ def test_session_lifecycle(tmp_path: Path) -> None:
     assert mgr.get_session("s3").started == "2026-01-01T00:00:00+00:00"
 
 
-def _aged_session_blob(mgr: Any, sid: str, age_hours: float, *, status: str = "active") -> None:
+def _aged_session_blob(
+    mgr: Any, sid: str, age: timedelta, *, status: str = "active", started: str | None = None
+) -> None:
     """Write a session with an aged timestamp straight into the sessions blob."""
-    stamp = (datetime.now(UTC) - timedelta(hours=age_hours)).isoformat()
+    stamp = (datetime.now(UTC) - age).isoformat()
     fresh = datetime.now(UTC).isoformat()
     _rewrite_sessions_blob(
         mgr,
@@ -184,7 +182,7 @@ def _aged_session_blob(mgr: Any, sid: str, age_hours: float, *, status: str = "a
                 sid: {
                     "machine": "host1",
                     "pid": 101,
-                    "started": stamp if status == "closed" else fresh,
+                    "started": started or (stamp if status == "closed" else fresh),
                     "last_active": stamp if status == "active" else fresh,
                     "status": status,
                 }
@@ -199,7 +197,7 @@ def _aged_session_blob(mgr: Any, sid: str, age_hours: float, *, status: str = "a
 )
 def test_cleanup_idle(tmp_path: Path, age: timedelta, expected: int) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "s1", age.total_seconds() / 3600)
+    _aged_session_blob(mgr, "s1", age)
     assert mgr.cleanup_idle(max_idle_minutes=30)["count"] == expected
 
 
@@ -214,7 +212,7 @@ def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     for sid in ("s1", "s2"):
-        _aged_session_blob(mgr, sid, 1)
+        _aged_session_blob(mgr, sid, timedelta(hours=1))
     with (
         patch("ssh_tools.exec.time.sleep"),
         patch("ssh_tools.exec.os.kill", side_effect=OSError("gone")),
@@ -226,24 +224,24 @@ def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
 
 def test_prune_closed_old(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "s1", 48, status="closed")
+    _aged_session_blob(mgr, "s1", timedelta(hours=48), status="closed")
     assert mgr.prune_closed(max_age_hours=24) == 1
-    _session_blob(mgr, "s2", status="closed", started="2020-01-01T00:00:00")
+    _aged_session_blob(mgr, "s2", timedelta(0), status="closed", started="2020-01-01T00:00:00")
     assert mgr.prune_closed(max_age_hours=24) == 1  # naive datetime still prunes
 
 
 def test_prune_closed_keeps(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "fresh", 0.001, status="closed")
-    _aged_session_blob(mgr, "active", 48, status="active")
-    _session_blob(mgr, "bad", status="closed", started="not-a-date")
+    _aged_session_blob(mgr, "fresh", timedelta(seconds=1), status="closed")
+    _aged_session_blob(mgr, "active", timedelta(hours=48), status="active")
+    _aged_session_blob(mgr, "bad", timedelta(0), status="closed", started="not-a-date")
     assert mgr.prune_closed(max_age_hours=24) == 0
     assert set(mgr.list_sessions(status="")) == {"fresh", "active", "bad"}
 
 
 def test_prune_uses_config_default(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "old", 48, status="closed")
+    _aged_session_blob(mgr, "old", timedelta(hours=48), status="closed")
     assert mgr.prune_closed() == 1  # config default 24h
     assert mgr.get_session("old") is None
 
@@ -260,11 +258,6 @@ def _rewrite_sessions_blob(mgr: Any, mutate: Any) -> None:
     blob = read_json(path, {"sessions": {}})
     mutate(blob["sessions"])
     write_json_atomic(path, blob)
-
-
-def _session_blob(mgr: Any, sid: str, **fields: Any) -> None:
-    """Write one raw session entry into the sessions blob."""
-    _rewrite_sessions_blob(mgr, lambda sessions: sessions.update({sid: fields}))
 
 
 @pytest.mark.parametrize(
@@ -329,6 +322,13 @@ def test_run_command_validation(tmp_path: Path) -> None:
     assert mgr.run_command("h", "", timeout=30)["success"] is False
 
 
+def _h(tmp_path: Path) -> Any:
+    """Manager with a registered host h at 1.1.1.1."""
+    mgr = _make_manager(tmp_path)
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    return mgr
+
+
 def test_build_ssh_args(tmp_path: Path) -> None:
     from ssh_tools.exec import build_ssh_args
 
@@ -353,8 +353,7 @@ def _ran(mgr: Any, *args: Any, stdout: str = "ok", code: int = 0, **kw: Any) -> 
 
 
 def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     assert _ran(mgr, "h", "echo ok")["success"] is True
     assert _ran(mgr, "h", "echo ok", timeout="5")["success"] is True
     assert _ran(mgr, "h", "echo ok", timeout=0)["success"] is True
@@ -367,8 +366,7 @@ def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
 
 
 def test_run_command_clamps_output(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     result = _ran(mgr, "h", "echo ok", stdout="x" * 600_000)
     assert len(result["stdout"]) < 600_000 and "stdout_file" in result
     clamped = _ran(mgr, "h", "echo ok", stdout="y" * 100)
@@ -388,8 +386,7 @@ def test_maybe_save_output(tmp_path: Path, text: str, limit: int) -> None:
 
 
 def test_output_sizes_inline_vs_file(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     with patch("ssh_tools.exec.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=0, stdout="x" * 1000, stderr="y" * 1000)
         result = mgr.run_command("h", "cmd", max_output_chars=100)
@@ -427,15 +424,12 @@ def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
 
 def test_run_command_background(tmp_path: Path) -> None:
     mgr, sid, proc = _bg(tmp_path, "long command")
-    assert proc.pid == 12345
-    assert mgr.get_session(sid).status == "active"
-    assert mgr.get_session(sid).pid == 12345
+    assert proc.pid == 12345 and mgr.get_session(sid).pid == 12345
     assert mgr.poll_session(sid)["running"] is True
 
 
 def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()) as popen:
         started = mgr.run_command("h", "verbose", background=True)
     assert started["session_id"].startswith("ssh_h_")
@@ -461,8 +455,7 @@ def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: st
 
 
 def test_poll_and_read_errors(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()):
         sid = mgr.run_command("h", "sleep", background=True)["session_id"]
     assert "No background process" in mgr.poll_session("nope")["error"]
@@ -473,8 +466,7 @@ def test_poll_and_read_errors(tmp_path: Path) -> None:
 
 
 def test_audit_log_modes(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     _ran(mgr, "h", "echo 1")
     _ran(mgr, "h", "echo 2")
     entries = mgr.list_command_log()
