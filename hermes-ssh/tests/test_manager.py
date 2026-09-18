@@ -72,24 +72,19 @@ def test_session_model() -> None:
 
 
 @pytest.mark.parametrize(
-    "age,expected",
+    "age,human,bounded",
     [
-        (timedelta(minutes=5), ("5m 0s", True)),
-        (timedelta(seconds=30), ("30s", True)),
-        (timedelta(hours=2, minutes=15), ("2h 15m", True)),
-        (None, ("unknown", False)),  # closed session: idle is unknowable
+        (timedelta(minutes=5), "5m 0s", True),
+        (timedelta(seconds=30), "30s", False),
+        (timedelta(hours=2, minutes=15), "2h 15m", False),
     ],
 )
-def test_session_idle_human(age: timedelta | None, expected: tuple[str, bool]) -> None:
-    session = (
-        _active_session(age) if age is not None else Session(id="s1", machine="h", status="closed")
-    )
-    assert (session.idle_human, session.idle_seconds is not None) == expected
-
-
-def test_session_idle_seconds_bounds() -> None:
-    s = _active_session(timedelta(minutes=5))
-    assert s.idle_seconds is not None and 290 <= s.idle_seconds <= 310
+def test_session_idle(age: timedelta, human: str, bounded: bool) -> None:
+    session = _active_session(age)
+    assert session.idle_human == human
+    if bounded:
+        assert session.idle_seconds is not None and 290 <= session.idle_seconds <= 310
+    assert Session(id="s1", machine="h", status="closed").idle_human == "unknown"
     for last_active in ("", "not-a-date"):
         bad = Session(id="s1", machine="h", status="active", last_active=last_active)
         assert bad.idle_seconds is None
@@ -354,12 +349,10 @@ def _ran(mgr: Any, *args: Any, stdout: str = "ok", code: int = 0, **kw: Any) -> 
 def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
     mgr = _h(tmp_path)
     assert _ran(mgr, "h", "echo ok")["success"] is True
-    assert _ran(mgr, "h", "echo ok", timeout="5")["success"] is True
-    assert _ran(mgr, "h", "echo ok", timeout=0)["success"] is True
-    assert _ran(mgr, "h", "echo ok", timeout=-1)["success"] is True
+    for good in ("5", 0, -1):  # strings coerce; <=0 falls back to the default
+        assert _ran(mgr, "h", "echo ok", timeout=good)["success"] is True
     bad = _ran(mgr, "h", "echo ok", timeout="abc")
     assert bad["success"] is False and "timeout" in bad["error"]
-    # main behaviour: a bool timeout is garbage and raises, not silently coerced.
     bool_bad = _ran(mgr, "h", "echo ok", timeout=True)
     assert bool_bad["success"] is False and "positive integer" in bool_bad["error"]
 
@@ -413,8 +406,7 @@ def _fake_running_popen() -> MagicMock:
 
 def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
     """Start a faked bg command; returns (mgr, session_id, proc)."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    mgr = _h(tmp_path)
     proc = _fake_running_popen()
     with patch("ssh_tools.exec.subprocess.Popen", return_value=proc):
         started = mgr.run_command("h", cmd, background=True, **kw)
@@ -425,13 +417,14 @@ def test_run_command_background(tmp_path: Path) -> None:
     mgr, sid, proc = _bg(tmp_path, "long command")
     assert proc.pid == 12345 and mgr.get_session(sid).pid == 12345
     assert mgr.poll_session(sid)["running"] is True
+    assert sid.startswith("ssh_h_")  # session ids carry the machine name
 
 
 def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
     mgr = _h(tmp_path)
     with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()) as popen:
         started = mgr.run_command("h", "verbose", background=True)
-    assert started["session_id"].startswith("ssh_h_")
+    assert started["success"] is True
     kwargs = popen.call_args.kwargs
     assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
 
@@ -448,9 +441,8 @@ def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: st
     result = mgr.poll_session(sid)
     assert result["success"] is (exit_code == 0)
     assert result["running"] is False
-    assert result[stream] == expected
+    assert result[stream] == expected and mgr.get_session(sid).status == "closed"
     assert mgr.poll_session(sid)["success"] is False  # collected once
-    assert mgr.get_session(sid).status == "closed"
 
 
 def test_poll_and_read_errors(tmp_path: Path) -> None:
