@@ -106,6 +106,15 @@ class TransferService:
             return self._upload(request, machine)
         return self._download(request, machine)
 
+    def _run_remote(self, machine: str, command: str, timeout: int, cap: int) -> dict[str, Any]:
+        """Run a probe/scan shell snippet with bounded timeout and output."""
+        return self.manager.run_command(
+            machine,
+            command,
+            timeout=min(timeout, cap),
+            max_output_chars=2_000,
+        )
+
     def _probe(
         self,
         machine: str,
@@ -119,12 +128,7 @@ class TransferService:
             f"elif [ -d {target} ]; then exit 3; "
             f"elif [ -e {target} ]; then exit 5; else exit 6; fi"
         )
-        result = self.manager.run_command(
-            machine,
-            command,
-            timeout=min(timeout, 30),
-            max_output_chars=2_000,
-        )
+        result = self._run_remote(machine, command, timeout, 30)
         kinds: dict[int, RemoteKind] = {
             0: "file",
             3: "directory",
@@ -163,12 +167,7 @@ class TransferService:
             "if [ $status -ne 0 ]; then exit 9; "
             'elif [ -n "$entry" ]; then printf "%s" "$entry"; exit 7; else exit 0; fi'
         )
-        result = self.manager.run_command(
-            machine,
-            command,
-            timeout=min(timeout, 60),
-            max_output_chars=2_000,
-        )
+        result = self._run_remote(machine, command, timeout, 60)
         if result.get("exit_code") == 0:
             return False, None
         if result.get("exit_code") == 7:
