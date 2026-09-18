@@ -4,56 +4,51 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..approval import check_approval
-from ..utils import err, ok, require
+from ..approval import approval_error, check_approval
+from ..helpers import ok, param_bool, param_str, take
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ..manager import SSHManager
 
+_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("machine", param_str),
+    ("command", param_str),
+    ("background", param_bool),
+    ("new_session", param_bool),
+)
+
 
 def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        error = require(params, "machine", "command")
-        if error:
-            return err(error)
-
-        machine = params["machine"]
-        command = params["command"]
-        if not isinstance(machine, str) or not machine:
-            return err("machine must be a non-empty string")
-        if not isinstance(command, str) or not command.strip():
-            return err("command must be a non-empty string")
-
-        background = params.get("background", False)
-        if not isinstance(background, bool):
-            return err(f"background must be a boolean, got {type(background).__name__}")
-        new_session = params.get("new_session", False)
-        if not isinstance(new_session, bool):
-            return err(f"new_session must be a boolean, got {type(new_session).__name__}")
+        args, error = take(params, _FIELDS)
+        if error is not None:
+            return error
 
         # Check command against Hermes approval system.
-        approval = check_approval(command)
-        if approval is not None and not approval.get("approved", True):
-            return err(str(approval.get("message", "Command blocked by approval system")))
+        denied = approval_error(
+            check_approval(args["command"]), "Command blocked by approval system"
+        )
+        if denied:
+            return denied
 
         result = manager.run_command(
-            machine_name=machine,
-            command=command,
+            machine_name=args["machine"],
+            command=args["command"],
             timeout=params.get("timeout"),
-            new_session=new_session,
-            background=background,
+            new_session=args["new_session"],
+            background=args["background"],
             max_output_chars=params.get("max_output_chars", 50_000),
         )
 
-        if background and isinstance(result, dict) and "session_id" in result:
+        if args["background"] and isinstance(result, dict) and "session_id" in result:
             return ok(
                 session_id=result["session_id"],
                 pid=result.get("pid"),
-                machine=result.get("machine", machine),
+                machine=result.get("machine", args["machine"]),
                 status="running",
                 message="Command started in background. Use poll or read_output to check status.",
             )

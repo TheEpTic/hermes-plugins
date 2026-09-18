@@ -42,6 +42,12 @@ class EncryptedStore:
 
     # ----- Key management -----
 
+    def _read_key(self) -> Fernet:
+        """Read the existing key file into a Fernet (loser of the create race)."""
+        raw = (self._data_dir / _KEY_FILE).read_text(encoding="utf-8").strip()
+        self._fernet = Fernet(raw.encode())
+        return self._fernet
+
     def _ensure_key(self) -> Fernet:
         """Load or generate the encryption key.
 
@@ -56,9 +62,7 @@ class EncryptedStore:
 
         # Try to read existing key
         if key_path.exists():
-            raw = key_path.read_text(encoding="utf-8").strip()
-            self._fernet = Fernet(raw.encode())
-            return self._fernet
+            return self._read_key()
 
         # Generate new key — atomic create (O_EXCL fails if file already exists)
         key = Fernet.generate_key()
@@ -73,15 +77,23 @@ class EncryptedStore:
                 os.close(fd)
         except FileExistsError:
             # Another process won the race — read their key
-            raw = key_path.read_text(encoding="utf-8").strip()
-            self._fernet = Fernet(raw.encode())
-            return self._fernet
+            return self._read_key()
 
         self._fernet = Fernet(key)
         logger.info("Generated new encryption key at %s", key_path)
         return self._fernet
 
     # ----- Read/Write -----
+
+    def _is_plaintext(self, raw: str) -> bool:
+        """True when the blob fails decryption — i.e. it is stored plaintext."""
+        try:
+            self._ensure_key().decrypt(raw.encode())
+            return False  # decryption succeeded — already encrypted
+        except InvalidToken:
+            return True
+        except Exception:
+            return False
 
     def read(self, filename: str, default: Any = None) -> Any:
         """Read and decrypt a JSON file.
@@ -98,11 +110,8 @@ class EncryptedStore:
             return default if default is not None else {}
 
         # Try encrypted first
-        try:
-            fernet = self._ensure_key()
-            decrypted = fernet.decrypt(raw.encode())
-            return json.loads(decrypted)
-        except InvalidToken:
+        fernet = self._ensure_key()
+        if self._is_plaintext(raw):
             # Not encrypted — treat as plaintext (migration path)
             logger.debug("%s is plaintext, treating as unencrypted", filename)
             try:
@@ -110,6 +119,8 @@ class EncryptedStore:
             except json.JSONDecodeError as exc:
                 logger.warning("Corrupt data in %s: %s", path, exc)
                 return default if default is not None else {}
+        try:
+            return json.loads(fernet.decrypt(raw.encode()))
         except Exception as exc:
             logger.warning("Failed to decrypt %s: %s", path, exc)
             return default if default is not None else {}
@@ -154,17 +165,7 @@ class EncryptedStore:
             return False
 
         raw = path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return False
-
-        # Check if it's already encrypted by trying to decrypt
-        try:
-            fernet = self._ensure_key()
-            fernet.decrypt(raw.encode())
-            return False  # decryption succeeded — already encrypted
-        except InvalidToken:
-            pass  # not encrypted — proceed with migration
-        except Exception:
+        if not raw.strip() or not self._is_plaintext(raw):
             return False
 
         # It's plaintext — read it, encrypt, write back

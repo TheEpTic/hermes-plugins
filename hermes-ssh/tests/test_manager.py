@@ -1,4 +1,4 @@
-"""Tests for ssh_tools.manager — Machine, Session, SSHManager."""
+"""Tests for ssh_tools.manager — models, registry, sessions, execution, audit."""
 
 from __future__ import annotations
 
@@ -9,1082 +9,126 @@ import signal
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ssh_tools.config import SSHConfig
+from ssh_tools.manager import SSHManager
 from ssh_tools.models import Machine, Session
 
 from .conftest import _make_manager
 
 # ---------------------------------------------------------------------------
-# Machine dataclass
+# models
 # ---------------------------------------------------------------------------
 
 
-def test_machine_to_dict_roundtrip() -> None:
-    m = Machine(name="test", host="10.0.0.1", user="admin", port=2222, aliases=["t"], tags=["dev"])
-    d = m.to_dict()
-    m2 = Machine.from_dict("test", d)
-    assert m2.name == "test"
-    assert m2.host == "10.0.0.1"
-    assert m2.user == "admin"
-    assert m2.port == 2222
-    assert m2.aliases == ["t"]
-    assert m2.tags == ["dev"]
-
-
-def test_machine_defaults() -> None:
-    m = Machine(name="x", host="1.2.3.4")
-    assert m.user == getpass.getuser()
-    assert m.port == 22
-    assert m.key == ""
-    assert m.aliases is None
-    assert m.tags is None
-    assert m.description == ""
-    assert m.added == ""
-
-
-# ---------------------------------------------------------------------------
-# Session dataclass
-# ---------------------------------------------------------------------------
-
-
-def test_session_idle_seconds_active() -> None:
+def _active_session(age: timedelta = timedelta(minutes=5)) -> Session:
     now = datetime.now(UTC)
-    s = Session(
+    return Session(
         id="s1",
         machine="host1",
         started=now.isoformat(),
-        last_active=(now - timedelta(minutes=5)).isoformat(),
+        last_active=(now - age).isoformat(),
         status="active",
     )
-    idle = s.idle_seconds
-    assert idle is not None
-    assert 290 <= idle <= 310  # ~5 minutes
 
 
-def test_session_idle_seconds_closed() -> None:
-    s = Session(id="s1", machine="h", status="closed")
-    assert s.idle_seconds is None
-
-
-def test_session_idle_seconds_empty_last_active() -> None:
-    s = Session(id="s1", machine="h", status="active", last_active="")
-    assert s.idle_seconds is None
-
-
-def test_session_idle_seconds_invalid_last_active() -> None:
-    s = Session(id="s1", machine="h", status="active", last_active="not-a-date")
-    assert s.idle_seconds is None
-
-
-def test_session_idle_human_seconds() -> None:
-    now = datetime.now(UTC)
-    s = Session(
-        id="s1",
-        machine="h",
-        status="active",
-        last_active=(now - timedelta(seconds=30)).isoformat(),
+def test_machine_model() -> None:
+    m = Machine(name="test", host="10.0.0.1", user="admin", port=2222, aliases=["t"], tags=["dev"])
+    m2 = Machine.from_dict("test", m.to_dict())
+    assert (m2.name, m2.host, m2.user, m2.port, m2.aliases, m2.tags) == (
+        "test",
+        "10.0.0.1",
+        "admin",
+        2222,
+        ["t"],
+        ["dev"],
     )
-    assert s.idle_human == "30s"
+    defaults = Machine(name="x", host="1.2.3.4")
+    assert (
+        defaults.user,
+        defaults.port,
+        defaults.key,
+        defaults.aliases,
+        defaults.tags,
+        defaults.description,
+        defaults.added,
+    ) == (getpass.getuser(), 22, "", None, None, "", "")
 
 
-def test_session_idle_human_minutes() -> None:
-    now = datetime.now(UTC)
-    s = Session(
-        id="s1",
-        machine="h",
-        status="active",
-        last_active=(now - timedelta(minutes=5, seconds=30)).isoformat(),
-    )
-    assert s.idle_human == "5m 30s"
-
-
-def test_session_idle_human_hours() -> None:
-    now = datetime.now(UTC)
-    s = Session(
-        id="s1",
-        machine="h",
-        status="active",
-        last_active=(now - timedelta(hours=2, minutes=15)).isoformat(),
-    )
-    assert s.idle_human == "2h 15m"
-
-
-def test_session_idle_human_unknown() -> None:
-    s = Session(id="s1", machine="h", status="closed")
-    assert s.idle_human == "unknown"
-
-
-def test_session_to_dict_roundtrip() -> None:
+def test_session_model() -> None:
     s = Session(id="s1", machine="h", pid=123, control_path="/tmp/c.sock", status="active")
-    d = s.to_dict()
-    s2 = Session.from_dict("s1", d)
-    assert s2.id == "s1"
-    assert s2.machine == "h"
-    assert s2.pid == 123
-    assert s2.control_path == "/tmp/c.sock"
-    assert s2.status == "active"
+    s2 = Session.from_dict("s1", s.to_dict())
+    assert (s2.id, s2.machine, s2.pid, s2.control_path, s2.status) == (
+        "s1",
+        "h",
+        123,
+        "/tmp/c.sock",
+        "active",
+    )
+
+
+@pytest.mark.parametrize(
+    "age,human,bounded",
+    [
+        (timedelta(minutes=5), "5m 0s", True),
+        (timedelta(seconds=30), "30s", False),
+        (timedelta(hours=2, minutes=15), "2h 15m", False),
+    ],
+)
+def test_session_idle(age: timedelta, human: str, bounded: bool) -> None:
+    session = _active_session(age)
+    assert session.idle_human == human
+    if bounded:
+        assert session.idle_seconds is not None and 290 <= session.idle_seconds <= 310
+    assert Session(id="s1", machine="h", status="closed").idle_human == "unknown"
+    for last_active in ("", "not-a-date"):
+        bad = Session(id="s1", machine="h", status="active", last_active=last_active)
+        assert bad.idle_seconds is None
 
 
 # ---------------------------------------------------------------------------
-# SSHManager — machine registry
+# machine registry
 # ---------------------------------------------------------------------------
 
 
-def test_add_and_get_machine(tmp_path: Path) -> None:
+def test_registry_crud(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    m = Machine(name="host1", host="10.0.0.1", user="admin", port=2222)
-    mgr.add_machine(m)
-
-    got = mgr.get_machine("host1")
-    assert got is not None
-    assert got.host == "10.0.0.1"
-    assert got.user == "admin"
-    assert got.port == 2222
-
-
-def test_add_machine_sets_timestamp(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    m = mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    assert m.added
-    # Verify it's a valid ISO timestamp
-    dt = datetime.fromisoformat(m.added)
-    assert dt.year >= 2026
-
-
-def test_add_machine_overwrite(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1", user="old"))
+    mgr.add_machine(Machine(name="host1", host="10.0.0.1", user="admin", port=2222, aliases=["h1"]))
+    mgr.add_machine(Machine(name="b", host="2.2.2.2"))
+    assert [mgr.resolve_name(n) for n in ("h1", "host1", "nope")] == ["host1", "host1", None]
+    assert mgr.get_machine("h1").name == "host1"
+    assert set(mgr.list_machines()) == {"host1", "b"}
+    assert (mgr.remove_machine("h1"), mgr.remove_machine("nope")) == (True, False)
+    assert mgr.get_machine("nope") is None
+    # persist + overwrite keeps original added timestamp
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
     mgr.add_machine(
         Machine(name="h", host="2.2.2.2", user="new", added="2026-01-01T00:00:00+00:00")
     )
+    got2 = mgr.get_machine("h")
+    assert got2 is not None and got2.host == "2.2.2.2"
+    kept = _make_manager(tmp_path).get_machine("h")
+    assert kept is not None and kept.host == "2.2.2.2"
 
-    got = mgr.get_machine("h")
-    assert got is not None
-    assert got.host == "2.2.2.2"
-    assert got.user == "new"
-    # Preserved original added timestamp
-    assert got.added == "2026-01-01T00:00:00+00:00"
 
+def test_validate_machine_name() -> None:
+    from ssh_tools.validate import validate_machine_name
 
-def test_resolve_alias(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="host1", host="10.0.0.1", aliases=["h1"]))
+    for good in ("myserver", "web-01", "grid1.example.com", "a"):
+        assert validate_machine_name(good) is None
+    for bad in ("../../etc/passwd", "my server", "test*", "", "a" * 65):
+        assert validate_machine_name(bad) is not None
 
-    assert mgr.resolve_name("h1") == "host1"
-    assert mgr.resolve_name("host1") == "host1"
-    assert mgr.resolve_name("nope") is None
 
-
-def test_get_machine_by_alias(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="host1", host="10.0.0.1", aliases=["h1"]))
-
-    got = mgr.get_machine("h1")
-    assert got is not None
-    assert got.name == "host1"
-
-
-def test_list_machines(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="a", host="1.1.1.1"))
-    mgr.add_machine(Machine(name="b", host="2.2.2.2"))
-
-    machines = mgr.list_machines()
-    assert len(machines) == 2
-    assert "a" in machines
-    assert "b" in machines
-
-
-def test_remove_machine(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="host1", host="10.0.0.1"))
-
-    assert mgr.remove_machine("host1") is True
-    assert mgr.get_machine("host1") is None
-
-
-def test_remove_machine_by_alias(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="host1", host="10.0.0.1", aliases=["h1"]))
-
-    assert mgr.remove_machine("h1") is True
-    assert mgr.get_machine("host1") is None
-
-
-def test_remove_nonexistent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    assert mgr.remove_machine("nope") is False
-
-
-def test_get_nonexistent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    assert mgr.get_machine("nope") is None
-
-
-def test_machine_persists_across_instances(tmp_path: Path) -> None:
-    mgr1 = _make_manager(tmp_path)
-    mgr1.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    mgr2 = _make_manager(tmp_path)
-    got = mgr2.get_machine("h")
-    assert got is not None
-    assert got.host == "1.1.1.1"
-
-
-# ---------------------------------------------------------------------------
-# SSHManager — session tracking
-# ---------------------------------------------------------------------------
-
-
-def test_register_and_list_sessions(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1", pid=100))
-
-    active = mgr.list_sessions("active")
-    assert len(active) == 1
-    assert "s1" in active
-
-
-def test_register_session_sets_timestamps(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.started
-    assert s.last_active
-    assert s.status == "active"
-
-
-def test_register_session_preserves_existing_started(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    custom_time = "2026-01-01T00:00:00+00:00"
-    mgr.register_session(Session(id="s1", machine="host1", started=custom_time))
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.started == custom_time
-
-
-def test_get_session(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.machine == "host1"
-    assert s.status == "active"
-
-
-def test_close_session(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.close_session("s1")
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "closed"
-
-    active = mgr.list_sessions("active")
-    assert "s1" not in active
-
-
-def test_remove_session(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.remove_session("s1")
-
-    assert mgr.get_session("s1") is None
-
-
-def test_touch_session(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    mgr.touch_session("s1")
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.command_count == 1
-
-    mgr.touch_session("s1")
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.command_count == 2
-
-
-def test_list_sessions_all_statuses(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.register_session(Session(id="s2", machine="host1"))
-    mgr.close_session("s2")
-
-    all_sessions = mgr.list_sessions(status="")
-    assert len(all_sessions) == 2
-
-    closed = mgr.list_sessions("closed")
-    assert len(closed) == 1
-    assert "s2" in closed
-
-
-def test_cleanup_idle(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    # Manually age the session
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-        sessions["s1"]["last_active"] = old_time
-        mgr._save_sessions(sessions)
-
-    result = mgr.cleanup_idle(max_idle_minutes=30)
-    assert result["count"] == 1
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "orphaned"
-
-
-def test_cleanup_idle_skips_recent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    result = mgr.cleanup_idle(max_idle_minutes=30)
-    assert result["count"] == 0
-
-    s = mgr.get_session("s1")
-    assert s is not None
-    assert s.status == "active"
-
-
-def test_cleanup_idle_boundary(tmp_path: Path) -> None:
-    """Session exactly at threshold should NOT be killed (> not >=)."""
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    # Set last_active to exactly 30 minutes ago
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        exact_time = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
-        sessions["s1"]["last_active"] = exact_time
-        mgr._save_sessions(sessions)
-
-    result = mgr.cleanup_idle(max_idle_minutes=30)
-    assert result["count"] == 0  # > threshold, not >=
-
-
-def test_cleanup_idle_uses_config_default(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    # Config default is 30 minutes
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-        sessions["s1"]["last_active"] = old_time
-        mgr._save_sessions(sessions)
-
-    result = mgr.cleanup_idle()  # No arg = use config default
-    assert result["count"] == 1
-
-
-def test_prune_closed(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.close_session("s1")
-
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
-        sessions["s1"]["started"] = old_time
-        mgr._save_sessions(sessions)
-
-    count = mgr.prune_closed(max_age_hours=24)
-    assert count == 1
-    assert mgr.get_session("s1") is None
-
-
-def test_prune_closed_keeps_recent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.close_session("s1")
-
-    count = mgr.prune_closed(max_age_hours=24)
-    assert count == 0
-
-
-def test_prune_closed_skips_active(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
-        sessions["s1"]["started"] = old_time
-        mgr._save_sessions(sessions)
-
-    count = mgr.prune_closed(max_age_hours=24)
-    assert count == 0  # Active sessions not pruned
-
-
-def test_prune_closed_with_invalid_date(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.close_session("s1")
-
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        sessions["s1"]["started"] = "not-a-date"
-        mgr._save_sessions(sessions)
-
-    count = mgr.prune_closed(max_age_hours=24)
-    assert count == 0  # Invalid date = skip, don't crash
-
-
-def test_prune_closed_uses_config_default(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1"))
-    mgr.close_session("s1")
-
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
-        sessions["s1"]["started"] = old_time
-        mgr._save_sessions(sessions)
-
-    count = mgr.prune_closed()  # No arg = config default (24h)
-    assert count == 1
-
-
-def test_multiple_sessions_same_machine(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="host1", pid=100))
-    mgr.register_session(Session(id="s2", machine="host1", pid=200))
-
-    active = mgr.list_sessions("active")
-    assert len(active) == 2
-    assert all(s.machine == "host1" for s in active.values())
-
-
-# ---------------------------------------------------------------------------
-# SSHManager — JSON corruption handling
-# ---------------------------------------------------------------------------
-
-
-def test_read_json_corrupt_file(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    corrupt_file = tmp_path / "machines.json"
-    corrupt_file.write_text("NOT JSON {{{")
-
-    result = mgr._read_json(corrupt_file, {"default": True})
-    assert result == {"default": True}
-
-
-def test_read_json_missing_file(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    result = mgr._read_json(tmp_path / "nonexistent.json", {"fallback": True})
-    assert result == {"fallback": True}
-
-
-def test_write_json_atomic(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    target = tmp_path / "test.json"
-
-    mgr._write_json(target, {"key": "value"})
-    assert json.loads(target.read_text()) == {"key": "value"}
-
-    # Verify no leftover temp files
-    tmp_files = list(tmp_path.glob("*.tmp"))
-    assert tmp_files == []
-
-
-# ---------------------------------------------------------------------------
-# SSHManager — SSH execution
-# ---------------------------------------------------------------------------
-
-
-def test_run_command_nonexistent_machine(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    result = mgr.run_command("nope", "echo hi")
-    assert result["success"] is False
-    assert "not found" in result["error"]
-
-
-def test_build_ssh_args(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    machine = Machine(name="h", host="10.0.0.1", user="admin", port=2222, key="~/.ssh/test")
-    args = mgr._build_ssh_args(machine, "uptime", "/tmp/c.sock", timeout=30)
-
-    assert args[0] == "ssh"
-    assert "-p" in args
-    assert "2222" in args
-    assert "-i" in args
-    assert "~/.ssh/test" in args
-    assert "ControlMaster=auto" in args
-    assert "admin@10.0.0.1" in args
-    # Command is wrapped in bash -c 'set -o pipefail; ...'
-    assert "bash" in args
-    assert "-c" in args
-    assert "pipefail" in args[-1]
-    assert "uptime" in args[-1]
-
-
-def test_build_ssh_args_no_control_path(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    machine = Machine(name="h", host="10.0.0.1")
-    args = mgr._build_ssh_args(machine, "uptime", "", timeout=30)
-
-    assert "ControlMaster" not in args
-
-
-def test_build_ssh_args_no_key(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    machine = Machine(name="h", host="10.0.0.1")
-    args = mgr._build_ssh_args(machine, "uptime", timeout=30)
-
-    assert "-i" not in args
-
-
-def test_build_ssh_args_timeout_clamping(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    machine = Machine(name="h", host="10.0.0.1")
-    args = mgr._build_ssh_args(machine, "uptime", timeout=30)
-
-    # ConnectTimeout should be min(30, 10) = 10
-    ct_val = next(a for a in args if a.startswith("ConnectTimeout="))
-    assert ct_val == "ConnectTimeout=10"
-
-
-# ---------------------------------------------------------------------------
-# SSHManager — idle checker
-# ---------------------------------------------------------------------------
-
-
-def test_start_stop_idle_checker(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.start_idle_checker()
-    assert mgr._checker_thread is not None
-    assert mgr._checker_thread.is_alive()
-
-    mgr.stop_idle_checker()
-    # Event is set — thread will exit after current sleep/cleanup cycle
-    assert mgr._checker_event.is_set()
-
-
-def test_stop_idle_checker_sets_event(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    assert not mgr._checker_event.is_set()
-    mgr.start_idle_checker()
-    mgr.stop_idle_checker()
-    assert mgr._checker_event.is_set()
-
-
-def test_start_idle_checker_idempotent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.start_idle_checker()
-    thread1 = mgr._checker_thread
-    mgr.start_idle_checker()  # Should be no-op
-    assert mgr._checker_thread is thread1
-    mgr.stop_idle_checker()
-
-
-# ---------------------------------------------------------------------------
-# Additional imports for new tests below
-# ---------------------------------------------------------------------------
-
-from unittest.mock import MagicMock, patch
-
-from ssh_tools.config import SSHConfig
-from ssh_tools.manager import SSHManager
-
-# ---------------------------------------------------------------------------
-# kill_session — PID + control socket
-# ---------------------------------------------------------------------------
-
-
-def test_kill_session_refuses_untracked_persisted_pid(tmp_path: Path) -> None:
-    """Persisted PIDs are never signalled after manager restart."""
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=99999))
-    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
-        result = mgr.kill_session("s1")
-    assert result["success"] is False
-    assert result["status"] == "orphaned"
-    mock_killpg.assert_not_called()
-    assert mgr.get_session("s1").status == "orphaned"
-
-
-def test_kill_session_tracked_process_group(tmp_path: Path) -> None:
-    """Only an in-memory tracked process group may be signalled."""
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=99999))
-    proc = MagicMock(pid=99999)
-    proc.poll.return_value = None
-    mgr._processes["s1"] = proc
-    with patch("ssh_tools.manager.os.killpg") as mock_killpg:
-        result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["pid_killed"] is True
-    mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
-    assert mgr.get_session("s1").status == "closed"
-
-
-def test_kill_session_does_not_close_shared_control_socket(tmp_path: Path) -> None:
-    """Killing one command must not close a machine-wide ControlMaster."""
-    mgr = _make_manager(tmp_path)
-    ctrl = tmp_path / "prod.sock"
-    ctrl.touch()
-    mgr.register_session(Session(id="s1", machine="prod", pid=123, control_path=str(ctrl)))
-    proc = MagicMock(pid=123)
-    proc.poll.return_value = 0
-    mgr._processes["s1"] = proc
-    with patch("ssh_tools.manager.subprocess.run") as mock_sub:
-        result = mgr.kill_session("s1")
-    assert result["success"] is True
-    assert result["socket_closed"] is False
-    mock_sub.assert_not_called()
-
-
-def test_kill_session_socket_path_missing(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.register_session(Session(id="s1", machine="h", pid=0, control_path="/nonexistent.sock"))
-    result = mgr.kill_session("s1")
-    assert result["success"] is False
-    assert result["status"] == "orphaned"
-
-
-def test_kill_session_nonexistent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    result = mgr.kill_session("nope")
-    assert result["success"] is False
-    assert "not found" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# run_command — no lingering active sessions
-# ---------------------------------------------------------------------------
-
-
-def test_run_command_no_active_sessions_after(tmp_path: Path) -> None:
-    """After run_command completes, there should be no active sessions left."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="hello\n", stderr="")
-        result = mgr.run_command("h", "echo hello")
-
-    assert result["success"] is True
-    # The session was registered then immediately closed
-    active = mgr.list_sessions("active")
-    assert len(active) == 0
-
-
-# ---------------------------------------------------------------------------
-# cleanup_idle — batch close (single save)
-# ---------------------------------------------------------------------------
-
-
-def test_cleanup_idle_batch_close_single_save(tmp_path: Path) -> None:
-    """cleanup_idle should close all idle sessions in one batch, not per-session."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    # Register two sessions, both old enough to be idle
-    mgr.register_session(Session(id="s1", machine="h", pid=101))
-    mgr.register_session(Session(id="s2", machine="h", pid=102))
-
-    # Age both sessions beyond threshold
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-        sessions["s1"]["last_active"] = old_time
-        sessions["s2"]["last_active"] = old_time
-        mgr._save_sessions(sessions)
-
-    with (
-        patch("ssh_tools.manager.os.kill") as mock_kill,
-        patch("ssh_tools.manager.time.sleep"),
-    ):
-        mock_kill.side_effect = OSError("No such process")
-        result = mgr.cleanup_idle(max_idle_minutes=30)
-
-    assert result["count"] == 2
-    # Untracked persisted sessions are marked orphaned without signalling PIDs.
-    s1 = mgr.get_session("s1")
-    assert s1 is not None
-    assert s1.status == "orphaned"
-    s2 = mgr.get_session("s2")
-    assert s2 is not None
-    assert s2.status == "orphaned"
-
-
-def test_cleanup_idle_empty_list(tmp_path: Path) -> None:
-    """No idle sessions → count 0, no errors."""
-    mgr = _make_manager(tmp_path)
-    result = mgr.cleanup_idle(max_idle_minutes=30)
-    assert result["count"] == 0
-    assert result["killed"] == []
-
-
-# ---------------------------------------------------------------------------
-# Background command — Popen path, poll_session, read_output
-# ---------------------------------------------------------------------------
-
-
-def _fake_running_popen() -> MagicMock:
-    """Create a mock Popen that is still running."""
-    proc = MagicMock()
-    proc.pid = 12345
-    proc.stdout = MagicMock()
-    proc.stderr = MagicMock()
-    proc.poll.return_value = None
-    proc.returncode = None
-    return proc
-
-
-def test_run_command_background(tmp_path: Path) -> None:
-    """background=True uses Popen and returns immediately."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        result = mgr.run_command("h", "long command", background=True)
-
-    assert result["success"] is True
-    assert result["background"] is True
-    assert result["pid"] == 12345
-    assert "session_id" in result
-    # Session should be registered (active, not closed)
-    session = mgr.get_session(result["session_id"])
-    assert session is not None
-    assert session.status == "active"
-
-
-def test_poll_session_running(tmp_path: Path) -> None:
-    """poll_session returns running=True when process is alive."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        result = mgr.run_command("h", "long cmd", background=True)
-
-    sid = result["session_id"]
-    poll_result = mgr.poll_session(sid)
-    assert poll_result["success"] is True
-    assert poll_result["running"] is True
-
-
-def test_poll_session_finished(tmp_path: Path) -> None:
-    """poll_session collects output when process finishes."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    # Start with running process
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        bg_result = mgr.run_command("h", "cmd", background=True)
-    sid = bg_result["session_id"]
-
-    # Now simulate the process has finished
-    fake_proc.poll.return_value = 0
-    fake_proc.stdout.read.return_value = b"hello world\n"
-    fake_proc.stderr.read.return_value = b""
-
-    poll_result = mgr.poll_session(sid)
-    assert poll_result["success"] is True
-    assert poll_result["running"] is False
-    assert poll_result["stdout"] == "hello world\n"
-    assert poll_result["exit_code"] == 0
-    # Process should be removed from internal tracking
-    assert sid not in mgr._processes
-    # Session should be closed
-    s = mgr.get_session(sid)
-    assert s is not None
-    assert s.status == "closed"
-
-
-def test_poll_session_reports_nonzero_background_exit_as_failure(tmp_path: Path) -> None:
-    """A finished background command must not be reported as successful when it fails."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        background = mgr.run_command("h", "false", background=True)
-
-    fake_proc.poll.return_value = 1
-    fake_proc.returncode = 1
-    fake_proc.stdout.read.return_value = b""
-    fake_proc.stderr.read.return_value = b"command failed\n"
-
-    result = mgr.poll_session(background["session_id"])
-
-    assert result["success"] is False
-    assert result["running"] is False
-    assert result["exit_code"] == 1
-    assert result["stderr"] == "command failed\n"
-
-
-def test_poll_session_nonexistent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    result = mgr.poll_session("no_such_session")
-    assert result["success"] is False
-    assert "No background process" in result["error"]
-
-
-def test_read_output_finished(tmp_path: Path) -> None:
-    """read_output preserves output and exit status from a finished background process."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        bg_result = mgr.run_command("h", "cmd", background=True)
-    sid = bg_result["session_id"]
-
-    # Simulate finished
-    fake_proc.poll.return_value = 1
-    fake_proc.stdout.read.return_value = b"some output"
-    fake_proc.stderr.read.return_value = b"err msg"
-
-    out = mgr.read_output(sid)
-    assert out["success"] is False
-    assert out["stdout"] == "some output"
-    assert out["stderr"] == "err msg"
-    assert out["exit_code"] == 1
-    assert sid not in mgr._processes
-
-
-def test_read_output_still_running(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        bg_result = mgr.run_command("h", "cmd", background=True)
-    sid = bg_result["session_id"]
-
-    result = mgr.read_output(sid)
-    assert result["success"] is False
-    assert "still running" in result["error"]
-
-
-def test_read_output_nonexistent(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    result = mgr.read_output("no_such_session")
-    assert result["success"] is False
-    assert "No background process" in result["error"]
-
-
-# ---------------------------------------------------------------------------
-# Output save-to-file (Hermes pattern)
-# ---------------------------------------------------------------------------
-
-
-def test_run_command_large_output_saves_to_file(tmp_path: Path) -> None:
-    """stdout/stderr exceeding max_output_chars are saved to restricted files."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    big_stdout = "x" * 1000
-    big_stderr = "y" * 1000
-
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout=big_stdout, stderr=big_stderr)
-        result = mgr.run_command("h", "cmd", max_output_chars=100)
-
-    assert result["success"] is True
-    # Summary returned inline
-    assert "output saved to" in result["stdout"]
-    assert "stdout_file" in result
-    assert "stderr_file" in result
-    assert result["stdout_file"].endswith("_stdout.txt")
-    assert result["stderr_file"].endswith("_stderr.txt")
-    # Full output written to file
-    saved = Path(result["stdout_file"]).read_text()
-    assert saved == big_stdout
-
-
-def test_run_command_short_output_inline_no_file(tmp_path: Path) -> None:
-    """Short output stays inline, no file created."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="hi\n", stderr="")
-        result = mgr.run_command("h", "echo hi")
-
-    assert result["stdout"] == "hi\n"
-    assert "stdout_file" not in result
-    assert "stderr_file" not in result
-
-
-def test_maybe_save_output_short() -> None:
-    """_maybe_save_output returns text unchanged for short input."""
-    mgr = SSHManager.__new__(SSHManager)
-    text, path = mgr._maybe_save_output("hello", 100, "s1", "stdout")
-    assert text == "hello"
-    assert path is None
-
-
-def test_maybe_save_output_long(tmp_path: Path) -> None:
-    """_maybe_save_output writes to output_dir and returns summary."""
-    mgr = _make_manager(tmp_path)
-    long_text = "x" * 500
-    text, path = mgr._maybe_save_output(long_text, 100, "s1", "stdout")
-    assert path is not None
-    assert str(tmp_path / "outputs" / "ssh_output_s1_stdout.txt") == path
-    assert "output saved to" in text
-    assert "500 chars total" in text
-    assert len(text) < 500  # summary is shorter than full
-
-
-# ---------------------------------------------------------------------------
-# Command audit log — JSONL written, list_command_log returns entries
-# ---------------------------------------------------------------------------
-
-
-def test_run_command_writes_audit_log(tmp_path: Path) -> None:
-    """After run_command, a JSONL entry should be in command_log.jsonl."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        result = mgr.run_command("h", "uptime")
-
-    assert result["success"] is True
-    log_path = tmp_path / "command_log.jsonl"
-    assert log_path.exists()
-    lines = log_path.read_text().strip().splitlines()
-    assert len(lines) >= 1
-    entry = json.loads(lines[-1])
-    assert entry["machine"] == "h"
-    assert entry["command"] == "uptime"
-    assert entry["exit_code"] == 0
-    assert "timestamp" in entry
-    assert "elapsed_secs" in entry
-    assert "session_id" in entry
-
-
-def test_list_command_log_entries(tmp_path: Path) -> None:
-    """list_command_log returns parsed entries from the JSONL file."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    # Run two commands
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", "echo 1")
-        mgr.run_command("h", "echo 2")
-
-    entries = mgr.list_command_log()
-    assert len(entries) >= 2
-    assert entries[-1]["command"] == "echo 2"
-    assert entries[-2]["command"] == "echo 1"
-
-
-def test_list_command_log_limit(tmp_path: Path) -> None:
-    """list_command_log respects the limit parameter."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        for i in range(5):
-            mgr.run_command("h", f"cmd {i}")
-
-    entries = mgr.list_command_log(limit=3)
-    assert len(entries) == 3
-    assert entries[-1]["command"] == "cmd 4"
-
-
-def test_list_command_log_empty(tmp_path: Path) -> None:
-    """No log file → empty list."""
-    mgr = _make_manager(tmp_path)
-    assert mgr.list_command_log() == []
-
-
-def test_background_command_writes_audit_log(tmp_path: Path) -> None:
-    """Background commands also write to the audit log."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        mgr.run_command("h", "bg cmd", background=True)
-
-    log_path = tmp_path / "command_log.jsonl"
-    assert log_path.exists()
-    lines = log_path.read_text().strip().splitlines()
-    assert len(lines) >= 1
-    entry = json.loads(lines[-1])
-    assert entry["command"] == "bg cmd"
-    assert entry["exit_code"] is None  # Not finished yet
-
-
-# ---------------------------------------------------------------------------
-# Auto-prune in idle checker
-# ---------------------------------------------------------------------------
-
-
-def test_idle_checker_auto_prunes(tmp_path: Path) -> None:
-    """The idle checker should auto-prune old closed sessions."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-
-    # Create an old closed session
-    mgr.register_session(Session(id="s_old", machine="h", pid=100))
-    mgr.close_session("s_old")
-
-    # Set started time to 48 hours ago so it exceeds prune threshold
-    with mgr._lock:
-        sessions = mgr._load_sessions()
-        old_time = (datetime.now(UTC) - timedelta(hours=48)).isoformat()
-        sessions["s_old"]["started"] = old_time
-        mgr._save_sessions(sessions)
-
-    # Verify session exists before checker runs
-    assert mgr.get_session("s_old") is not None
-
-    # Run the prune directly (simulating what the checker does every 10 cycles)
-    count = mgr.prune_closed()
-    assert count == 1
-    assert mgr.get_session("s_old") is None
-
-
-# ---- Bug fix: machine name validation ----
-
-
-def test_validate_machine_name_valid() -> None:
-    assert SSHManager._validate_machine_name("myserver") is None
-    assert SSHManager._validate_machine_name("web-01") is None
-    assert SSHManager._validate_machine_name("grid1.example.com") is None
-    assert SSHManager._validate_machine_name("a") is None
-
-
-def test_validate_machine_name_invalid() -> None:
-    assert SSHManager._validate_machine_name("../../etc/passwd") is not None
-    assert SSHManager._validate_machine_name("my server") is not None
-    assert SSHManager._validate_machine_name("test*") is not None
-    assert SSHManager._validate_machine_name("") is not None
-    assert SSHManager._validate_machine_name("a" * 65) is not None
-
-
-def test_add_machine_rejects_bad_name(tmp_path: Path) -> None:
+def test_add_machine_rejects_bad_name_and_unsafe_fields(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     with pytest.raises(ValueError, match=r"alphanumeric|invalid"):
         mgr.add_machine(Machine(name="../../etc", host="1.1.1.1"))
-
-
-def test_add_machine_rejects_unsafe_host_user_port_alias_and_key(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    bad_cases = [
+    for bad in [
         Machine(name="h1", host="bad host"),
         Machine(name="h2", host="-oProxyCommand=evil"),
         Machine(name="h3", host="1.1.1.1", user="root@evil"),
@@ -1092,115 +136,165 @@ def test_add_machine_rejects_unsafe_host_user_port_alias_and_key(tmp_path: Path)
         Machine(name="h5", host="1.1.1.1", port=65536),
         Machine(name="h6", host="1.1.1.1", aliases=["../../etc"]),
         Machine(name="h7", host="1.1.1.1", key="bad\x00key"),
-    ]
-    for machine in bad_cases:
+    ]:
         with pytest.raises(ValueError):
-            mgr.add_machine(machine)
+            mgr.add_machine(bad)
 
 
-# ---- Output file permissions ----
+# ---------------------------------------------------------------------------
+# session tracking
+# ---------------------------------------------------------------------------
 
 
-def test_maybe_save_output_permissions(tmp_path: Path) -> None:
-    """Output files saved to output_dir should be 0o600 (owner-only)."""
+def test_session_lifecycle(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    big_text = "x" * 100
-    _summary, path_str = mgr._maybe_save_output(big_text, 10, "test_session", "stdout")
-    assert path_str is not None
-    path = Path(path_str)
-    assert path.exists()
-    mode = path.stat().st_mode & 0o777
-    assert mode == 0o600, f"Expected 0o600, got octal {oct(mode)}"
-    path.unlink()
+    mgr.register_session(Session(id="s1", machine="host1", pid=100))
+    mgr.register_session(Session(id="s2", machine="host1", pid=200))
+    s = mgr.get_session("s1")
+    assert s is not None and s.started and s.last_active and s.status == "active"
+    mgr.touch_session("s1")
+    mgr.touch_session("s1")
+    assert mgr.get_session("s1").command_count == 2
+    mgr.close_session("s2")
+    assert set(mgr.list_sessions(status="")) == {"s1", "s2"}
+    assert set(mgr.list_sessions("closed")) == {"s2"}
+    mgr.remove_session("s2")
+    assert mgr.get_session("s2") is None
+    mgr.register_session(Session(id="s3", machine="host1", started="2026-01-01T00:00:00+00:00"))
+    assert mgr.get_session("s3").started == "2026-01-01T00:00:00+00:00"
 
 
-# ---- Bug fix: structure validation ----
+def _aged_sessions(mgr: Any, *rows: tuple[str, timedelta, str, str | None]) -> None:
+    """Seed age-sensitive sessions straight into the sessions blob.
+
+    Each row is (sid, age, status, started_override) — the blob write is a
+    single helper call, not a register-then-mutate dance through the manager.
+    """
+    from ssh_tools.helpers import read_json, write_json_atomic
+
+    path = mgr._config.sessions_file
+    blob = read_json(path, {"sessions": {}})
+    now = datetime.now(UTC)
+    blob["sessions"].update(
+        {
+            sid: {
+                "machine": "host1",
+                "pid": 101,
+                "started": started or (now - age).isoformat(),
+                "last_active": (now - age).isoformat(),
+                "status": status,
+            }
+            for sid, age, status, started in rows
+        }
+    )
+    write_json_atomic(path, blob)
 
 
-def test_load_machines_corrupt_structure(tmp_path: Path) -> None:
-    """Corrupt machines.json with wrong structure should not crash."""
+@pytest.mark.parametrize(
+    "age,expected",
+    [(timedelta(hours=1), 1), (timedelta(minutes=1), 0), (timedelta(minutes=30), 0)],
+)
+def test_cleanup_idle(tmp_path: Path, age: timedelta, expected: int) -> None:
     mgr = _make_manager(tmp_path)
-    mgr._config.machines_file.write_text(json.dumps({"machines": [1, 2, 3]}))
-    result = mgr._load_machines()
-    assert result == {}
+    _aged_sessions(mgr, ("s1", age, "active", None))
+    assert mgr.cleanup_idle(max_idle_minutes=30)["count"] == expected
 
 
-def test_load_sessions_corrupt_structure(tmp_path: Path) -> None:
-    """Corrupt sessions.json with wrong structure should not crash."""
-    mgr = _make_manager(tmp_path)
-    mgr._config.sessions_file.write_text(json.dumps({"sessions": "not a dict"}))
-    result = mgr._load_sessions()
-    assert result == {}
+def test_cleanup_idle_empty(tmp_path: Path) -> None:
+    assert _make_manager(tmp_path).cleanup_idle(max_idle_minutes=30) == {
+        "count": 0,
+        "killed": [],
+    }
 
 
-# ---- Bug fix: timeout type safety ----
-
-
-def test_run_command_timeout_type_coercion(tmp_path: Path) -> None:
-    """String timeout should be coerced to int, not crash."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        result = mgr.run_command("h", "echo ok", timeout="5")
-        assert result["success"] is True
-
-
-def test_run_command_zero_timeout_uses_default(tmp_path: Path) -> None:
-    """timeout=0 should fall back to default."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
-        result = mgr.run_command("h", "echo ok", timeout=0)
-        assert result["success"] is True
-
-
-def test_run_command_rejects_non_numeric_timeout(tmp_path: Path) -> None:
-    """Non-numeric timeout should return an error instead of crashing."""
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    result = mgr.run_command("h", "echo ok", timeout="abc")
-    assert result["success"] is False
-    assert "timeout" in result["error"]
-
-
-def test_run_command_clamps_max_output_chars(tmp_path: Path) -> None:
-    """Huge max_output_chars values are clamped server-side."""
+def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    big_stdout = "x" * 600_000
-    with patch("ssh_tools.manager.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout=big_stdout, stderr="")
-        result = mgr.run_command("h", "echo ok", max_output_chars=999_999_999)
-    assert result["success"] is True
-    assert len(result["stdout"]) < len(big_stdout)
-    assert "stdout_file" in result
+    _aged_sessions(
+        mgr, ("s1", timedelta(hours=1), "active", None), ("s2", timedelta(hours=1), "active", None)
+    )
+    with (
+        patch("ssh_tools.exec.time.sleep"),
+        patch("ssh_tools.exec.os.kill", side_effect=OSError("gone")),
+    ):
+        result = mgr.cleanup_idle(max_idle_minutes=30)
+    assert result["count"] == 2
+    assert all(mgr.get_session(s).status == "orphaned" for s in ("s1", "s2"))
 
 
-# ---- _close_sessions_batch cleans saved outputs ----
+def test_prune_closed_old(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    _aged_sessions(mgr, ("s1", timedelta(hours=48), "closed", None))
+    assert mgr.prune_closed(max_age_hours=24) == 1
+    _aged_sessions(mgr, ("s2", timedelta(0), "closed", "2020-01-01T00:00:00"))
+    assert mgr.prune_closed(max_age_hours=24) == 1  # naive datetime still prunes
+
+
+def test_prune_closed_keeps(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    _aged_sessions(
+        mgr,
+        ("fresh", timedelta(seconds=1), "closed", None),
+        ("active", timedelta(hours=48), "active", None),
+        ("bad", timedelta(0), "closed", "not-a-date"),
+    )
+    assert mgr.prune_closed(max_age_hours=24) == 0
+    assert set(mgr.list_sessions(status="")) == {"fresh", "active", "bad"}
+
+
+def test_prune_uses_config_default(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    _aged_sessions(mgr, ("old", timedelta(hours=48), "closed", None))
+    assert mgr.prune_closed() == 1  # config default 24h
+    assert mgr.get_session("old") is None
+
+
+# ---------------------------------------------------------------------------
+# json persistence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "filename,loader,blob",
+    [
+        ("machines_file", "list_machines", {"machines": [1, 2, 3]}),
+        ("sessions_file", "list_sessions", {"sessions": "not a dict"}),
+    ],
+)
+def test_load_corrupt_structure_resets(
+    tmp_path: Path, filename: str, loader: str, blob: dict
+) -> None:
+    mgr = _make_manager(tmp_path)
+    getattr(mgr._config, filename).write_text(json.dumps(blob))
+    assert getattr(mgr, loader)() == {}
+
+
+def test_json_helpers_roundtrip(tmp_path: Path) -> None:
+    from ssh_tools.helpers import read_json, write_json_atomic
+
+    corrupt = tmp_path / "machines.json"
+    corrupt.write_text("NOT JSON {{{")
+    assert read_json(corrupt, {"default": True}) == {"default": True}
+    assert read_json(tmp_path / "missing.json", {"fallback": True}) == {"fallback": True}
+    target = tmp_path / "test.json"
+    write_json_atomic(target, {"key": "value"})
+    assert json.loads(target.read_text()) == {"key": "value"}
+    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_close_sessions_batch_cleans_output_dir(tmp_path: Path) -> None:
-    """Batch-closed sessions should have their saved output files cleaned."""
     mgr = _make_manager(tmp_path)
-    fake_file = mgr._config.output_dir / "ssh_output_test_batch_stdout.txt"
-    fake_file.write_text("test")
+    fake = mgr._config.output_dir / "ssh_output_test_batch_stdout.txt"
+    fake.write_text("test")
     try:
-        mgr._close_sessions_batch(["test_batch"])
-        assert not fake_file.exists()
+        mgr.close_session("test_batch")
+        assert not fake.exists()
     finally:
         with contextlib.suppress(OSError):
-            fake_file.unlink()
-
-
-# ---- Bug fix: startup temp cleanup ----
+            fake.unlink()
 
 
 def test_ensure_dirs_cleans_orphaned_tmp(tmp_path: Path) -> None:
-    """ensure_dirs should clean orphaned .tmp files from data_dir."""
-    from ssh_tools.config import SSHConfig
-
     config = SSHConfig(data_dir=tmp_path)
     (tmp_path / "machines_abc.tmp").write_text("old")
     (tmp_path / "sessions_def.tmp").write_text("old")
@@ -1209,127 +303,191 @@ def test_ensure_dirs_cleans_orphaned_tmp(tmp_path: Path) -> None:
     assert not (tmp_path / "sessions_def.tmp").exists()
 
 
-# ---- Bug fix: prune_closed handles naive datetime ----
+# ---------------------------------------------------------------------------
+# ssh execution
+# ---------------------------------------------------------------------------
 
 
-def test_prune_closed_naive_datetime(tmp_path: Path) -> None:
-    """Sessions with naive timestamps should be pruned, not skipped."""
+def test_run_command_validation(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    missing = mgr.run_command("nope", "echo hi")
+    assert missing["success"] is False and "not found" in missing["error"]
+    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
+    assert mgr.run_command("h", "", timeout=30)["success"] is False
+
+
+def _h(tmp_path: Path) -> Any:
+    """Manager with a registered host h at 1.1.1.1."""
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    sessions = {
-        "s_naive": {
-            "id": "s_naive",
-            "machine": "h",
-            "status": "closed",
-            "started": "2020-01-01T00:00:00",
-            "last_active": "2020-01-01T00:00:00",
-            "command_count": 0,
-        }
-    }
-    mgr._write_json(mgr._config.sessions_file, {"sessions": sessions})
-    count = mgr.prune_closed(max_age_hours=1)
-    assert count == 1
+    return mgr
 
 
-# ---- Bug fix: background session registration order ----
+def test_build_ssh_args(tmp_path: Path) -> None:
+    from ssh_tools.exec import build_ssh_args
 
-
-def test_background_session_registered_before_process(tmp_path: Path) -> None:
-    """Session should be in JSON before process is in _processes dict."""
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.Popen") as mock_popen:
-        proc = MagicMock()
-        proc.pid = 99999
-        mock_popen.return_value = proc
-        result = mgr.run_command("h", "sleep 99", background=True)
-        sid = result["session_id"]
-        session = mgr.get_session(sid)
-        assert session is not None
-        assert session.pid == 99999
-        assert sid in mgr._processes
+    machine = Machine(name="h", host="10.0.0.1", user="admin", port=2222, key="~/.ssh/test")
+    args = build_ssh_args(mgr.config, machine, "uptime", "/tmp/c.sock", timeout=30)
+    assert args[0] == "ssh" and "2222" in args and "~/.ssh/test" in args
+    assert "ControlMaster=auto" in args and "admin@10.0.0.1" in args
+    assert "bash" in args and "pipefail" in args[-1] and "uptime" in args[-1]
+    assert "ConnectTimeout=10" in args  # min(30, 10)
+    bare = build_ssh_args(mgr.config, Machine(name="h", host="10.0.0.1"), "uptime")
+    assert "ControlMaster" not in str(bare) and "-i" not in bare
 
 
-def test_background_process_uses_spool_files(tmp_path: Path) -> None:
+def _ran(mgr: Any, *args: Any, stdout: str = "ok", code: int = 0, **kw: Any) -> dict:
+    """One sync run under a faked subprocess.run; asserts no session leaked."""
+    with patch("ssh_tools.exec.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=code, stdout=stdout, stderr="")
+        result = mgr.run_command(*args, **kw)
+    assert mgr.list_sessions("active") == {}
+    return result
+
+
+def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    assert _ran(mgr, "h", "echo ok")["success"] is True
+    for good in ("5", 0, -1):  # strings coerce; <=0 falls back to the default
+        assert _ran(mgr, "h", "echo ok", timeout=good)["success"] is True
+    bad = _ran(mgr, "h", "echo ok", timeout="abc")
+    assert bad["success"] is False and "timeout" in bad["error"]
+    bool_bad = _ran(mgr, "h", "echo ok", timeout=True)
+    assert bool_bad["success"] is False and "positive integer" in bool_bad["error"]
+
+
+def test_run_command_clamps_output(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    result = _ran(mgr, "h", "echo ok", stdout="x" * 600_000)
+    assert len(result["stdout"]) < 600_000 and "stdout_file" in result
+    clamped = _ran(mgr, "h", "echo ok", stdout="y" * 100)
+    assert clamped["stdout"] == "y" * 100  # under the clamp, stays inline
+
+
+@pytest.mark.parametrize("text,limit", [("hello", 100), ("x" * 100, 10)])
+def test_maybe_save_output(tmp_path: Path, text: str, limit: int) -> None:
     mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc) as popen:
-        result = mgr.run_command("h", "verbose command", background=True)
-    assert popen.call_args.kwargs["stdout"] is not subprocess.PIPE
-    assert popen.call_args.kwargs["stderr"] is not subprocess.PIPE
-    assert result["session_id"] in mgr._background_outputs
+    summary, path = mgr._exec._maybe_save_output(text, limit, "s1", "stdout")
+    if len(text) <= limit:
+        assert (summary, path) == (text, None)
+    else:
+        assert path is not None and "output saved to" in summary
+        assert (Path(path).stat().st_mode & 0o777) == 0o600
+        Path(path).unlink()
 
 
-def test_background_large_output_file_survives_poll(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        started = mgr.run_command("h", "verbose command", background=True, max_output_chars=10)
-    sid = started["session_id"]
-    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
-    stdout_path.write_text("x" * 100)
-    stderr_path.write_text("")
-    fake_proc.poll.return_value = 0
-    fake_proc.returncode = 0
+def test_output_sizes_inline_vs_file(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    with patch("ssh_tools.exec.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="x" * 1000, stderr="y" * 1000)
+        result = mgr.run_command("h", "cmd", max_output_chars=100)
+    assert "output saved to" in result["stdout"]
+    assert result["stdout_file"].endswith("_stdout.txt")
+    assert Path(result["stdout_file"]).read_text() == "x" * 1000
+    short = _ran(mgr, "h", "echo hi", stdout="hi\n")
+    assert short["stdout"] == "hi\n" and "stdout_file" not in short
+
+
+# ---------------------------------------------------------------------------
+# background processes
+# ---------------------------------------------------------------------------
+
+
+def _fake_running_popen() -> MagicMock:
+    return MagicMock(
+        pid=12345,
+        stdout=MagicMock(),
+        stderr=MagicMock(),
+        returncode=None,
+        **{"poll.return_value": None},
+    )
+
+
+def _bg(tmp_path: Path, cmd: str = "cmd", **kw: Any) -> tuple[Any, str, Any]:
+    """Start a faked bg command; returns (mgr, session_id, proc)."""
+    mgr = _h(tmp_path)
+    proc = _fake_running_popen()
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=proc):
+        started = mgr.run_command("h", cmd, background=True, **kw)
+    return mgr, started["session_id"], proc
+
+
+def test_run_command_background(tmp_path: Path) -> None:
+    mgr, sid, proc = _bg(tmp_path, "long command")
+    assert proc.pid == 12345 and mgr.get_session(sid).pid == 12345
+    assert mgr.poll_session(sid)["running"] is True
+    assert sid.startswith("ssh_h_")  # session ids carry the machine name
+
+
+def test_background_uses_spool_files_not_pipes(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()) as popen:
+        started = mgr.run_command("h", "verbose", background=True)
+    assert started["success"] is True
+    kwargs = popen.call_args.kwargs
+    assert kwargs["stdout"] is not subprocess.PIPE and kwargs["stderr"] is not subprocess.PIPE
+
+
+@pytest.mark.parametrize(
+    "exit_code,stream,expected",
+    [(0, "stdout", "hello world\n"), (1, "stderr", "command failed\n")],
+)
+def test_poll_finished(tmp_path: Path, exit_code: int, stream: str, expected: str) -> None:
+    mgr, sid, proc = _bg(tmp_path)
+    proc.poll.return_value = exit_code
+    proc.stdout.read.return_value = b"hello world\n" if exit_code == 0 else b""
+    proc.stderr.read.return_value = b"" if exit_code == 0 else b"command failed\n"
     result = mgr.poll_session(sid)
+    assert result["success"] is (exit_code == 0)
     assert result["running"] is False
-    assert Path(result["stdout_file"]).exists()
-    assert Path(result["stdout_file"]).read_text() == "x" * 100
-    assert not stderr_path.exists()
+    assert result[stream] == expected and mgr.get_session(sid).status == "closed"
+    assert mgr.poll_session(sid)["success"] is False  # collected once
 
 
-def test_background_short_output_spool_is_removed(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    fake_proc = _fake_running_popen()
-    with patch("ssh_tools.manager.subprocess.Popen", return_value=fake_proc):
-        started = mgr.run_command("h", "small command", background=True)
-    sid = started["session_id"]
-    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
-    stdout_path.write_text("done")
-    stderr_path.write_text("")
-    fake_proc.poll.return_value = 0
-    fake_proc.returncode = 0
-    result = mgr.poll_session(sid)
-    assert result["stdout"] == "done"
-    assert "stdout_file" not in result
-    assert not stdout_path.exists()
-    assert not stderr_path.exists()
+def test_poll_and_read_errors(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()):
+        sid = mgr.run_command("h", "sleep", background=True)["session_id"]
+    assert "No background process" in mgr.poll_session("nope")["error"]
+    assert "No background process" in mgr.read_output("nope")["error"]
+    assert mgr.poll_session(sid)["running"] is True
+    running = mgr.read_output(sid)
+    assert running["success"] is False and "still running" in running["error"]
 
 
-def test_audit_log_redacts_common_inline_secrets(tmp_path: Path) -> None:
-    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", "TOKEN=super-secret deploy --password hunter2")
-    entry = mgr.list_command_log()[-1]
-    assert "super-secret" not in entry["command"]
-    assert "hunter2" not in entry["command"]
-    assert "<redacted>" in entry["command"]
-    assert len(entry["command_sha256"]) == 64
+def test_audit_log_modes(tmp_path: Path) -> None:
+    mgr = _h(tmp_path)
+    _ran(mgr, "h", "echo 1")
+    _ran(mgr, "h", "echo 2")
+    entries = mgr.list_command_log()
+    assert entries[-2]["command"] == "echo 1" and entries[-1]["command"] == "echo 2"
+    assert {"timestamp", "elapsed_secs", "session_id"} <= entries[-1].keys()
+    assert len(mgr.list_command_log(limit=1)) == 1
+    assert _make_manager(tmp_path / "fresh").list_command_log() == []
+    with patch("ssh_tools.exec.subprocess.Popen", return_value=_fake_running_popen()):
+        mgr.run_command("h", "bg cmd", background=True)
+    assert mgr.list_command_log()[-1]["exit_code"] is None
 
 
-def test_audit_log_metadata_mode_omits_command(tmp_path: Path) -> None:
-    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", "echo private")
-    entry = mgr.list_command_log()[-1]
-    assert "command" not in entry
-    assert entry["command_length"] == len("echo private")
-
-
-def test_audit_log_can_be_disabled(tmp_path: Path) -> None:
-    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="off"))
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", "echo private")
-    assert not (tmp_path / "command_log.jsonl").exists()
+def test_audit_redaction_and_metadata(tmp_path: Path) -> None:
+    redacted = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
+    redacted.add_machine(Machine(name="h", host="1.1.1.1"))
+    _ran(redacted, "h", "TOKEN=super-secret deploy --password hunter2")
+    entry = redacted.list_command_log()[-1]
+    assert "super-secret" not in entry["command"] and "hunter2" not in entry["command"]
+    assert "<redacted>" in entry["command"] and len(entry["command_sha256"]) == 64
+    meta = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
+    _ran(meta, "h", "GITHUB_TOKEN=short deploy")
+    _ran(meta, "h", "GITHUB_TOKEN=a-much-longer-secret deploy")
+    first, second = meta.list_command_log(limit=2)
+    assert "command" not in first
+    assert first["command_length"] == second["command_length"]
+    assert first["command_sha256"] == second["command_sha256"]
+    off = SSHManager(SSHConfig(data_dir=tmp_path / "off", audit_log_mode="off"))
+    off.add_machine(Machine(name="h", host="1.1.1.1"))
+    _ran(off, "h", "echo private")
+    assert not (tmp_path / "off" / "command_log.jsonl").exists()
 
 
 @pytest.mark.parametrize(
@@ -1338,27 +496,100 @@ def test_audit_log_can_be_disabled(tmp_path: Path) -> None:
         ("GITHUB_TOKEN=ghp_leak deploy", "ghp_leak"),
         ("AWS_SECRET_ACCESS_KEY='secret with spaces' deploy", "secret with spaces"),
         ('tool --api-key "flag secret value"', "flag secret value"),
-        ('curl -H "Authorization: Bearer bearer-leak" https://example.com', "bearer-leak"),
-        ('curl -H "X-Api-Key: header-leak" https://example.com', "header-leak"),
+        ('curl -H "Authorization: Bearer ***" https://example.com', "bearer-leak"),
+        ('curl -H "X-Api-Key: *** https://example.com', "header-leak"),
         ("curl https://user:url-password@example.com", "url-password"),
     ],
 )
-def test_redact_command_handles_prefixed_and_quoted_secrets(command: str, secret: str) -> None:
-    from ssh_tools.manager import _redact_command
+def test_redact_command(command: str, secret: str) -> None:
+    from ssh_tools.audit import redact_command
 
-    redacted = _redact_command(command)
-    assert secret not in redacted
-    assert "<redacted>" in redacted
+    redacted = redact_command(command)
+    assert secret not in redacted and "<redacted>" in redacted
 
 
-def test_audit_hash_is_based_on_redacted_command(tmp_path: Path) -> None:
-    mgr = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
-    mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.manager.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", "GITHUB_TOKEN=short deploy")
-        mgr.run_command("h", "GITHUB_TOKEN=a-much-longer-secret deploy")
+# ---------------------------------------------------------------------------
+# kill_session
+# ---------------------------------------------------------------------------
 
-    first, second = mgr.list_command_log(limit=2)
-    assert first["command_sha256"] == second["command_sha256"]
-    assert first["command_length"] == second["command_length"]
+
+def _tracked_session(tmp_path: Path, sid: str = "s1", status: int | None = None) -> Any:
+    mgr = _make_manager(tmp_path)
+    mgr.register_session(Session(id=sid, machine="h", pid=99999))
+    proc = MagicMock(pid=99999)
+    proc.poll.return_value = status
+    mgr._exec._processes[sid] = proc
+    return mgr
+
+
+@pytest.mark.parametrize(
+    "tracked,success,fragment",
+    [(True, True, "pid_killed"), (False, False, "orphaned")],
+)
+def test_kill_session_tracked_vs_untracked(
+    tmp_path: Path, tracked: bool, success: bool, fragment: str
+) -> None:
+    """Tracked procs get SIGTERM; untracked pids are never signalled (orphaned)."""
+    mgr = _tracked_session(tmp_path) if tracked else _make_manager(tmp_path)
+    if not tracked:
+        mgr.register_session(Session(id="s1", machine="h", pid=99999))
+    with patch("ssh_tools.exec.os.killpg") as mock_killpg:
+        result = mgr.kill_session("s1")
+    assert result["success"] is success and fragment in json.dumps(result)
+    if tracked:
+        mock_killpg.assert_called_once_with(99999, signal.SIGTERM)
+        assert mgr.get_session("s1").status == "closed"
+    else:
+        mock_killpg.assert_not_called()
+        assert mgr.get_session("s1").status == "orphaned"
+
+
+def test_kill_session_socket_and_missing(tmp_path: Path) -> None:
+    mgr = _tracked_session(tmp_path, status=0)
+    with patch("ssh_tools.exec.subprocess.run") as mock_sub:
+        result = mgr.kill_session("s1")
+    assert result["success"] is True and result["socket_closed"] is False
+    mock_sub.assert_not_called()
+    mgr.register_session(Session(id="s2", machine="h", pid=0, control_path="/nonexistent.sock"))
+    dead = mgr.kill_session("s2")
+    assert dead["success"] is False and dead["status"] == "orphaned"
+    assert "not found" in mgr.kill_session("nope")["error"]
+
+
+# ---------------------------------------------------------------------------
+# idle checker
+# ---------------------------------------------------------------------------
+
+
+def test_idle_checker_lifecycle(tmp_path: Path) -> None:
+    mgr = _make_manager(tmp_path)
+    assert not mgr._checker_event.is_set()
+    mgr.start_idle_checker()
+    thread1 = mgr._checker_thread
+    assert thread1 is not None and thread1.is_alive()
+    mgr.start_idle_checker()  # no-op
+    assert mgr._checker_thread is thread1
+    mgr.stop_idle_checker()
+    assert mgr._checker_event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# background spool lifecycle
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("large", [True, False])
+def test_spool_lifecycle(tmp_path: Path, large: bool) -> None:
+    """Large bg output keeps its spool file; short output deletes both spools."""
+    mgr, sid, proc = _bg(tmp_path, "command", max_output_chars=10 if large else 50_000)
+    stdout_path, stderr_path, _ = mgr._exec._outputs[sid]
+    stdout_path.write_text("x" * 100 if large else "done")
+    stderr_path.write_text("")
+    proc.poll.return_value = proc.returncode = 0
+    result = mgr.poll_session(sid)
+    if large:
+        assert Path(result["stdout_file"]).read_text() == "x" * 100
+        assert not stderr_path.exists()
+    else:
+        assert result["stdout"] == "done" and "stdout_file" not in result
+        assert not stdout_path.exists() and not stderr_path.exists()

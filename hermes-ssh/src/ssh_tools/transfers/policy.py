@@ -12,6 +12,7 @@ import stat
 import uuid
 from pathlib import Path, PurePosixPath
 
+from ..helpers import coerce_int
 from .models import LocalSource, TransferValidationError
 
 MAX_TIMEOUT = 3600
@@ -57,15 +58,10 @@ _WRITE_DENIED_PREFIXES = tuple(
 def normalise_timeout(value: object | None) -> int:
     if value is None:
         return 300
-    if isinstance(value, bool):
-        raise TransferValidationError("timeout must be an integer from 1 to 3600")
     try:
-        timeout = int(value) if isinstance(value, str) else value
+        return coerce_int(value, "timeout", minimum=1, maximum=MAX_TIMEOUT)
     except ValueError as exc:
         raise TransferValidationError("timeout must be an integer from 1 to 3600") from exc
-    if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT:
-        raise TransferValidationError("timeout must be an integer from 1 to 3600")
-    return timeout
 
 
 def path_text(value: object, label: str) -> str:
@@ -99,14 +95,18 @@ def _is_env_file(name: str) -> bool:
     return lowered == ".env" or lowered == ".envrc" or lowered.startswith(".env.")
 
 
+_CREDENTIAL_DIRS = frozenset({"mcp-tokens", "pairing"})
+_GH_CONFIG = frozenset({"gh", "gcloud"})
+
+
 def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
     folded = tuple(part.casefold() for part in parts)
-    if set(folded).intersection(_SENSITIVE_PARTS):
-        return "credential directory"
-    for index, part in enumerate(folded[:-1]):
-        if part == ".config" and folded[index + 1] in {"gh", "gcloud"}:
-            return "credential directory"
-    if set(folded).intersection({"mcp-tokens", "pairing"}):
+    credential_dir = set(folded).intersection(_SENSITIVE_PARTS | _CREDENTIAL_DIRS)
+    config_dir = any(
+        part == ".config" and folded[index + 1] in _GH_CONFIG
+        for index, part in enumerate(folded[:-1])
+    )
+    if credential_dir or config_dir:
         return "credential directory"
     lowered = name.casefold()
     if lowered in _SENSITIVE_NAMES or _is_env_file(lowered):
@@ -130,26 +130,23 @@ def remote_sensitive_reason(path: str) -> str | None:
     return None
 
 
-def _hermes_read_denied(path: Path) -> bool:
+def _hermes_check(path: Path, checker: str) -> bool:
     try:
         module = importlib.import_module("agent.file_safety")
-        checker = getattr(module, "get_read_block_error", None)
-        return bool(checker(str(path))) if callable(checker) else False
+        func = getattr(module, checker, None)
+        return bool(func(str(path))) if callable(func) else False
     except ImportError:
         return False
     except Exception:
         return True
+
+
+def _hermes_read_denied(path: Path) -> bool:
+    return _hermes_check(path, "get_read_block_error")
 
 
 def _hermes_write_denied(path: Path) -> bool:
-    try:
-        module = importlib.import_module("agent.file_safety")
-        checker = getattr(module, "is_write_denied", None)
-        return bool(checker(str(path))) if callable(checker) else False
-    except ImportError:
-        return False
-    except Exception:
-        return True
+    return _hermes_check(path, "is_write_denied")
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -167,30 +164,8 @@ def download_denied_reason(path: Path) -> str | None:
     return None
 
 
-def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
-    source = Path(value).expanduser()
-    if source.is_symlink():
-        raise TransferValidationError("upload source must not be a symbolic link")
-    try:
-        source = source.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise TransferValidationError(f"upload source does not exist: {value}") from exc
-    if _GLOB_RE.search(str(source)):
-        raise TransferValidationError("upload source must not contain wildcard characters")
-    reason = local_sensitive_reason(source)
-    if reason:
-        raise TransferValidationError(f"upload source is blocked because it is a {reason}")
-    if _hermes_read_denied(source):
-        raise TransferValidationError("upload source is blocked by Hermes read policy")
-
-    mode = source.stat().st_mode
-    if stat.S_ISREG(mode):
-        return LocalSource(source, False, source.stat().st_size)
-    if not stat.S_ISDIR(mode):
-        raise TransferValidationError("upload source must be a regular file or directory")
-    if not recursive:
-        raise TransferValidationError("recursive=true is required to upload a directory")
-
+def _scan_tree(source: Path) -> int:
+    """Walk a recursive-upload tree: total byte size, or raise on unsafe entries."""
     size = 0
     entries = 0
     for root, directories, files in os.walk(source, followlinks=False):
@@ -222,7 +197,33 @@ def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
                 raise TransferValidationError(
                     f"recursive upload contains a special file: {relative}"
                 )
-    return LocalSource(source, True, size)
+    return size
+
+
+def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
+    source = Path(value).expanduser()
+    if source.is_symlink():
+        raise TransferValidationError("upload source must not be a symbolic link")
+    try:
+        source = source.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise TransferValidationError(f"upload source does not exist: {value}") from exc
+    if _GLOB_RE.search(str(source)):
+        raise TransferValidationError("upload source must not contain wildcard characters")
+    reason = local_sensitive_reason(source)
+    if reason:
+        raise TransferValidationError(f"upload source is blocked because it is a {reason}")
+    if _hermes_read_denied(source):
+        raise TransferValidationError("upload source is blocked by Hermes read policy")
+
+    mode = source.stat().st_mode
+    if stat.S_ISREG(mode):
+        return LocalSource(source, False, source.stat().st_size)
+    if not stat.S_ISDIR(mode):
+        raise TransferValidationError("upload source must be a regular file or directory")
+    if not recursive:
+        raise TransferValidationError("recursive=true is required to upload a directory")
+    return LocalSource(source, True, _scan_tree(source))
 
 
 def prepare_download_destination(value: str) -> Path:

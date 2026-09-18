@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING
 
+from ..config import SSHConfig
+from ..models import Machine
 from .models import TransferAction, TransferRequest
-
-if TYPE_CHECKING:
-    from ..manager import SSHManager
-    from ..models import Machine
 
 
 def sftp_quote(path: str) -> str:
@@ -18,33 +15,38 @@ def sftp_quote(path: str) -> str:
     return f'"{escaped}"'
 
 
-def sftp_target(machine: Machine) -> str:
-    host = f"[{machine.host}]" if ":" in machine.host else machine.host
-    return f"{machine.user}@{host}"
-
-
-def sftp_args(machine: Machine, manager: SSHManager, timeout: int) -> list[str]:
-    config = manager.config
-    control_path = config.socket_dir / f"{machine.name}.sock"
-    args = [
-        "sftp",
-        "-b",
-        "-",
+def ssh_options(config: SSHConfig, timeout: int, control_path: str | None) -> list[str]:
+    """Shared OpenSSH -o flags: connect timeout, host-key policy, batch mode, mux."""
+    opts = [
         "-o",
         f"ConnectTimeout={min(timeout, 10)}",
         "-o",
         f"StrictHostKeyChecking={config.strict_host_key_checking}",
         "-o",
         "BatchMode=yes",
-        "-o",
-        "ControlMaster=auto",
-        "-o",
-        f"ControlPath={control_path}",
-        "-o",
-        "ControlPersist=300",
-        "-P",
-        str(machine.port),
     ]
+    if control_path:
+        opts += [
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={control_path}",
+            "-o",
+            "ControlPersist=300",
+        ]
+    return opts
+
+
+def sftp_target(machine: Machine) -> str:
+    host = f"[{machine.host}]" if ":" in machine.host else machine.host
+    return f"{machine.user}@{host}"
+
+
+def sftp_args(machine: Machine, config: SSHConfig, timeout: int) -> list[str]:
+    control_path = str(config.socket_dir / f"{machine.name}.sock")
+    args = ["sftp", "-b", "-"]
+    args += ssh_options(config, timeout, control_path)
+    args += ["-P", str(machine.port)]
     if machine.key:
         args.extend(["-i", machine.key])
     args.append(sftp_target(machine))
@@ -67,29 +69,24 @@ def sftp_batch(
     return f"{command}{option} {first} {second}\n"
 
 
-class SFTPTransport:
-    """Runs one bounded OpenSSH SFTP batch operation."""
-
-    def __init__(self, manager: SSHManager) -> None:
-        self.manager = manager
-
-    def run(
-        self,
-        machine: Machine,
-        request: TransferRequest,
-        local_path: Path,
-        remote_path: str,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            sftp_args(machine, self.manager, request.timeout),
-            input=sftp_batch(
-                request.action,
-                local_path,
-                remote_path,
-                request.recursive,
-                request.preserve,
-            ),
-            capture_output=True,
-            text=True,
-            timeout=request.timeout,
-        )
+def run_sftp(
+    machine: Machine,
+    config: SSHConfig,
+    request: TransferRequest,
+    local_path: Path,
+    remote_path: str,
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded OpenSSH SFTP batch operation."""
+    return subprocess.run(
+        sftp_args(machine, config, request.timeout),
+        input=sftp_batch(
+            request.action,
+            local_path,
+            remote_path,
+            request.recursive,
+            request.preserve,
+        ),
+        capture_output=True,
+        text=True,
+        timeout=request.timeout,
+    )

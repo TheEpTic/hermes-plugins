@@ -5,7 +5,6 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -13,8 +12,11 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
+from ..audit import effective_mode, redact_local_path
+from ..helpers import append_jsonl
+from ..models import Machine
 from .models import RemoteKind, TransferRequest, TransferValidationError
 from .policy import (
     cleanup_local,
@@ -27,13 +29,10 @@ from .policy import (
     remote_shell_path,
     remote_temp,
 )
-from .transport import SFTPTransport
+from .transport import run_sftp
 
 if TYPE_CHECKING:
     from ..manager import SSHManager
-    from ..models import Machine
-
-_AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
 
 
 def _renameat2_no_replace(temporary: Path, destination: Path) -> None:
@@ -80,12 +79,19 @@ def _move_local_no_replace(temporary: Path, destination: Path) -> None:
     )
 
 
+def _install_local(temporary: Path, destination: Path, overwrite: bool) -> None:
+    """Install a staged download: replace, or atomically refuse an existing target."""
+    if overwrite:
+        os.replace(temporary, destination)
+    else:
+        _move_local_no_replace(temporary, destination)
+
+
 class TransferService:
     """Coordinates policy, OpenSSH transport, finalisation, and audit events."""
 
     def __init__(self, manager: SSHManager) -> None:
         self.manager = manager
-        self.transport = SFTPTransport(manager)
 
     def execute(self, request: TransferRequest) -> dict[str, Any]:
         machine = self.manager.get_machine(request.machine_name)
@@ -100,6 +106,15 @@ class TransferService:
             return self._upload(request, machine)
         return self._download(request, machine)
 
+    def _run_remote(self, machine: str, command: str, timeout: int, cap: int) -> dict[str, Any]:
+        """Run a probe/scan shell snippet with bounded timeout and output."""
+        return self.manager.run_command(
+            machine,
+            command,
+            timeout=min(timeout, cap),
+            max_output_chars=2_000,
+        )
+
     def _probe(
         self,
         machine: str,
@@ -113,12 +128,7 @@ class TransferService:
             f"elif [ -d {target} ]; then exit 3; "
             f"elif [ -e {target} ]; then exit 5; else exit 6; fi"
         )
-        result = self.manager.run_command(
-            machine,
-            command,
-            timeout=min(timeout, 30),
-            max_output_chars=2_000,
-        )
+        result = self._run_remote(machine, command, timeout, 30)
         kinds: dict[int, RemoteKind] = {
             0: "file",
             3: "directory",
@@ -157,12 +167,7 @@ class TransferService:
             "if [ $status -ne 0 ]; then exit 9; "
             'elif [ -n "$entry" ]; then printf "%s" "$entry"; exit 7; else exit 0; fi'
         )
-        result = self.manager.run_command(
-            machine,
-            command,
-            timeout=min(timeout, 60),
-            max_output_chars=2_000,
-        )
+        result = self._run_remote(machine, command, timeout, 60)
         if result.get("exit_code") == 0:
             return False, None
         if result.get("exit_code") == 7:
@@ -170,14 +175,49 @@ class TransferService:
         error = result.get("error") or result.get("stderr") or "remote scan failed"
         return None, str(error)
 
-    def _run_sftp(
+    def _scan_error(
+        self, machine: str, source: str, timeout: int, is_directory: bool
+    ) -> str | None:
+        """Refusal message for a scanned remote directory, or None when safe/unscanned."""
+        if not is_directory:
+            return None
+        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
+        if has_unsafe_entry:
+            return (
+                "remote directory contains a symbolic link or credential path; "
+                "refusing recursive download"
+            )
+        if scan_error:
+            return f"Could not safely scan remote directory: {scan_error}"
+        return None
+
+    @staticmethod
+    def _download_kind_error(kind: RemoteKind | None) -> str | None:
+        """Refusal message for non-downloadable remote kinds, or None if probeable."""
+        errors: dict[str | None, str] = {
+            "missing": "remote source does not exist",
+            "symlink": "remote source must not be a symbolic link",
+            "special": "remote source must be a regular file or directory",
+        }
+        return errors.get(kind)
+
+    def _sftp_or_error(
         self,
         machine: Machine,
         request: TransferRequest,
         local_path: Path,
         remote_path_value: str,
-    ) -> subprocess.CompletedProcess[str]:
-        return self.transport.run(machine, request, local_path, remote_path_value)
+        fail: Callable[[int, str], dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Run the sftp batch; audited error dict on failure, None on success."""
+        try:
+            result = run_sftp(machine, self.manager.config, request, local_path, remote_path_value)
+        except subprocess.TimeoutExpired:
+            return fail(-1, "Transfer timed out")
+        if result.returncode:
+            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
+            return fail(result.returncode, message)
+        return None
 
     def _cleanup_remote(
         self,
@@ -191,25 +231,6 @@ class TransferService:
             timeout=min(timeout, 30),
             max_output_chars=1_000,
         )
-
-    def _validate_remote_directory(
-        self,
-        machine: str,
-        source: str,
-        timeout: int,
-        is_directory: bool,
-    ) -> str | None:
-        if not is_directory:
-            return None
-        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
-        if has_unsafe_entry:
-            return (
-                "remote directory contains a symbolic link or credential path; "
-                "refusing recursive download"
-            )
-        if scan_error:
-            return f"Could not safely scan remote directory: {scan_error}"
-        return None
 
     @staticmethod
     def _validate_download_destination(
@@ -241,25 +262,9 @@ class TransferService:
             f"{request.destination.rstrip('/')}/{temporary_name}"
         )
         expected = f"[ -d {destination_arg} ]" if is_directory else f"[ -f {destination_arg} ]"
-        can_replace = request.overwrite and not is_directory
-        if can_replace:
-            precondition = (
-                f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
-                f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; "
-            )
-            move_command = f"mv -f -- {temporary_arg} {destination_arg} || exit $?; "
-            no_clobber_check = ""
-        else:
-            precondition = (
-                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
-            )
-            move_command = f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; "
-            no_clobber_check = (
-                f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
-                f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
-                "exit $move_status; fi; "
-                "if [ $move_status -ne 0 ]; then exit $move_status; fi; "
-            )
+        precondition, move_command, no_clobber_check = self._move_fragments(
+            temporary_arg, destination_arg, request.overwrite and not is_directory
+        )
         command = (
             f"{precondition}{move_command}{no_clobber_check}"
             f"if {expected} && [ ! -L {destination_arg} ] && "
@@ -271,6 +276,27 @@ class TransferService:
             command,
             timeout=min(request.timeout, 60),
             max_output_chars=2_000,
+        )
+
+    @staticmethod
+    def _move_fragments(
+        temporary_arg: str, destination_arg: str, can_replace: bool
+    ) -> tuple[str, str, str]:
+        """Shell fragments for the upload finalise: overwrite uses mv -f, else mv -n."""
+        if can_replace:
+            return (
+                f"if [ -L {destination_arg} ] || [ -d {destination_arg} ]; then exit 4; fi; "
+                f"if [ -e {destination_arg} ] && [ ! -f {destination_arg} ]; then exit 4; fi; ",
+                f"mv -f -- {temporary_arg} {destination_arg} || exit $?; ",
+                "",
+            )
+        return (
+            f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; ",
+            f"mv -n -- {temporary_arg} {destination_arg}; move_status=$?; ",
+            f"if [ -e {temporary_arg} ] || [ -L {temporary_arg} ]; then "
+            f"if [ -e {destination_arg} ] || [ -L {destination_arg} ]; then exit 3; fi; "
+            "exit $move_status; fi; "
+            "if [ $move_status -ne 0 ]; then exit $move_status; fi; ",
         )
 
     @staticmethod
@@ -324,31 +350,16 @@ class TransferService:
 
         started = time.monotonic()
         temporary = remote_temp(destination)
-        try:
-            result = self._run_sftp(machine, request, local.path, temporary)
-        except subprocess.TimeoutExpired:
+
+        def fail(code: int, message: str) -> dict[str, Any]:
             self._cleanup_remote(machine.name, temporary, request.timeout)
             return self._audited_error(
-                request,
-                machine.name,
-                local.path,
-                destination,
-                started,
-                -1,
-                "Transfer timed out",
+                request, machine.name, local.path, destination, started, code, message
             )
-        if result.returncode:
-            self._cleanup_remote(machine.name, temporary, request.timeout)
-            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
-            return self._audited_error(
-                request,
-                machine.name,
-                local.path,
-                destination,
-                started,
-                result.returncode,
-                message,
-            )
+
+        failed = self._sftp_or_error(machine, request, local.path, temporary, fail)
+        if failed is not None:
+            return failed
 
         finalise = self._finalise_upload(
             request,
@@ -392,12 +403,9 @@ class TransferService:
         kind, error = self._probe(machine.name, source, request.timeout)
         if error:
             return self._error(machine.name, f"Could not inspect remote source: {error}")
-        if kind == "missing":
-            return self._error(machine.name, "remote source does not exist")
-        if kind == "symlink":
-            return self._error(machine.name, "remote source must not be a symbolic link")
-        if kind == "special":
-            return self._error(machine.name, "remote source must be a regular file or directory")
+        kind_error = self._download_kind_error(kind)
+        if kind_error:
+            return self._error(machine.name, kind_error)
 
         is_directory = kind == "directory"
         if is_directory and not request.recursive:
@@ -405,14 +413,9 @@ class TransferService:
                 machine.name,
                 "recursive=true is required to download a directory",
             )
-        directory_error = self._validate_remote_directory(
-            machine.name,
-            source,
-            request.timeout,
-            is_directory,
-        )
-        if directory_error:
-            return self._error(machine.name, directory_error)
+        scan_error = self._scan_error(machine.name, source, request.timeout, is_directory)
+        if scan_error:
+            return self._error(machine.name, scan_error)
 
         destination_error = self._validate_download_destination(
             destination,
@@ -434,46 +437,23 @@ class TransferService:
         started = time.monotonic()
         temporary = local_temp(destination)
         cleanup_local(temporary)
-        try:
-            result = self._run_sftp(machine, request, temporary, source)
-        except subprocess.TimeoutExpired:
+
+        def fail(code: int, message: str) -> dict[str, Any]:
             cleanup_local(temporary)
             return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                -1,
-                "Transfer timed out",
+                request, machine.name, source, destination, started, code, message
             )
-        if result.returncode:
-            cleanup_local(temporary)
-            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
-            return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                result.returncode,
-                message,
-            )
+
+        failed = self._sftp_or_error(machine, request, temporary, source, fail)
+        if failed is not None:
+            return failed
         try:
-            if request.overwrite:
-                os.replace(temporary, destination)
-            else:
-                _move_local_no_replace(temporary, destination)
+            _install_local(temporary, destination, request.overwrite)
         except FileExistsError:
+            message = "download destination appeared during transfer; refusing to overwrite it"
             cleanup_local(temporary)
             return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                -1,
-                "download destination appeared during transfer; refusing to overwrite it",
+                request, machine.name, source, destination, started, -1, message
             )
         except OSError as exc:
             cleanup_local(temporary)
@@ -581,8 +561,8 @@ class TransferService:
                 "destination_length": len(destination),
             }
         if request.action == "upload":
-            return {"source": TransferService._redact_local(source), "destination": destination}
-        return {"source": source, "destination": TransferService._redact_local(destination)}
+            return {"source": redact_local_path(source), "destination": destination}
+        return {"source": source, "destination": redact_local_path(destination)}
 
     def _audit(
         self,
@@ -595,10 +575,8 @@ class TransferService:
         elapsed: float,
         size: int,
     ) -> None:
-        mode = str(self.manager.config.audit_log_mode).strip().lower()
-        if mode not in _AUDIT_MODES:
-            mode = "redacted"
-        if mode == "off":
+        mode = effective_mode(self.manager.config.audit_log_mode)
+        if mode is None:
             return
 
         entry: dict[str, Any] = {
@@ -615,25 +593,4 @@ class TransferService:
             "bytes": size,
         }
         entry.update(self._audit_paths(mode, request, source, destination))
-
-        try:
-            self.manager.config.data_dir.mkdir(parents=True, exist_ok=True)
-            path = self.manager.config.data_dir / "command_log.jsonl"
-            fd = os.open(
-                str(path),
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
-        except OSError:
-            return
-
-    @staticmethod
-    def _redact_local(path: str) -> str:
-        home = str(Path.home())
-        if path == home:
-            return "~"
-        if path.startswith(home + os.sep):
-            return "~" + path[len(home) :]
-        return path
+        append_jsonl(self.manager.config.data_dir / "command_log.jsonl", entry)

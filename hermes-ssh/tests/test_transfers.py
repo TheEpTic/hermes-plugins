@@ -10,15 +10,9 @@ from unittest.mock import patch
 
 import pytest
 
-from ssh_tools.transfers import (
-    TransferRequest,
-    TransferService,
-    _prepare_upload_source,
-    _remote_path,
-    _sftp_args,
-    _sftp_batch,
-    execute_transfer,
-)
+from ssh_tools.transfers import TransferRequest, TransferService, execute_transfer
+from ssh_tools.transfers.policy import prepare_upload_source, remote_path
+from ssh_tools.transfers.transport import sftp_args, sftp_batch
 
 
 class StubManager:
@@ -29,7 +23,7 @@ class StubManager:
             strict_host_key_checking="accept-new",
             audit_log_mode=audit_mode,
         )
-        self.config.socket_dir.mkdir(parents=True)
+        self.config.socket_dir.mkdir(parents=True, exist_ok=True)
         self.machine = SimpleNamespace(
             name="web1",
             host="192.0.2.10",
@@ -47,51 +41,109 @@ class StubManager:
         return {"success": True, "exit_code": 0, "stdout": "", "stderr": ""}
 
 
-def test_sftp_args_reuses_machine_connection(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
-    args = _sftp_args(manager.machine, manager, timeout=300)
+class LocalExecManager(StubManager):
+    """Run transfer finalise/scan commands locally instead of over ssh."""
 
-    assert args[0] == "sftp"
-    assert args[1:3] == ["-b", "-"]
-    assert "-P" in args
-    assert "2222" in args
-    assert "-i" in args
-    assert "/keys/id_ed25519" in args
-    assert "ControlMaster=auto" in args
-    assert any(value.startswith("ControlPath=") for value in args)
+    def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
+        del machine_name, kwargs
+        self.commands.append(command)
+        completed = subprocess.run(
+            ["bash", "-c", command], capture_output=True, text=True, check=False
+        )
+        return {
+            "success": completed.returncode == 0,
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+
+
+_WHICH = "ssh_tools.transfers.service.shutil.which"
+
+
+def _ok() -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(["sftp"], 0, "", "")
+
+
+def _upload_locally(result: str | None, payload: bytes = b"payload"):
+    """fake run_sftp that materialises the remote temp file locally."""
+
+    def fake_sftp(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, local_path
+        temporary = Path(remote_path)
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(payload)
+        return subprocess.CompletedProcess(["sftp"], 0, "", "")
+
+    return fake_sftp
+
+
+def _writes_file(path_content: bytes | None, code: int = 0, err: str = ""):
+    """fake run_sftp that writes the staged local file (downloads)."""
+
+    def fake_sftp(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, remote_path
+        if path_content is not None:
+            local_path.write_bytes(path_content)
+        return subprocess.CompletedProcess(["sftp"], code, "", err)
+
+    return fake_sftp
+
+
+def _fake_mv_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_mv = fake_bin / "mv"
+    fake_mv.write_text("#!/bin/sh\n" + script)
+    fake_mv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+
+
+def _up_source(tmp_path: Path, name: str = "release.tar.gz") -> Path:
+    source = tmp_path / name
+    source.write_bytes(b"payload")
+    return source
+
+
+def test_sftp_args_reuse_machine_connection(tmp_path: Path) -> None:
+    manager = cast(Any, StubManager(tmp_path))
+    args = sftp_args(manager.machine, manager.config, timeout=300)
+    assert args[0] == "sftp" and args[1:3] == ["-b", "-"]
+    for flag in ("-P", "2222", "-i", "/keys/id_ed25519", "ControlMaster=auto"):
+        assert flag in args
+    assert any(v.startswith("ControlPath=") for v in args)
     assert args[-1] == "deploy@192.0.2.10"
-    batch = _sftp_batch(
+    manager.machine.host = "2001:db8::10"  # ipv6 brackets
+    assert sftp_args(manager.machine, manager.config, timeout=30)[-1] == "deploy@[2001:db8::10]"
+    batch = sftp_batch(
         action="upload",
         local_path=tmp_path / "release.tar.gz",
         remote_path="/srv/releases/release.tar.gz",
         recursive=False,
         preserve=True,
     )
-    assert batch.startswith("put -p ")
-    assert "/srv/releases/release.tar.gz" in batch
-
-
-def test_sftp_args_brackets_ipv6_host(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
-    manager.machine.host = "2001:db8::10"
-    args = _sftp_args(manager.machine, manager, timeout=30)
-    assert args[-1] == "deploy@[2001:db8::10]"
+    assert batch.startswith("put -p ") and "/srv/releases/release.tar.gz" in batch
 
 
 @pytest.mark.parametrize(
-    "path",
-    ["relative/file", "/tmp/*.log", "/tmp/../etc/passwd", "/tmp/file\nnext"],
+    "path", ["relative/file", "/tmp/*.log", "/tmp/../etc/passwd", "/tmp/file\nnext"]
 )
 def test_remote_path_validation_fails_closed(path: str) -> None:
     with pytest.raises(ValueError):
-        _remote_path(path, "source")
+        remote_path(path, "source")
 
 
-def test_sensitive_upload_source_is_blocked(tmp_path: Path) -> None:
-    source = tmp_path / ".env"
+@pytest.mark.parametrize(
+    "name,blocked", [(".env", True), (".env.example", False), (".git-credentials", True)]
+)
+def test_upload_credential_screening(tmp_path: Path, name: str, blocked: bool) -> None:
+    source = tmp_path / name
     source.write_text("TOKEN=secret")
-    with pytest.raises(ValueError, match="credential file"):
-        _prepare_upload_source(str(source), recursive=False)
+    if blocked:
+        with pytest.raises(ValueError, match="credential file"):
+            prepare_upload_source(str(source), recursive=False)
+    else:
+        assert prepare_upload_source(str(source), recursive=False).path == source.resolve()
 
 
 def test_recursive_upload_rejects_symlink(tmp_path: Path) -> None:
@@ -100,346 +152,175 @@ def test_recursive_upload_rejects_symlink(tmp_path: Path) -> None:
     (source / "app.js").write_text("ok")
     (source / "linked").symlink_to(source / "app.js")
     with pytest.raises(ValueError, match="symbolic link"):
-        _prepare_upload_source(str(source), recursive=True)
+        prepare_upload_source(str(source), recursive=True)
 
 
-def test_upload_uses_temp_then_remote_rename(tmp_path: Path) -> None:
+def _xfer(manager: Any, **kw: Any) -> dict:
+    return execute_transfer(manager, machine_name=kw.pop("machine_name", "web1"), **kw)
+
+
+def _faked(probe: tuple = ("missing", None), fake: Any = None, which: str = "/usr/bin/sftp") -> Any:
+    """Stack the which/probe/run_sftp patches most transfer tests need."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch(_WHICH, return_value=which))
+    stack.enter_context(patch.object(TransferService, "_probe", return_value=probe))
+    target = "ssh_tools.transfers.service.run_sftp"
+    if isinstance(fake, subprocess.CompletedProcess):
+        kw = {"return_value": fake}
+    elif fake is None:
+        kw = {}
+    else:
+        kw = {"side_effect": fake}
+    stack.fake = stack.enter_context(patch(target, **kw))  # type: ignore[attr-defined]
+    return stack
+
+
+def test_upload_temp_then_rename_and_refusals(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
-    source = tmp_path / "release.tar.gz"
-    source.write_bytes(b"payload")
-
-    completed = subprocess.CompletedProcess(["sftp"], 0, "", "")
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("missing", None)),
-        patch.object(TransferService, "_run_sftp", return_value=completed) as run_sftp,
-    ):
-        result = execute_transfer(
+    source = _up_source(tmp_path)
+    with _faked(fake=_ok()) as stack:
+        result = _xfer(
             manager,
             action="upload",
             machine_name="web",
             source=str(source),
             destination="/srv/releases/release.tar.gz",
         )
-
-    assert result["success"] is True
-    assert result["machine"] == "web1"
+    assert result["success"] is True and result["machine"] == "web1"
     assert result["bytes"] == len(b"payload")
-    remote_temporary = run_sftp.call_args.args[3]
-    assert ".release.tar.gz.hermes-upload-" in remote_temporary
-    assert any("mv -n --" in command for command in manager.commands)
-
-
-def test_upload_refuses_existing_destination_without_overwrite(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
-    source = tmp_path / "release.tar.gz"
-    source.write_bytes(b"payload")
-
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp") as run_sftp,
-    ):
-        result = execute_transfer(
-            manager,
-            action="upload",
-            machine_name="web1",
-            source=str(source),
-            destination="/srv/release.tar.gz",
+    assert ".release.tar.gz.hermes-upload-" in stack.fake.call_args.args[4]
+    assert any("mv -n --" in c for c in manager.commands)
+    # existing destination without overwrite
+    with _faked(probe=("file", None)) as stack:
+        refused = _xfer(
+            manager, action="upload", source=str(source), destination="/srv/release.tar.gz"
         )
-
-    assert result["success"] is False
-    assert "overwrite=true" in result["error"]
-    run_sftp.assert_not_called()
+    assert refused["success"] is False and "overwrite=true" in refused["error"]
+    stack.fake.assert_not_called()
 
 
-def test_upload_refuses_directory_created_during_transfer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+_MV_MKDIR = (
+    "for destination; do :; done\n" '/usr/bin/mkdir -- "$destination"\n' 'exec /usr/bin/mv "$@"\n'
+)
+_MV_CONCURRENT = (
+    "for destination; do :; done\n"
+    '/usr/bin/mkdir -p -- "$(/usr/bin/dirname -- "$destination")"\n'
+    '/usr/bin/printf concurrent > "$destination"\n'
+    '/usr/bin/mv "$@"\n'
+    "exit 1\n"
+)
+
+
+@pytest.mark.parametrize(
+    "script,fragment,check",
+    [
+        (_MV_MKDIR, "unsupported type", "isdir"),
+        (_MV_CONCURRENT, "appeared during transfer", "concurrent"),
+    ],
+)
+def test_upload_race_detection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str, fragment: str, check: str
 ) -> None:
-    class LocalFinaliseManager(StubManager):
-        def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
-            del machine_name, kwargs
-            self.commands.append(command)
-            completed = subprocess.run(
-                ["bash", "-c", command], capture_output=True, text=True, check=False
-            )
-            return {
-                "success": completed.returncode == 0,
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-            }
-
-    manager = cast(Any, LocalFinaliseManager(tmp_path))
-    source = tmp_path / "release.tar.gz"
-    source.write_bytes(b"payload")
+    manager = cast(Any, LocalExecManager(tmp_path))
+    source = _up_source(tmp_path)
     destination = tmp_path / "remote" / "release.tar.gz"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_mv = fake_bin / "mv"
-    fake_mv.write_text(
-        "#!/bin/sh\n"
-        "for destination; do :; done\n"
-        '/usr/bin/mkdir -- "$destination"\n'
-        'exec /usr/bin/mv "$@"\n'
-    )
-    fake_mv.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
-
-    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, local_path
-        temporary = Path(remote_path)
-        temporary.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_bytes(b"payload")
-        return subprocess.CompletedProcess(["sftp"], 0, "", "")
-
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("missing", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
-    ):
-        result = execute_transfer(
-            manager,
-            action="upload",
-            machine_name="web1",
-            source=str(source),
-            destination=str(destination),
-        )
-
-    assert result["success"] is False
-    assert "unsupported type" in result["error"]
-    assert destination.is_dir()
-    assert not list(destination.glob(".release.tar.gz.hermes-upload-*"))
+    _fake_mv_bin(tmp_path, monkeypatch, script)
+    with _faked(fake=_upload_locally(None)):
+        result = _xfer(manager, action="upload", source=str(source), destination=str(destination))
+    assert result["success"] is False and fragment in result["error"]
+    if check == "isdir":
+        assert destination.is_dir()
+        assert not list(destination.glob(".release.tar.gz.hermes-upload-*"))
+    else:
+        assert destination.read_bytes() == b"concurrent"
 
 
-def test_upload_refuses_file_created_during_transfer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class LocalFinaliseManager(StubManager):
-        def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
-            del machine_name, kwargs
-            self.commands.append(command)
-            completed = subprocess.run(
-                ["bash", "-c", command], capture_output=True, text=True, check=False
-            )
-            return {
-                "success": completed.returncode == 0,
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-            }
-
-    manager = cast(Any, LocalFinaliseManager(tmp_path))
-    source = tmp_path / "release.tar.gz"
-    source.write_bytes(b"payload")
-    destination = tmp_path / "remote" / "release.tar.gz"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_mv = fake_bin / "mv"
-    fake_mv.write_text(
-        "#!/bin/sh\n"
-        "for destination; do :; done\n"
-        '/usr/bin/mkdir -p -- "$(/usr/bin/dirname -- "$destination")"\n'
-        '/usr/bin/printf concurrent > "$destination"\n'
-        '/usr/bin/mv "$@"\n'
-        "exit 1\n"
-    )
-    fake_mv.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
-
-    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, local_path
-        temporary = Path(remote_path)
-        temporary.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_bytes(b"payload")
-        return subprocess.CompletedProcess(["sftp"], 0, "", "")
-
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("missing", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
-    ):
-        result = execute_transfer(
-            manager,
-            action="upload",
-            machine_name="web1",
-            source=str(source),
-            destination=str(destination),
-        )
-
-    assert result["success"] is False
-    assert "appeared during transfer" in result["error"]
-    assert destination.read_bytes() == b"concurrent"
-
-
-def test_download_is_staged_and_atomically_replaced(tmp_path: Path) -> None:
+def test_download_staged_atomic_replace(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     destination = tmp_path / "downloads" / "app.log"
-
-    def fake_sftp(machine, request, local_path: Path, remote_path: str):
-        local_path.write_bytes(b"remote log")
-        return subprocess.CompletedProcess(["sftp"], 0, "", "")
-
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
-    ):
-        result = execute_transfer(
-            manager,
-            action="download",
-            machine_name="web1",
-            source="/var/log/app.log",
-            destination=str(destination),
+    with _faked(probe=("file", None), fake=_writes_file(b"remote log")):
+        result = _xfer(
+            manager, action="download", source="/var/log/app.log", destination=str(destination)
         )
-
-    assert result["success"] is True
-    assert destination.read_bytes() == b"remote log"
-    assert result["bytes"] == len(b"remote log")
-    assert result["dirs_created"] is True
+    assert result["success"] is True and destination.read_bytes() == b"remote log"
+    assert result["dirs_created"] is True and result["bytes"] == len(b"remote log")
     assert not list(destination.parent.glob("*.hermes-download-*"))
 
 
-def test_download_refuses_file_created_during_transfer(tmp_path: Path) -> None:
+def test_download_concurrent_and_failed_cleanup(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     destination = tmp_path / "downloads" / "app.log"
 
-    def fake_sftp(machine: Any, request: Any, local_path: Path, remote_path: str):
-        del machine, request, remote_path
+    def racing(machine: Any, config: Any, request: Any, local_path: Path, remote_path: str):
+        del machine, config, request, remote_path
         local_path.write_bytes(b"remote log")
         destination.write_bytes(b"concurrent writer")
-        return subprocess.CompletedProcess(["sftp"], 0, "", "")
+        return _ok()
 
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
-    ):
-        result = execute_transfer(
-            manager,
-            action="download",
-            machine_name="web1",
-            source="/var/log/app.log",
-            destination=str(destination),
+    with _faked(probe=("file", None), fake=racing):
+        raced = _xfer(
+            manager, action="download", source="/var/log/app.log", destination=str(destination)
         )
-
-    assert result["success"] is False
-    assert "appeared during transfer" in result["error"]
+    assert raced["success"] is False and "appeared during transfer" in raced["error"]
     assert destination.read_bytes() == b"concurrent writer"
     assert not list(destination.parent.glob("*.hermes-download-*"))
+    # failed sftp removes the partial temp
+    partial = tmp_path / "app.log"
+    with _faked(probe=("file", None), fake=_writes_file(b"partial", 1, "network failed")):
+        failed = _xfer(
+            manager, action="download", source="/var/log/app.log", destination=str(partial)
+        )
+    assert failed["success"] is False and not partial.exists()
+    assert not list(tmp_path.glob("*.hermes-download-*"))
 
 
-def test_download_directory_requires_recursive(tmp_path: Path) -> None:
+def test_download_guardrails(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("directory", None)),
-    ):
-        result = execute_transfer(
+    with _faked(probe=("directory", None)):
+        no_recurse = _xfer(
             manager,
             action="download",
-            machine_name="web1",
             source="/srv/export",
             destination=str(tmp_path / "export"),
         )
-    assert result["success"] is False
-    assert "recursive=true" in result["error"]
-
-
-def test_download_blocks_remote_credentials(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
-    with patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"):
-        result = execute_transfer(
+    assert no_recurse["success"] is False and "recursive=true" in no_recurse["error"]
+    with patch(_WHICH, return_value="/usr/bin/sftp"):
+        creds = _xfer(
             manager,
             action="download",
-            machine_name="web1",
             source="~/.ssh/id_ed25519",
             destination=str(tmp_path / "key"),
         )
-    assert result["success"] is False
-    assert "credential" in result["error"]
-
-
-def test_recursive_download_rejects_nested_sensitive_remote_entry(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
+    assert creds["success"] is False and "credential" in creds["error"]
     with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("directory", None)),
+        _faked(probe=("directory", None)) as stack,
         patch.object(
             TransferService,
             "_tree_has_unsafe_entry",
             return_value=(True, "/srv/export/.ssh/id_ed25519"),
         ),
-        patch.object(TransferService, "_run_sftp") as run_sftp,
     ):
-        result = execute_transfer(
+        nested = _xfer(
             manager,
             action="download",
-            machine_name="web1",
             source="/srv/export",
             destination=str(tmp_path / "export"),
             recursive=True,
         )
-
-    assert result["success"] is False
-    assert "credential path" in result["error"]
-    run_sftp.assert_not_called()
-
-
-def test_remote_tree_scan_detects_nested_credential_directory(tmp_path: Path) -> None:
-    source = tmp_path / "export"
-    (source / ".ssh").mkdir(parents=True)
-    (source / ".ssh" / "id_ed25519").write_text("private key")
-
-    class LocalScanManager(StubManager):
-        def run_command(self, machine_name: str, command: str, **kwargs: Any) -> dict[str, Any]:
-            del machine_name, kwargs
-            self.commands.append(command)
-            completed = subprocess.run(
-                ["bash", "-c", command], capture_output=True, text=True, check=False
-            )
-            return {
-                "success": completed.returncode == 0,
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-                "stderr": completed.stderr,
-            }
-
-    manager = cast(Any, LocalScanManager(tmp_path))
-    unsafe, detail = TransferService(manager)._tree_has_unsafe_entry("web1", str(source), 30)
-
-    assert unsafe is True
-    assert detail is not None
-    assert ".ssh" in detail
+    assert nested["success"] is False and "credential path" in nested["error"]
+    stack.fake.assert_not_called()
+    # the scanner itself flags a real nested key dir
+    scan_export = tmp_path / "scan_export"
+    (scan_export / ".ssh").mkdir(parents=True)
+    (scan_export / ".ssh" / "id_ed25519").write_text("private key")
+    scanner = cast(Any, LocalExecManager(tmp_path))
+    unsafe, detail = TransferService(scanner)._tree_has_unsafe_entry("web1", str(scan_export), 30)
+    assert unsafe is True and detail is not None and ".ssh" in detail
 
 
-def test_failed_download_removes_partial_temp(tmp_path: Path) -> None:
-    manager = cast(Any, StubManager(tmp_path))
-    destination = tmp_path / "app.log"
-
-    def fake_sftp(machine, request, local_path: Path, remote_path: str):
-        local_path.write_bytes(b"partial")
-        return subprocess.CompletedProcess(["sftp"], 1, "", "network failed")
-
-    with (
-        patch("ssh_tools.transfers.service.shutil.which", return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=fake_sftp),
-    ):
-        result = execute_transfer(
-            manager,
-            action="download",
-            machine_name="web1",
-            source="/var/log/app.log",
-            destination=str(destination),
-        )
-
-    assert result["success"] is False
-    assert not destination.exists()
-    assert not list(tmp_path.glob("*.hermes-download-*"))
-
-
-def test_metadata_audit_does_not_store_paths(tmp_path: Path) -> None:
+def test_metadata_audit_omits_paths(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path, audit_mode="metadata"))
     request = TransferRequest(
         action="upload",
@@ -452,31 +333,8 @@ def test_metadata_audit_does_not_store_paths(tmp_path: Path) -> None:
         timeout=300,
     )
     TransferService(manager)._audit(
-        request,
-        "web1",
-        request.source,
-        request.destination,
-        True,
-        0,
-        1.2,
-        123,
+        request, "web1", request.source, request.destination, True, 0, 1.2, 123
     )
     entry = json.loads((tmp_path / "command_log.jsonl").read_text())
-    assert "source" not in entry
-    assert "destination" not in entry
-    assert entry["source_sha256"]
-    assert entry["destination_sha256"]
-
-
-def test_env_example_upload_is_allowed(tmp_path: Path) -> None:
-    source = tmp_path / ".env.example"
-    source.write_text("TOKEN=")
-    prepared = _prepare_upload_source(str(source), recursive=False)
-    assert prepared.path == source.resolve()
-
-
-def test_git_credentials_upload_is_blocked(tmp_path: Path) -> None:
-    source = tmp_path / ".git-credentials"
-    source.write_text("https://token@example.test")
-    with pytest.raises(ValueError, match="credential file"):
-        _prepare_upload_source(str(source), recursive=False)
+    assert "source" not in entry and "destination" not in entry
+    assert entry["source_sha256"] and entry["destination_sha256"]
