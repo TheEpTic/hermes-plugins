@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-jev-compact"
-version = "0.1.1"
+version = "0.1.2"
 description = "Jev-powered smart tool-prune context engine for Hermes Agent (any OpenAI-style System One endpoint)"
 readme = "README.md"
 requires-python = ">=3.11"

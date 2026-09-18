@@ -18,9 +18,19 @@ import hermes_jev_compact  # noqa: E402
 from hermes_jev_compact.engine import JevContextCompressor  # noqa: E402
 
 
+class _FakeManager:
+    """Models the host's context-engine slot: ``_context_engine`` is the same
+    field ``hermes_cli.plugins.PluginManager`` reads in register_context_engine
+    and get_plugin_context_engine. An ``unload`` clears it."""
+
+    def __init__(self) -> None:
+        self._context_engine: Any = None
+
+
 class FakeCtx:
     def __init__(self, settings: Dict[str, Any] | None = None) -> None:
         self.settings = settings or {}
+        self._manager = _FakeManager()
         self.engine: Any = None
 
     def get_config(self, key: str, default: Any = None) -> Any:
@@ -28,10 +38,14 @@ class FakeCtx:
 
     def register_context_engine(self, engine: Any) -> None:
         self.engine = engine
+        self._manager._context_engine = engine
+
+    def unload(self) -> None:
+        """Simulate the host clearing the slot during a plugin reload."""
+        self._manager._context_engine = None
 
 
 def test_register_installs_jev_engine_with_defaults():
-    hermes_jev_compact._registered = False
     ctx = FakeCtx()
     hermes_jev_compact.register(ctx)
     assert isinstance(ctx.engine, JevContextCompressor)
@@ -41,20 +55,35 @@ def test_register_installs_jev_engine_with_defaults():
 
 
 def test_register_honors_settings_and_is_idempotent():
-    hermes_jev_compact._registered = False
     ctx = FakeCtx({"keep_threshold": 0.7, "jev_model": "jev-test"})
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.7
     assert ctx.engine.jev_model == "jev-test"
     first = ctx.engine
     hermes_jev_compact.register(ctx)
+    # Host still holds our engine -> skip, no second registration.
     assert ctx.engine is first
 
 
 def test_register_rejects_garbage_settings():
-    hermes_jev_compact._registered = False
     ctx = FakeCtx({"keep_threshold": "junk", "max_state_tokens": "junk", "jev_model": ""})
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.5
     assert ctx.engine.jev_max_state_tokens == 25000
     assert ctx.engine.jev_model == "jev-latest"
+
+
+def test_register_reregisters_after_host_slot_cleared():
+    # Regression for the plugin-reload gap: the host calls register() again after
+    # unload() clears its context-engine slot. A module-global latch that survives
+    # the clear used to skip re-registration, leaving context.engine: jev empty.
+    ctx = FakeCtx()
+    hermes_jev_compact.register(ctx)
+    first = ctx.engine
+    ctx.unload()  # host dropped the engine
+    hermes_jev_compact.register(ctx)
+    assert isinstance(ctx.engine, JevContextCompressor)
+    assert ctx.engine.name == "jev"
+    assert ctx.engine is not first
+    # And the freshly installed engine is back in the host slot.
+    assert ctx._manager._context_engine is ctx.engine
