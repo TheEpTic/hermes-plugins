@@ -1,0 +1,244 @@
+"""Pruner parity tests (vectors from fast-jev-compaction.test.ts, adapted to openai rows).
+
+Traceability to test.ts blocks: state fitting ('sends the whole history',
+'defaults the goal', 'truncates inputs', 'shrinks old calls', 'abridges /
+collapses', 'throws when impossible'), question batching (1 / split / no-room),
+decisions (matrix incl. pinned, drop+truncate, head-chars incl. zero head).
+Where the openai row shape forces adaptation (no Message.toolUses), the test
+names the TS block it mirrors and asserts the same observable (stage names,
+marker text, reason strings).
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from hermes_jev_compact.adapter import collect_candidates, to_internal
+from hermes_jev_compact.protocol import JevCallAnswer, JevOptions
+from hermes_jev_compact.pruner import (
+    apply_decisions_openai,
+    batch_calls,
+    decide_call,
+    fit_state,
+    truncated_result_text,
+)
+from hermes_jev_compact.shaping import estimate_tokens
+from tests.conftest import make_tool_transcript
+
+OPTS = JevOptions()
+
+
+def _calls(n=3, chars=9000):
+    messages = make_tool_transcript(n_calls=n, result_chars=chars)
+    return messages, collect_candidates(messages, 99, 1)
+
+
+def test_state_sends_history_with_results_omitted():
+    messages, calls = _calls()
+    assert len(calls) == 3
+    fitted = fit_state(to_internal(messages), calls, OPTS, goal="fix the test")
+    assert fitted["stage"] == "full"
+    raw = json.dumps(fitted["state"])
+    assert "x" * 100 not in raw  # result bodies omitted
+    assert "never touch src/generated" in raw
+    assert "go ahead" in raw
+    first_call = fitted["state"]["history"][1]["tool_calls"][0]
+    assert first_call["id"] == "t1"
+    assert first_call["result"] == f"ok, {9000} chars (omitted)"
+
+
+def test_goal_defaults_to_latest_user_prompts():
+    messages, _ = _calls()
+    fitted = fit_state(to_internal(messages), [], OPTS)
+    assert "failing test" in fitted["state"]["goal"]
+    assert "go ahead" in fitted["state"]["goal"]
+
+
+def test_truncates_inputs_before_text():
+    """Inputs shrink before texts: openai fixture has one extra short text row."""
+    messages = make_tool_transcript(n_calls=1, result_chars=10)
+    big_args = {"path": "x.ts", "content": "x" * 5000}
+    messages[2]["tool_calls"][0]["function"]["arguments"] = json.dumps(big_args)
+    calls = collect_candidates(messages, 99, 1)
+    fitted = fit_state(to_internal(messages), calls, JevOptions(max_state_tokens=300), goal="g")
+    assert fitted["stage"] == "inputs<=60"
+    assert fitted["tokens"] <= 300
+    assert fitted["state"]["history"][0]["text"].startswith("fix the failing")
+
+
+def test_compact_call_vector():
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "start"}]
+    for i in range(40):
+        cid = f"c{i}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": cid,
+                        "type": "function",
+                        "function": {
+                            "name": "Read",
+                            "arguments": json.dumps({"file_path": f"/repo/src/module-{i}.ts"}),
+                        },
+                    }
+                ],
+            }
+        )
+        messages.append({"role": "tool", "tool_call_id": cid, "content": "x"})
+    messages.append({"role": "assistant", "content": "done"})
+    calls = collect_candidates(messages, 10_000, 1)
+    full = fit_state(to_internal(messages), calls, OPTS, preserve_recent=1)
+    compacted = fit_state(
+        to_internal(messages),
+        calls,
+        JevOptions(max_state_tokens=int(full["tokens"] * 0.8)),
+        preserve_recent=1,
+    )
+    assert compacted["stage"] == "old calls compacted"
+    # TS parity (state.ts:110-120): whole input JSON, whitespace-flattened.
+    assert compacted["state"]["history"][1]["tool_calls"][0] == (
+        't1 Read {"file_path":"/repo/src/module-0.ts"} → ok 1ch'
+    )
+
+
+def test_batching_splits_and_throws():
+    _, calls = _calls(n=10, chars=100)
+    assert len(batch_calls(calls, 1000, 30000)) == 1
+    batches = batch_calls(calls, 29600, 30000)
+    assert len(batches) > 1
+    assert [c.id for b in batches for c in b] == [c.id for c in calls]
+    with pytest.raises(ValueError, match="no room"):
+        batch_calls(calls, 29990, 30000)
+
+
+def test_decide_call_matrix():
+    _, calls = _calls(n=1)
+    call = calls[0]
+    assert decide_call(call, JevCallAnswer(0.9, 0.7), 0.5).action == "keep"
+    assert decide_call(call, JevCallAnswer(0.9, 0.2), 0.5).action == "drop_result"
+    assert decide_call(call, JevCallAnswer(0.1, 0.2), 0.5).action == "drop_call"
+
+
+def test_decide_call_pinned_short_circuits_like_ts():
+    # TS test.ts 'decisions' block: pinned + (0,0) -> keep/pinned.
+    from dataclasses import replace
+
+    _, calls = _calls(n=1)
+    pinned_call = replace(calls[0], pinned=True)
+    decision = decide_call(pinned_call, JevCallAnswer(0.0, 0.0), 0.5)
+    assert (decision.action, decision.reason) == ("keep", "pinned")
+
+
+def test_abridge_and_collapse_stages_like_ts():
+    # TS test.ts 'abridges long texts oldest-first and collapses old messages
+    # last': pin index 0 first, recent last; collapse is a one-line note.
+    # Entry 0 is SHORT here (pinned text is never the shrink target); the
+    # three long middle entries drive abridge-then-collapse.
+    from hermes_jev_compact.protocol import JevInternalMessage
+
+    long = [JevInternalMessage(index=0, role="user", text="pin this first message")]
+    long += [
+        JevInternalMessage(
+            index=i,
+            role="assistant" if i % 2 == 1 else "user",
+            text=f"{i} " + "lorem ipsum " * 300,
+        )
+        for i in range(1, 4)
+    ]
+    long.append(JevInternalMessage(index=4, role="user", text="latest"))
+    abridged = fit_state(long, [], JevOptions(max_state_tokens=1800), preserve_recent=1)
+    assert abridged["stage"] == "texts abridged"
+    assert abridged["tokens"] <= 1800
+    assert "chars omitted" in abridged["state"]["history"][1]["text"]
+    assert abridged["state"]["history"][0]["text"] == "pin this first message"
+    assert abridged["state"]["history"][4]["text"] == "latest"
+
+    collapsed = fit_state(long, [], JevOptions(max_state_tokens=420), preserve_recent=1)
+    assert collapsed["stage"] == "old messages collapsed"
+    assert collapsed["tokens"] <= 420
+    import re
+
+    assert re.fullmatch(r"\[… \d+ chars omitted …\]", collapsed["state"]["history"][1]["text"])
+    assert collapsed["state"]["history"][0]["text"] == "pin this first message"
+    assert collapsed["state"]["history"][4]["text"] == "latest"
+
+
+def test_apply_openai_drops_and_truncates():
+    messages = make_tool_transcript(n_calls=3, result_chars=2000)
+    calls = collect_candidates(messages, 99, 1)
+    decisions = [
+        decide_call(calls[0], JevCallAnswer(0.1, 0.1), 0.5),
+        decide_call(calls[1], JevCallAnswer(0.9, 0.1), 0.5),
+        decide_call(calls[2], JevCallAnswer(0.9, 0.9), 0.5),
+    ]
+    kept = apply_decisions_openai(messages, decisions, calls, 300)
+    # dropped call_1 pair gone entirely; call_2 result truncated; call_3 intact
+    roles = [(m.get("role"), m.get("tool_call_id") or "") for m in kept]
+    assert ("tool", "call_1") not in roles
+    assert all(
+        not any(tc.get("id") == "call_1" for tc in (m.get("tool_calls") or []))
+        for m in kept
+        if m.get("role") == "assistant"
+    )
+    truncated = next(m for m in kept if m.get("tool_call_id") == "call_2")
+    assert truncated["content"].startswith("x" * 300)
+    # TS reference marker verbatim (compact.ts:135-140 / test.ts:297-300).
+    assert "fast-jev-compaction truncated 1700 chars" in truncated["content"]
+    intact = next(m for m in kept if m.get("tool_call_id") == "call_3")
+    assert intact["content"] == "x" * 2000
+    assert kept[0] is messages[0]  # untouched identity
+
+
+def test_apply_openai_error_result_carries_ts_marker():
+    # TS parity (compact.ts:173-177,192-199): error results get "(error)" in
+    # the truncation marker; clean results don't. is_error rides on the
+    # candidate, not the decision.
+    from dataclasses import replace
+
+    from tests.conftest import make_tool_transcript
+
+    messages = make_tool_transcript(n_calls=2, result_chars=2000)
+    messages[3]["content"] = "FAILED: traceback " + "e" * 2000
+    calls = collect_candidates(messages, 99, 1)
+    assert [c.is_error for c in calls] == [True, False]
+    decisions = [
+        decide_call(calls[0], JevCallAnswer(0.9, 0.1), 0.5),
+        decide_call(calls[1], JevCallAnswer(0.9, 0.1), 0.5),
+    ]
+    assert [d.action for d in decisions] == ["drop_result", "drop_result"]
+    kept = apply_decisions_openai(messages, decisions, calls, 300)
+    err = next(m for m in kept if m.get("tool_call_id") == "call_1")
+    clean = next(m for m in kept if m.get("tool_call_id") == "call_2")
+    assert "(error)" in err["content"]
+    assert "(error)" not in clean["content"]
+    # Untouched-identity + explicit is_error passthrough (independent of the
+    # keyword heuristic): a clean-body call flagged by the caller still lands.
+    forced = [replace(calls[1], is_error=True)]
+    forced_dec = [decide_call(forced[0], JevCallAnswer(0.9, 0.1), 0.5)]
+    kept2 = apply_decisions_openai(messages, forced_dec, forced, 300)
+    forced_row = next(m for m in kept2 if m.get("tool_call_id") == "call_2")
+    assert "(error)" in forced_row["content"]
+
+
+def test_truncated_result_text_short_passthrough_and_zero_head():
+    assert truncated_result_text("y" * 100, False, 300) == "y" * 100
+    out = truncated_result_text("z" * 500, False, 0)
+    assert (
+        out
+        == "[fast-jev-compaction truncated 500 chars of this tool result; re-run the tool if needed]"
+    )
+
+
+def test_fit_state_throws_when_impossible():
+    from hermes_jev_compact.protocol import JevInternalMessage
+
+    messages = [
+        JevInternalMessage(index=0, role="user", text="a" * 2000),
+        JevInternalMessage(index=1, role="assistant", text="b"),
+    ]
+    with pytest.raises(ValueError, match="too large"):
+        fit_state(messages, [], JevOptions(max_state_tokens=50))

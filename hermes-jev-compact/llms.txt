@@ -1,0 +1,29 @@
+# hermes-jev-compact
+
+Jev-powered smart tool-prune context engine for Hermes Agent (opt-in `context.engine: jev`).
+
+## install
+
+```bash
+/path/to/hermes-python -m pip install hermes-jev-compact
+hermes plugins enable hermes-jev-compact --no-allow-tool-override
+```
+
+Then set `context.engine: jev` and `/reset`. `compressor` bypasses plugins; `jev` only activates when named.
+
+## requires
+
+- conduit2 reachable at `conduit_base_url` (default `http://127.0.0.1:8765/v1`)
+- client key in `~/.hermes/.env` under `conduit_api_key_env` (default `CONDUIT_NEXUS_API_KEY`)
+
+## settings
+
+`plugins.entries.hermes-jev-compact.settings`: `conduit_base_url`, `conduit_api_key_env`, `jev_model`
+(`typesafe:jev-latest`), `keep_threshold` (0.5), `max_state_tokens` (25000),
+`max_request_tokens` (30000), `truncate_head_chars` (300), `request_timeout_s` (30),
+`min_result_chars` (8000).
+
+## behavior
+
+Overrides only `_prune_old_tool_results` on the built-in compressor. Scores stale
+tool units with Jev; any failure falls back to the deterministic prune.
