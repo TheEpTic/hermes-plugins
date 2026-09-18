@@ -18,6 +18,7 @@ import contextlib
 import copy
 import inspect
 import logging
+import math
 import os
 from typing import Any
 
@@ -91,7 +92,9 @@ def _resolve_secret(key_env: str) -> str:
         value = get_secret(key_env)
     except Exception:
         value = os.environ.get(key_env)
-    return value or ""
+    # BaseException (KeyboardInterrupt/SystemExit) intentionally propagates —
+    # swallowing process-control signals to attempt a prune would be wrong.
+    return value if isinstance(value, str) else ""
 
 
 class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
@@ -204,8 +207,15 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             return False
 
     def _jev_options(self) -> JevOptions:
+        threshold = self.jev_keep_threshold
+        try:
+            threshold = float(threshold)
+        except (TypeError, ValueError):
+            threshold = 0.5
+        if not math.isfinite(threshold):
+            threshold = 0.5
         return JevOptions(
-            keep_threshold=self.jev_keep_threshold,
+            keep_threshold=min(1.0, max(0.0, threshold)),
             max_state_tokens=max(1, int(self.jev_max_state_tokens)),
             max_request_tokens=max(1, int(self.jev_max_request_tokens)),
             truncate_head_chars=max(0, int(self.jev_truncate_head_chars)),
@@ -284,13 +294,26 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         except Exception:
             logger.warning("jev prune crashed; built-in prune", exc_info=True)
             return None, 0
-        applied = apply_decisions_openai(
-            messages, decisions, candidates, options.truncate_head_chars
-        )
+        try:
+            applied = apply_decisions_openai(
+                messages, decisions, candidates, options.truncate_head_chars
+            )
+        except JevError as exc:
+            logger.warning("jev output ambiguous (%s); built-in prune", exc)
+            return None, 0
         pruned_units = sum(1 for d in decisions if d.action != "keep")
         if pruned_units == 0 or applied == messages or not _valid_openai_sequence(applied):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
+            return None, 0
+        # TS README parity (reductionRatio < 0.25 → "not worth it"): a jev pass
+        # that barely shrinks the transcript is worse than the deterministic
+        # prune — it spent a network round-trip to keep everything. Measure in
+        # chars (same unit TS uses) and fall back under 25% reduction.
+        chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
+        chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
+        if chars_before > 0 and (chars_before - chars_after) / chars_before < 0.25:
+            logger.info("jev reduction under 25%%; built-in prune")
             return None, 0
         # Final cancellation consult before committing counters/output: an ask
         # that finished just as the host cancelled must not mutate state.
@@ -316,7 +339,8 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     ) -> tuple[list[dict[str, Any]], int]:
         # KEEP the host's deterministic/no-LLM contract (host :2987, hot path
         # turn_preflight.py:364): bypass Jev entirely — straight to base.
-        out, n = super().prune_tool_results_only(messages, current_tokens)
+        # Keyword form: survives a host reorder; name is the stable contract.
+        out, n = super().prune_tool_results_only(messages, current_tokens=current_tokens)
         return list(out), int(n)
 
     def _prune_old_tool_results(
@@ -350,17 +374,29 @@ def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
     AND every assistant tool call keeps its result row (no orphans either way).
     Also rejects duplicate tool rows for one call id, malformed ids, malformed
     assistant tool-call rows (host shape: id/type/function.name/arguments),
-    and duplicate assistant call ids (ambiguous address — jev output must never
-    create them)."""
-    call_ids: set[str] = set()
-    for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+    duplicate assistant call ids (ambiguous address — jev output must never
+    create them), out-of-order pairs (tool row before its call), and malformed
+    top-level rows (non-dict, missing/unknown role)."""
+    call_rows: dict[str, int] = {}
+    for index, msg in enumerate(messages):
+        # Fail closed on malformed rows: jev output must be a clean transcript.
+        if not isinstance(msg, dict):
+            return False
+        role = msg.get("role")
+        if not isinstance(role, str) or role not in {
+            "system",
+            "user",
+            "assistant",
+            "tool",
+        }:
+            return False
+        if role != "assistant":
             continue
         tcs = msg.get("tool_calls")
         if tcs is None:
             # None == absent: host treats tool_calls=None as "no calls"
             # (chat_completion_helpers.py:1567 getattr default, :1644 truthiness
-            # gate), and orphans still fail below (cid not in call_ids).
+            # gate), and orphans still fail below (cid not in call_rows).
             continue
         # Fail closed: a present-but-non-list container is malformed output.
         if not isinstance(tcs, list):
@@ -370,18 +406,22 @@ def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
             # on duplicate call ids (ambiguous pairing address).
             if not is_well_formed_tool_call(tc):
                 return False
-            if tc["id"] in call_ids:
+            if tc["id"] in call_rows:
                 return False
-            call_ids.add(tc["id"])
+            call_rows[tc["id"]] = index
     seen_results: set[str] = set()
-    for msg in messages:
+    for index, msg in enumerate(messages):
+        # (dict + role already validated above; re-check cheaply for mypy.)
         if not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
         cid = msg.get("tool_call_id")
-        if not isinstance(cid, str) or not cid or cid not in call_ids:
+        if not isinstance(cid, str) or not cid or cid not in call_rows:
             return False
         if cid in seen_results:
             return False
+        # Ordering: a result before its call is malformed output.
+        if index <= call_rows[cid]:
+            return False
         seen_results.add(cid)
     # Every assistant tool call must keep exactly its result row.
-    return call_ids <= seen_results
+    return set(call_rows) <= seen_results

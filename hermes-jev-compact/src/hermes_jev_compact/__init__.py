@@ -51,7 +51,27 @@ def _build_engine(ctx: Any) -> Any:
     from .engine import _JEV_KNOBS, JevContextCompressor
 
     knobs = {attr: _setting(ctx, key, default) for attr, key, default in _JEV_KNOBS}
-    return JevContextCompressor(model="jev-latest", **knobs)
+    # Host policy the built-in constructor would receive (agent_init.py:1856+):
+    # the plugin singleton is built at register() time, so read the same
+    # config roots directly. Without this the jev engine logs in quiet mode
+    # and guards the wrong tail size on the fallback/proactive paths.
+    base: dict[str, Any] = {}
+    try:
+        from hermes_cli.config import load_config_readonly  # type: ignore[import-not-found]
+
+        cfg = load_config_readonly() or {}
+        agent_cfg = cfg.get("agent", {}) if isinstance(cfg, dict) else {}
+        comp_cfg = cfg.get("compression", {}) if isinstance(cfg, dict) else {}
+        if isinstance(agent_cfg, dict) and isinstance(agent_cfg.get("quiet_mode"), bool):
+            base["quiet_mode"] = agent_cfg["quiet_mode"]
+        if isinstance(comp_cfg, dict) and comp_cfg.get("protect_last_n") is not None:
+            try:
+                base["protect_last_n"] = max(0, int(comp_cfg["protect_last_n"]))
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        pass
+    return JevContextCompressor(model="jev-latest", **base, **knobs)
 
 
 def register(ctx: Any) -> None:
@@ -60,6 +80,9 @@ def register(ctx: Any) -> None:
     if _registered:
         logger.debug("hermes-jev-compact: already registered, skipping")
         return
-    _registered = True
     ctx.register_context_engine(_build_engine(ctx))
+    # Only latch AFTER success: a failed registration must not permanently
+    # disable retries (a second plugin wins the single-engine slot instead —
+    # the host rejects it with a warning, same as any double-register).
+    _registered = True
     logger.info("hermes-jev-compact loaded (engine: jev)")

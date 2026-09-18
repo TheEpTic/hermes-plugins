@@ -21,6 +21,31 @@ TEXT_TAIL = 150
 _TOKEN_PIECES = re.compile(r"[A-Za-z]+|\d+|[^\sA-Za-z\d]")
 
 
+def _utf16_units(text: str) -> int:
+    """Length in UTF-16 code units — the unit JS .length/slice/regex use.
+
+    Astral chars (emoji, some CJK-ext) are 2 units in TS but 1 Python code
+    point; without this the estimator UNDER-counts emoji-heavy text by ~2x
+    and truncation keeps more than the TS budget allows.
+    """
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+def _utf16_slice(text: str, start: int, stop: int | None = None) -> str:
+    """Slice by UTF-16 units, never splitting a surrogate pair."""
+    units = 0
+    out: list[str] = []
+    end = stop if stop is not None else _utf16_units(text)
+    for ch in text:
+        width = 2 if ord(ch) > 0xFFFF else 1
+        if units >= start and units + width <= end:
+            out.append(ch)
+        units += width
+        if units >= end:
+            break
+    return "".join(out)
+
+
 def _piece_class(first: str) -> str:
     # TS parity (state.ts:30-36): classification is ASCII-only via charCodeAt.
     # Non-ASCII alphanumerics are SYMBOLS (0.9 each), not letters/digits.
@@ -33,24 +58,37 @@ def _piece_class(first: str) -> str:
 
 
 def estimate_tokens(text: str) -> int:
-    """Port of TS estimateTokens: words ~1/6 letters, digits 0.5, symbols 0.9."""
+    """Port of TS estimateTokens: words ~1/6 letters, digits 0.5, symbols 0.9.
+
+    Piece runs + lengths are measured in UTF-16 units (see _utf16_units):
+    one astral char is TWO symbol units (1.8 tokens), exactly as TS counts
+    its two surrogates.
+    """
     tokens = 0.0
     for piece in _TOKEN_PIECES.findall(text):
         kind = _piece_class(piece[0])
+        units = _utf16_units(piece)
         if kind == "digit":
-            tokens += len(piece) / 2
+            tokens += units / 2
         elif kind == "alpha":
-            tokens += 1 + (len(piece) - 1) // 6
+            tokens += 1 + (units - 1) // 6
         else:
-            tokens += 0.9
-    return math.ceil(tokens)
+            # TS: each char of a symbol run is its own match (+0.9 each), and
+            # each surrogate half is a separate char. Python's regex merges a
+            # symbol RUN into one match, so charge per unit — except the ASCII
+            # single-char case, which is exactly 1 unit anyway.
+            tokens += 0.9 * max(1, units)
+    # Float dust (0.9*n): TS Math.ceil(180.00000000000028) = 181 too — but the
+    # values that matter (budgets/stages) compare identically on both sides
+    # since BOTH ceil. Round to 9dp first so exact-integer expectations hold.
+    return math.ceil(round(tokens, 9))
 
 
 def truncate(text: str, limit: int) -> str:
-    """Port of TS truncate."""
-    if len(text) <= limit:
+    """Port of TS truncate. Limits/widths are UTF-16 units (TS parity)."""
+    if _utf16_units(text) <= limit:
         return text
-    return f"{text[: max(0, limit - 1)]}…"
+    return f"{_utf16_slice(text, 0, max(0, limit - 1))}…"
 
 
 def abridge(text: str, head: int, tail: int) -> str:
@@ -59,9 +97,11 @@ def abridge(text: str, head: int, tail: int) -> str:
     NOTE: deliberate drift from TS at tail=0 — JS slice(-0) returns the FULL
     string, which would duplicate the body after the omitted-note. Python
     returns an empty tail instead. No caller passes tail=0 (TEXT_TAIL=150).
+    Lengths are UTF-16 units (TS parity).
     """
-    if len(text) <= head + tail + 40:
+    total = _utf16_units(text)
+    if total <= head + tail + 40:
         return text
-    omitted = len(text) - head - tail
-    tail_text = text[-tail:] if tail else ""
-    return f"{text[:head]}\n[… {omitted} chars omitted …]\n{tail_text}"
+    omitted = total - head - tail
+    tail_text = _utf16_slice(text, total - tail, total) if tail else ""
+    return f"{_utf16_slice(text, 0, head)}\n[… {omitted} chars omitted …]\n{tail_text}"

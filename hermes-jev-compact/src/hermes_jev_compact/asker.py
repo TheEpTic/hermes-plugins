@@ -10,13 +10,14 @@ built-in prune.
 from __future__ import annotations
 
 import ipaddress
+import math
 import ssl
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .protocol import JevError
 from .request import SYSTEMONE_PATH, build_jev_body, parse_jev_response
@@ -44,15 +45,37 @@ def _check_url(url: str) -> tuple[str, str]:
     Returns (scheme, host) for the caller. Raises JevError on anything else —
     the caller treats that as a failed jev attempt (built-in prune).
     """
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        raise JevError("invalid jev url") from None
     scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
     if scheme not in {"http", "https"}:
         raise JevError(f"refusing non-http jev url: {scheme or '(none)'}")
-    if parts.username or parts.password:
+    # "@" anywhere in netloc means userinfo was present — even an empty
+    # username (http://@host/) violates the no-userinfo policy and risks
+    # parser/request-library disagreement downstream.
+    if "@" in parts.netloc:
         raise JevError("refusing jev url with embedded credentials")
     if scheme == "http" and not _is_loopback_host(host):
         raise JevError(f"refusing cleartext jev url for non-loopback host: {host or '(none)'}")
     return scheme, host
+
+
+def _join_systemone(base_url: str) -> str:
+    """base_url + SYSTEMONE_PATH without mangling query/fragment.
+
+    String concat would turn ?tenant=x into ?tenant=x/systemone (path becomes
+    query). Fragments never belong on an API endpoint — reject them.
+    """
+    try:
+        parts = urlsplit(base_url)
+    except ValueError:
+        raise JevError("invalid jev base url") from None
+    if parts.fragment:
+        raise JevError("refusing jev base url with fragment")
+    path = parts.path.rstrip("/") + SYSTEMONE_PATH
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -114,10 +137,18 @@ class JevAsker:
     ) -> None:
         if not api_key:
             raise JevError("jev api key is not configured")
-        self._url = base_url.rstrip("/") + SYSTEMONE_PATH
+        self._url = _join_systemone(base_url)
         self._api_key = api_key
         self._model = model
-        self._timeout_s = max(1.0, timeout_s)
+        # Finite positive timeout only: inf would hand transports an unbounded
+        # deadline, NaN clamps accidentally — fail closed at construction.
+        try:
+            timeout_f = float(timeout_s)
+        except (TypeError, ValueError):
+            raise JevError("invalid jev timeout") from None
+        if not math.isfinite(timeout_f) or timeout_f <= 0:
+            raise JevError("invalid jev timeout")
+        self._timeout_s = timeout_f
         self._transport = transport or _default_transport
         self._deadline = time.monotonic() + self._timeout_s
 
@@ -125,7 +156,12 @@ class JevAsker:
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
             raise JevError("Jev budget exhausted before request")
-        body = build_jev_body(self._model, state, questions).encode("utf-8")
+        try:
+            body = build_jev_body(self._model, state, questions).encode("utf-8")
+        except JevError:
+            raise
+        except Exception as exc:
+            raise JevError(f"jev request shaping failed: {type(exc).__name__}") from exc
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -140,7 +176,7 @@ class JevAsker:
             # Transport exceptions can echo the request URL (and its query);
             # _check_url already rejects userinfo, but never log a raw URL.
             raise JevError(f"jev transport failed: {type(exc).__name__}") from exc
-        answers = parse_jev_response(status, 200 <= status < 300, text).get("answers")
+        answers = parse_jev_response(status, text).get("answers")
         if not isinstance(answers, dict):
             raise JevError("Jev response is missing answers")
         return answers

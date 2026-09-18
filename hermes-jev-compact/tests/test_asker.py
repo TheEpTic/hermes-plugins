@@ -20,21 +20,36 @@ def test_build_jev_body_has_no_stream_key():
         "questions": {"q": {"type": "noul"}},
     }
     assert "stream" not in body
+    # NaN/Infinity are not valid JSON — fail closed, don't ship "NaN" to routers.
+    with pytest.raises(JevError, match="not JSON-serializable"):
+        build_jev_body("m", {"x": float("nan")}, {})
 
 
 def test_parse_jev_response_rejects():
     with pytest.raises(JevError, match="500"):
-        parse_jev_response(500, False, "boom")
+        parse_jev_response(500, "boom")
     with pytest.raises(JevError, match="malformed"):
-        parse_jev_response(200, True, "not json")
+        parse_jev_response(200, "not json")
     with pytest.raises(JevError, match="missing answers"):
-        parse_jev_response(200, True, "{}")
-    assert parse_jev_response(200, True, '{"answers":{}}') == {"answers": {}}
+        parse_jev_response(200, "{}")
+    assert parse_jev_response(200, '{"answers":{}}') == {"answers": {}}
+    # status is the authority: a stale ok=True with a 500 must not succeed.
+    with pytest.raises(JevError, match="mismatch"):
+        parse_jev_response(500, '{"answers":{}}', ok=True)
 
 
 def test_noul_answer_validates():
     assert noul_answer({"q": {"noul": 0.4}}, "q") == 0.4
-    for bad in [{}, {"q": {}}, {"q": {"noul": "x"}}, {"q": {"noul": float("nan")}}]:
+    assert noul_answer({"q": {"noul": 1}}, "q") == 1.0  # ints are fine
+    for bad in [
+        {},
+        {"q": {}},
+        {"q": {"noul": "x"}},
+        {"q": {"noul": float("nan")}},
+        {"q": {"noul": True}},
+        {"q": {"noul": -0.1}},  # finite but not a probability
+        {"q": {"noul": 1.5}},
+    ]:
         with pytest.raises(JevError, match="Invalid Jev answer"):
             noul_answer(bad, "q")
 
@@ -51,12 +66,23 @@ def test_asker_uses_transport_and_refuses_without_key():
     asker = JevAsker("http://x:8765/v1", "k", "jev-latest", transport=fake_transport)
     answers = asker.ask("state", {"q": {"type": "noul", "instructions": "x"}})
     assert answers["q"] == {"noul": 0.4}
-    assert seen["url"] == "http://x:8765/v1/v1/systemone".replace("/v1/v1/", "/v1/")
+    assert seen["url"] == "http://x:8765/v1/systemone"
     assert json.loads(seen["body"])["model"] == "jev-latest"
     assert seen["auth"] == "Bearer k"
 
     with pytest.raises(JevError, match="not configured"):
         JevAsker("http://x:8765/v1", "", "jev-latest")
+    # Query survives the join (path before ?); fragments are refused.
+    assert (
+        JevAsker("https://x/v1/?tenant=t", "k", "m", transport=fake_transport)._url
+        == "https://x/v1/systemone?tenant=t"
+    )
+    with pytest.raises(JevError, match="fragment"):
+        JevAsker("https://x/v1#frag", "k", "m")
+    # Timeout must be finite + positive (inf/nan/zero all fail closed).
+    for bad_timeout in (float("inf"), float("nan"), 0, -1):
+        with pytest.raises(JevError, match="invalid jev timeout"):
+            JevAsker("http://x:8765/v1", "k", "m", timeout_s=bad_timeout)
 
     def failing(url, body, headers, timeout):
         raise TimeoutError("slow")
@@ -74,11 +100,13 @@ def test_asker_uses_transport_and_refuses_without_key():
         "http://192.168.0.25:8765/v1/systemone",  # cleartext off loopback
         "http://jev.internal:8765/v1/systemone",
         "https://user:pass@api.typesafe.ai/v1/systemone",  # embedded creds
+        "http://@127.0.0.1:8765/v1/systemone",  # empty userinfo still refused
+        "http://[::1/x",  # malformed IPv6 literal
     ],
 )
 def test_default_transport_refuses_ssrf_and_cleartext(url: str):
     with patch("hermes_jev_compact.asker.urllib.request.build_opener") as mk_opener:
-        with pytest.raises(JevError, match="refusing"):
+        with pytest.raises(JevError, match="refusing|invalid jev url"):
             _default_transport(url, b"{}", {}, 5.0)
     mk_opener.assert_not_called()
 

@@ -7,7 +7,14 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from .protocol import JevCallAnswer, JevCallDecision, JevInternalMessage, JevOptions, JevToolCall
+from .protocol import (
+    JevCallAnswer,
+    JevCallDecision,
+    JevError,
+    JevInternalMessage,
+    JevOptions,
+    JevToolCall,
+)
 from .shaping import (
     INPUT_CHARS,
     STATE_CONTEXT,
@@ -40,10 +47,16 @@ _WS_RUN = re.compile(r"\s+")
 
 
 def _compact_call(call: JevToolCall) -> str:
-    # TS parity (state.ts:110-120): whole input JSON truncated as ONE string.
-    text = _input_text(call.input, INPUT_CHARS[2])
+    # TS parity (state.ts:110-120): key=value per entry, string values raw,
+    # non-strings via inputText({key: value}, 200); the JOINED line truncates
+    # to 60 chars — not each input up front.
+    parts = []
+    for key, value in call.input.items():
+        text = value if isinstance(value, str) else _input_text({key: value}, 200)
+        parts.append(f"{key}={_WS_RUN.sub(' ', text)}")
+    text = truncate(" ".join(parts), INPUT_CHARS[2])
     status = "error" if call.is_error else "ok"
-    return f"{call.id} {call.tool} {_WS_RUN.sub(' ', text)} → {status} {call.result_chars}ch"
+    return f"{call.id} {call.tool} {text} → {status} {call.result_chars}ch"
 
 
 def questions_for(call: JevToolCall) -> dict[str, dict[str, str]]:
@@ -101,14 +114,19 @@ def questions_for_batch(batch: Sequence[JevToolCall]) -> dict[str, Any]:
     return questions
 
 
-_question_token_cache: dict[str, int] = {}
+_question_token_cache: dict[tuple[str, str, int, bool], int] = {}
 
 
 def _question_tokens(call: JevToolCall) -> int:
-    key = f"{call.id}\x00{call.tool}\x00{call.result_chars}\x00{call.is_error}"
+    # Tuple key (no separator-collision class) + bounded size: prune runs in a
+    # long-lived process, and unique ids would grow an unbounded dict forever.
+    # 4096 entries ≈ 200KB; overflow clears (token costs are pure recompute).
+    key = (call.id, call.tool, call.result_chars, call.is_error)
     tokens = _question_token_cache.get(key)
     if tokens is None:
         tokens = estimate_tokens(json.dumps(questions_for(call), separators=(",", ":")))
+        if len(_question_token_cache) >= 4096:
+            _question_token_cache.clear()
         _question_token_cache[key] = tokens
     return tokens
 
@@ -143,11 +161,6 @@ def _history_entries(
     messages: Sequence[JevInternalMessage], calls: Sequence[JevToolCall], input_chars: int
 ) -> list[dict[str, Any]]:
     by_message = _calls_by_index(calls)
-    # TS has no tool role: tool results ride as tool_calls[].result on the CALL
-    # message, and result messages are empty shells that get skipped. mirror it:
-    # paired tool rows become empty text (bodies live only in _result_note),
-    # EXCEPT unpaired tool rows (not a candidate) which collapse to a note.
-    paired_result_idx = {c.result_index for c in calls}
     entries: list[dict[str, Any]] = []
     for m in messages:
         tool_calls = [
@@ -161,11 +174,12 @@ def _history_entries(
         ]
         text = m.text
         if m.role == "tool":
-            text = (
-                ""
-                if m.index in paired_result_idx
-                else f"[tool result, {len(m.text)} chars, omitted]"
-            )
+            # TS parity (state.ts:151-170): result-carrier rows are SKIPPED
+            # (TS: empty shells, dropped by the blank+no-calls rule below).
+            # Paired bodies live only in _result_note — no per-row note, no
+            # length leak into state. Unpaired rows carry no candidate info
+            # at all, so they skip the same way.
+            text = ""
         if not text.strip() and not tool_calls:
             continue
         entry: dict[str, Any] = {"i": m.index, "role": m.role, "text": text}
@@ -176,9 +190,10 @@ def _history_entries(
 
 
 def goal_from_messages(messages: Sequence[JevInternalMessage]) -> str:
-    # TS parity (state.ts:174-185): last three NON-EMPTY user prompts. In TS,
-    # user-role result carriers are excluded via toolResults; here tool rows
-    # have their own role so the filter is just role+non-blank.
+    # TS parity (state.ts:174-185): last three NON-EMPTY user prompts,
+    # excluding result carriers. OpenAI adaptation: carriers have their OWN
+    # role ("tool"), so the filter is role+non-blank — no separate toolResults
+    # check needed. A user row only ever excludes here when it is blank.
     texts = [m.text for m in messages if m.role == "user" and m.text.strip()]
     return "\n".join(truncate(t, 500) for t in texts[-3:])
 
@@ -248,7 +263,7 @@ class _StateFitter:
             if len(entry.get("text", "")) <= TEXT_HEAD + TEXT_TAIL + 40:
                 continue
             abridged = abridge(str(entry.get("text", "")), TEXT_HEAD, TEXT_TAIL)
-            self._shrink(index, lambda e: e.update(text=abridged))
+            self._shrink(index, lambda e, a=abridged: e.update(text=a))
             if self._fits():
                 return self.done("texts abridged")
         return None
@@ -260,8 +275,7 @@ class _StateFitter:
             if self._pinned(entry) or not entry.get("text"):
                 continue
             n = original_len.get(int(entry.get("i", -1)), len(str(entry.get("text", ""))))
-            note = f"[… {n} chars omitted …]"
-            self._shrink(index, lambda e: e.update(text=note))
+            self._shrink(index, lambda e, note=f"[… {n} chars omitted …]": e.update(text=note))
             if self._fits():
                 return self.done("old messages collapsed")
         return None
@@ -274,7 +288,7 @@ class _StateFitter:
             if self._pinned(entry) or not own:
                 continue
             compacted = [_compact_call(c) for c in own]
-            self._shrink(index, lambda e: e.update(tool_calls=compacted))
+            self._shrink(index, lambda e, c=compacted: e.update(tool_calls=c))
             if self._fits():
                 return self.done("old calls compacted")
         return None
@@ -356,6 +370,7 @@ def fit_state(
 
 
 def truncated_result_text(text: str, is_error: bool, head_chars: int) -> str:
+    head_chars = max(0, int(head_chars))
     if len(text) <= head_chars + 120:
         return text
     head = f"{text[:head_chars]}\n" if head_chars > 0 else ""
@@ -385,9 +400,33 @@ def _drop_tool_call(msg: dict[str, Any], actions: dict[str, str]) -> dict[str, A
         return {**msg, "tool_calls": kept}
     rest = {k: v for k, v in msg.items() if k != "tool_calls"}
     content = rest.get("content")
-    # payload-empty assistant turn (only dropped calls): drop the row —
-    # mirrors host pass 2, which prunes it anyway.
-    return rest if isinstance(content, str) and content.strip() else None
+    # Payload-empty assistant turn (only dropped calls): drop the row — mirrors
+    # host pass 2, which prunes it anyway. Non-string content (multimodal parts,
+    # refusal/audio envelopes) is payload too — only a blank/missing text
+    # channel means the row is truly empty.
+    if isinstance(content, str):
+        return rest if content.strip() else None
+    return rest if content else None
+
+
+def _tool_row(
+    msg: dict[str, Any],
+    actions: dict[str, str],
+    error_by_call: dict[str, bool],
+    head_chars: int,
+) -> dict[str, Any] | None:
+    """One tool row after apply: None when its call was dropped."""
+    cid = msg.get("tool_call_id")
+    action = actions.get(cid) if isinstance(cid, str) else None
+    if action == "drop_call":
+        return None
+    if action == "drop_result" and isinstance(msg.get("content"), str):
+        # TS parity (compact.ts:173-177,192-199): the truncation marker
+        # carries "(error)" when the original result was an error.
+        is_error = bool(error_by_call.get(cid)) if isinstance(cid, str) else False
+        new_text = truncated_result_text(msg["content"], is_error, head_chars)
+        return msg if new_text == msg["content"] else {**msg, "content": new_text}
+    return msg
 
 
 def apply_decisions_openai(
@@ -396,18 +435,31 @@ def apply_decisions_openai(
     calls: Sequence[JevToolCall],
     head_chars: int,
 ) -> list[dict[str, Any]]:
-    """Apply keep/drop decisions to openai rows. Untouched rows keep identity."""
-    by_short_id = {c.id: c for c in calls}
-    # Occurrence-level identity: candidates carry occurrence (call,row) pairs
-    # by construction (adapter skips duplicate assistant ids), and the host
-    # never hands jev an ambiguous transcript — the gate above fails closed.
-    # Belt-and-braces: if two decisions ever collide on one tool_call_id, the
-    # LAST wins exactly as TS applies per-tool actions in order.
-    actions = {
-        call.tool_call_id: d.action
-        for d in decisions
-        if (call := by_short_id.get(d.id)) is not None and d.action != "keep"
-    }
+    """Apply keep/drop decisions to openai rows. Untouched rows keep identity.
+
+    Fail-closed on ambiguous input: duplicate short ids, duplicate decisions
+    for one id, or two decisions colliding on one tool_call_id raise JevError
+    (the engine treats that as a failed jev attempt → built-in prune).
+    """
+    by_short_id: dict[str, JevToolCall] = {}
+    for c in calls:
+        if c.id in by_short_id:
+            raise JevError(f"duplicate jev call id: {c.id}")
+        by_short_id[c.id] = c
+    seen_decisions: set[str] = set()
+    actions: dict[str, str] = {}
+    for d in decisions:
+        if d.id in seen_decisions:
+            raise JevError(f"duplicate jev decision id: {d.id}")
+        seen_decisions.add(d.id)
+        call = by_short_id.get(d.id)
+        # Unknown decision ids are ignored (defensive: a decision for a call
+        # that is not a candidate carries no address to apply to).
+        if call is None or d.action == "keep":
+            continue
+        if call.tool_call_id in actions:
+            raise JevError(f"conflicting jev decisions for {call.tool_call_id}")
+        actions[call.tool_call_id] = d.action
     if not actions:
         return list(messages)
     error_by_call = {c.tool_call_id: c.is_error for c in calls}
@@ -417,19 +469,9 @@ def apply_decisions_openai(
             out.append(msg)
             continue
         if msg.get("role") == "tool":
-            cid = msg.get("tool_call_id")
-            action = actions.get(cid) if isinstance(cid, str) else None
-            if action == "drop_call":
-                continue
-            if action == "drop_result" and isinstance(msg.get("content"), str):
-                content = msg["content"]
-                # TS parity (compact.ts:173-177,192-199): the truncation marker
-                # carries "(error)" when the original result was an error.
-                is_error = bool(error_by_call.get(cid)) if isinstance(cid, str) else False
-                new_text = truncated_result_text(content, is_error, head_chars)
-                out.append(msg if new_text == content else {**msg, "content": new_text})
-                continue
-            out.append(msg)
+            row = _tool_row(msg, actions, error_by_call, head_chars)
+            if row is not None:
+                out.append(row)
         elif msg.get("role") == "assistant":
             dropped = _drop_tool_call(msg, actions)
             if dropped is not None:

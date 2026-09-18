@@ -463,6 +463,13 @@ def test_validity_rejects_malformed_and_duplicate_assistant_calls():
         is False  # orphan tool row, no call — fails for the RIGHT reason
     )
     assert _valid_openai_sequence([{"role": "assistant", "content": "hi"}]) is True
+    # Malformed top-level rows fail closed (never committed as jev output).
+    assert _valid_openai_sequence(["junk"]) is False
+    assert _valid_openai_sequence([{"content": "no role"}]) is False
+    assert _valid_openai_sequence([{"role": "developer", "content": "x"}]) is False
+    # ...as does a result ordered BEFORE its call.
+    ooo = [tool_row("x"), _assistant_row_with([good("x")])]
+    assert _valid_openai_sequence(ooo) is False
 
 
 def test_duplicate_assistant_ids_never_scored(monkeypatch):
@@ -515,3 +522,52 @@ def test_invalid_jev_output_falls_back(monkeypatch):
     assert (out, count) == (expected, expected_count)
     assert eng.jev_fallbacks == 1
     assert eng.jev_calls == 0
+
+
+def test_low_reduction_falls_back_to_super(monkeypatch):
+    # TS README parity: reductionRatio < 0.25 → "not worth it". A jev pass
+    # that drops one small unit out of a big transcript must NOT commit —
+    # the deterministic prune runs instead (and gets the fallback credit).
+    eng = _engine(jev_min_result_chars=1)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    # Keep 2 units, drop_result on 1: ~8.6k of ~27k chars ≈ 32%... so make
+    # the drop smaller: truncate head 300 of ONE 9000-char result while the
+    # other two stay — then pad with a big user row to sink under 25%.
+    messages.insert(1, {"role": "user", "content": "pad " * 20000})
+    probs = {}
+    for i in range(1, 4):
+        probs[f"call_t{i}"] = 0.9
+        probs[f"result_t{i}"] = 0.9
+    probs["result_t1"] = 0.1  # one drop_result ≈ 8.7k chars of ~117k total
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    expected, expected_count = ContextCompressor._prune_old_tool_results(
+        eng, messages, 1, None, 200
+    )
+    assert (out, count) == (expected, expected_count)
+    assert eng.jev_fallbacks == 1
+    assert eng.jev_calls == 0  # nothing committed, no jev credit
+
+
+def test_high_reduction_commits_jev_output(monkeypatch):
+    # Control for the above: drop everything → >25% → jev commits.
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {}
+    for i in range(1, 4):
+        probs[f"call_t{i}"] = 0.1
+        probs[f"result_t{i}"] = 0.1
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert count == 3
+    assert eng.jev_fallbacks == 0
+    assert eng.jev_calls >= 1
+    assert _valid_openai_sequence(out)

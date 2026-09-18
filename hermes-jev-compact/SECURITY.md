@@ -1,15 +1,38 @@
 # Security
 
+## trust boundary
+
+Jev requests carry the conversation history with tool result bodies replaced
+by short notes (`ok, N chars (omitted)`); message text is abridged to fit the
+state budget, and call arguments are included (truncated per the fit stage).
+Prompt the operator before enabling on sessions carrying secrets outside the
+trust boundary of the Jev endpoint.
+
+Any OpenAI-style `POST {base_url}/systemone` endpoint works; TypeSafe's own
+API (https://api.typesafe.ai/v1) is the reference. Self-hosted routers keep
+the data in-house — point `base_url` at them.
+
+## key handling
+
 - The Jev API key is read at prune-call time via
   `agent.secret_scope.get_secret()` (profile-scope aware, multiplex
   fail-closed) and never cached on the engine instance or written to config.
-- Jev requests carry the conversation history with tool results replaced by
-  short notes; message text is abridged to fit the state budget. Prompt the
-  operator before enabling on sessions carrying secrets outside the trust
-  boundary of the Jev endpoint. Any OpenAI-style `POST {base_url}/systemone`
-  endpoint works; TypeSafe's own API (https://api.typesafe.ai/v1) is the
-  reference.
-- Pruning is lossy by design (same as the built-in compressor). Dropped tool
-  results are unrecoverable; dropped calls can be re-run.
-- Report vulnerabilities to the repository owner; do not open public issues
-  with sensitive details.
+  The shared plugin singleton never retains it (stripped in `__init__`,
+  excluded from `__deepcopy__`); only per-agent copies hold the host chat key
+  the summary path needs, exactly like the built-in compressor.
+- The transport refuses redirects, embedded credentials, non-HTTP schemes,
+  and cleartext HTTP off loopback — a misconfigured `base_url` fails closed
+  to the built-in prune instead of sending the bearer key somewhere
+  surprising.
+- Upstream error bodies and raw transport exceptions are never echoed into
+  logs (status category only); response bodies are capped at 1 MiB.
+
+## lossiness
+
+Pruning is lossy by design (same as the built-in compressor). Dropped tool
+results are unrecoverable; dropped calls can be re-run by the agent.
+
+## reporting
+
+Report vulnerabilities to the repository owner; do not open public issues
+with sensitive details.
