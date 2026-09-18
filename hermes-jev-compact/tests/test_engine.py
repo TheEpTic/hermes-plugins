@@ -184,16 +184,19 @@ def test_no_candidates_falls_back_to_super():
     assert eng.jev_fallbacks == 1
 
 
-def test_missing_key_falls_back(monkeypatch):
+def test_missing_key_falls_back(monkeypatch, caplog):
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     with patch("hermes_jev_compact.engine._resolve_secret", return_value=""):
-        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+        with caplog.at_level("DEBUG", logger="hermes_jev_compact.engine"):
+            out, count = eng._prune_old_tool_results(messages, 1, None, 200)
     expected, expected_count = ContextCompressor._prune_old_tool_results(
         eng, messages, 1, None, 200
     )
     assert (out, count) == (expected, expected_count)
+    # the log must name neither the key nor its env var
+    assert "TYPESAFE_API_KEY" not in caplog.text
 
 
 def test_jev_error_falls_back(monkeypatch):
