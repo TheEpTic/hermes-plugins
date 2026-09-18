@@ -1,4 +1,4 @@
-"""Tests for ssh_tools.helpers — ok, err, require, param_str, coerce_int."""
+"""Tests for ssh_tools.helpers — ok, err, param_str, param_bool, coerce_int."""
 
 from __future__ import annotations
 
@@ -6,39 +6,13 @@ import json
 
 import pytest
 
-from ssh_tools.helpers import coerce_int, err, ok, param_bool, param_str, require
+from ssh_tools.helpers import coerce_int, err, ok, param_bool, param_str
 
 
 def test_ok_err_envelopes() -> None:
     assert json.loads(ok()) == {"success": True}
     assert json.loads(ok(count=5)) == {"success": True, "count": 5}
     assert json.loads(err("boom")) == {"success": False, "error": "boom"}
-
-
-@pytest.mark.parametrize(
-    "params,fields,missing",
-    [
-        ({"action": "list"}, ("name",), "name"),
-        ({"name": None}, ("name",), "name"),
-        ({"name": "test"}, ("name", "host"), "host"),
-    ],
-)
-def test_require_missing(params: dict, fields: tuple, missing: str) -> None:
-    result = require(params, *fields)
-    assert result is not None and missing in result
-
-
-@pytest.mark.parametrize(
-    "params,fields",
-    [
-        ({"name": "test"}, ("name",)),
-        ({"name": ""}, ("name",)),
-        ({"port": 0}, ("port",)),
-        ({"flag": False}, ("flag",)),
-    ],
-)
-def test_require_present(params: dict, fields: tuple) -> None:
-    assert require(params, *fields) is None
 
 
 def test_param_str_missing_and_wrong_type() -> None:

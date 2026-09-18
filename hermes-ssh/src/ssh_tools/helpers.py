@@ -23,14 +23,6 @@ def err(msg: str) -> str:
     return json.dumps({"success": False, "error": msg})
 
 
-def require(params: dict[str, Any], *fields: str) -> str | None:
-    """Check that required fields are present and non-None."""
-    for field in fields:
-        if field not in params or params[field] is None:
-            return f"{field} is required"
-    return None
-
-
 def dispatch(
     params: dict[str, Any], actions: dict[str, Any], manager: Any, default: str = "list"
 ) -> str:
