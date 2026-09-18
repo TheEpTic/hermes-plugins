@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..models import Machine
 from ..helpers import dispatch, err, ok, param_str
+from ..models import Machine
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -31,11 +31,8 @@ def _registry_guard_warning(
     if not matches:
         return None
     existing = ", ".join(matches)
-    if len(matches) == 1:
-        warning = f"host {host} with user {user} already registered as name {existing}"
-    else:
-        warning = f"host {host} with user {user} already registered as names {existing}"
-    return warning, existing
+    noun = "name" if len(matches) == 1 else "names"
+    return f"host {host} with user {user} already registered as {noun} {existing}", existing
 
 
 def _handle_list(manager: SSHManager) -> str:
@@ -61,14 +58,19 @@ def _take_name(params: dict[str, Any]) -> tuple[str | None, str | None]:
     return param_str(params, "name", allow_empty=True)
 
 
+def _named(manager: SSHManager, params: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Validated machine name for remove/inspect/test, or (None, error)."""
+    name, error = _take_name(params)
+    return (None, error) if error or name is None else (name, None)
+
+
 def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
     name, error = _take_name(params)
     host, host_error = param_str(params, "host", allow_empty=True)
-    if error:
-        return err(error)
-    if host_error:
-        return err(host_error)
-    assert name is not None and host is not None
+    if error or name is None:
+        return err(error or "unreachable")
+    if host_error or host is None:
+        return err(host_error or "unreachable")
     try:
         machine = manager.add_machine(
             Machine(
@@ -101,10 +103,9 @@ def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _take_name(params)
-    if error:
-        return err(error)
-    assert name is not None
+    name, error = _named(manager, params)
+    if error or name is None:
+        return err(error or "unreachable")
     removed = manager.remove_machine(name)
     return ok(
         success=removed,
@@ -113,10 +114,9 @@ def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _take_name(params)
-    if error:
-        return err(error)
-    assert name is not None
+    name, error = _named(manager, params)
+    if error or name is None:
+        return err(error or "unreachable")
     inspected = manager.get_machine(name)
     if not inspected:
         return err(f"Machine '{name}' not found")
@@ -125,10 +125,9 @@ def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_test(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _take_name(params)
-    if error:
-        return err(error)
-    assert name is not None
+    name, error = _named(manager, params)
+    if error or name is None:
+        return err(error or "unreachable")
     return ok(**manager.test_machine(name))
 
 

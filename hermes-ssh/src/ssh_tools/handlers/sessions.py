@@ -14,19 +14,21 @@ if TYPE_CHECKING:
 
 def _handle_list(manager: SSHManager) -> str:
     active = manager.list_sessions("active")
-    enriched = {}
-    for sid, session in active.items():
-        enriched[sid] = {
+    enriched = {
+        sid: {
             **session.to_dict(),
             "idle_secs": session.idle_seconds,
             "idle_human": session.idle_human,
         }
+        for sid, session in active.items()
+    }
     return ok(sessions=enriched, count=len(enriched))
 
 
 def _take_session_id(params: dict[str, Any]) -> tuple[str | None, str | None]:
     """Session id or (None, error); every op here needs one."""
-    return param_str(params, "session_id")
+    value, error = param_str(params, "session_id")
+    return (None, error) if error or value is None else (value, None)
 
 
 def _handle_kill(manager: SSHManager, params: dict[str, Any]) -> str:

@@ -6,13 +6,22 @@ import shlex
 from typing import TYPE_CHECKING, Any
 
 from ..approval import approval_error, check_approval
-from ..transfers import execute_transfer
 from ..helpers import err, ok, param_bool, param_str
+from ..transfers import execute_transfer
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from ..manager import SSHManager
+
+_FIELDS: tuple[tuple[str, Any], ...] = (
+    ("machine", param_str),
+    ("source", param_str),
+    ("destination", param_str),
+    ("recursive", param_bool),
+    ("preserve", param_bool),
+    ("overwrite", param_bool),
+)
 
 
 def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
@@ -23,20 +32,14 @@ def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
         action = params.get("action")
         if action not in {"upload", "download"}:
             return err("action must be 'upload' or 'download'")
-        args: dict[str, Any] = {"action": action}
-        for field in ("machine", "source", "destination"):
-            value, error = param_str(params, field)
-            if error:
-                return err(error)
+        args: dict[str, Any] = {}
+        for field, take in _FIELDS:
+            value, error = take(params, field)
+            if error or value is None:
+                return err(error or "unreachable")
             args[field] = value
         if any(ord(char) < 32 or ord(char) == 127 for char in args["source"] + args["destination"]):
             return err("source and destination must not contain control characters")
-        flags: dict[str, bool] = {}
-        for field in ("recursive", "preserve", "overwrite"):
-            flag, error = param_bool(params, field)
-            if error or flag is None:
-                return err(error or "unreachable")
-            flags[field] = flag
 
         # Use a synthetic copy command so Hermes's existing sensitive write-target
         # approval patterns also cover transfer destinations such as /etc.
@@ -51,13 +54,13 @@ def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
 
         result = execute_transfer(
             manager,
-            action=args["action"],
+            action=action,
             machine_name=args["machine"],
             source=args["source"],
             destination=args["destination"],
-            recursive=flags["recursive"],
-            preserve=flags["preserve"],
-            overwrite=flags["overwrite"],
+            recursive=args["recursive"],
+            preserve=args["preserve"],
+            overwrite=args["overwrite"],
             timeout=params.get("timeout"),
         )
         return ok(**result)
