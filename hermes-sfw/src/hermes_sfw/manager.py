@@ -25,7 +25,6 @@ from .resolve import (
     find_sfw,
     is_bootstrap_failure,
     known_candidates,
-    resolve_shim_target,
 )
 from .validate import (
     is_dependency_operation,
@@ -54,10 +53,6 @@ class SFWManager:
     def __init__(self, config: SFWConfig | None = None) -> None:
         self._config = config or SFWConfig()
 
-    @staticmethod
-    def _resolve_shim_target(binary: str) -> str | None:
-        return resolve_shim_target(binary)
-
     def _known_candidates(self) -> list[Path]:
         return known_candidates()
 
@@ -84,15 +79,12 @@ class SFWManager:
 
     def is_installed(self) -> bool:
         """Check if sfw is available."""
-        return self._find_sfw() is not None
-
-    def _find_sfw(self) -> str | None:
-        return find_sfw(self._config.sfw_bin)
+        return find_sfw(self._config.sfw_bin) is not None
 
     @property
     def sfw_path(self) -> str | None:
         """Return the current path to the sfw binary."""
-        return self._find_sfw()
+        return find_sfw(self._config.sfw_bin)
 
     def get_version(self) -> str | None:
         """Get the sfw binary version string, or None if unavailable."""
