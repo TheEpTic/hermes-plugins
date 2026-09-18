@@ -2,7 +2,7 @@
 
 Threat posture: base_url + key come from OPERATOR config + operator .env, so
 a malicious URL is a self-own, not remote input. The guard below exists to
-catch config typos/redirects (file:, gopher:, cleartext-off-loopback) before
+catch config typos/redirects (file:, gopher:, cleartext-off-LAN) before
 the bearer key is sent anywhere surprising — fail closed, fall back to the
 built-in prune.
 """
@@ -39,8 +39,33 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+# Cleartext http is allowed exactly for loopback + these non-routed ranges:
+# RFC1918 LANs (self-hosted routers like conduit2), Tailscale CGNAT
+# (100.64/10 — NOT covered by is_private), ULA + link-local IPv6. The
+# ips are checked against explicit networks, never is_private — that flag
+# also matches 169.254/16 link-local, i.e. the cloud metadata endpoint.
+_CLEAR_NETWORKS_V4 = tuple(
+    ipaddress.ip_network(c)
+    for c in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "127.0.0.0/8")
+)
+_CLEAR_NETWORKS_V6 = tuple(
+    ipaddress.ip_network(c) for c in ("::1/128", "fc00::/7", "fe80::/10", "fec0::/10")
+)
+
+
+def _allows_cleartext(host: str) -> bool:
+    if _is_loopback_host(host):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # DNS names must use https — no resolution at prune time
+    nets = _CLEAR_NETWORKS_V6 if ip.version == 6 else _CLEAR_NETWORKS_V4
+    return any(ip in net for net in nets)
+
+
 def _check_url(url: str) -> tuple[str, str]:
-    """Fail-closed URL policy: https anywhere, http loopback-only, no userinfo.
+    """Fail-closed URL policy: https anywhere, http LAN-only, no userinfo.
 
     Returns (scheme, host) for the caller. Raises JevError on anything else —
     the caller treats that as a failed jev attempt (built-in prune).
@@ -57,8 +82,8 @@ def _check_url(url: str) -> tuple[str, str]:
     # parser/request-library disagreement downstream.
     if "@" in parts.netloc:
         raise JevError("refusing jev url with embedded credentials")
-    if scheme == "http" and not _is_loopback_host(host):
-        raise JevError(f"refusing cleartext jev url for non-loopback host: {host or '(none)'}")
+    if scheme == "http" and not _allows_cleartext(host):
+        raise JevError(f"refusing cleartext jev url for non-LAN host: {host or '(none)'}")
     return scheme, host
 
 

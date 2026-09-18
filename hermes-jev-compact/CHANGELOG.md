@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.1] - 2026-09-18
+
+### Fixed
+
+- Cleartext HTTP allowed for private-LAN hosts: RFC1918, Tailscale CGNAT
+  (100.64/10), ULA/link-local IPv6, plus loopback. The 0.1.0 loopback-only
+  guard failed closed against every LAN self-hosted router (conduit2 over
+  `http://192.168.x.x`), silently disabling Jev everywhere but localhost.
+  Public IPs, DNS names, link-local 169.254/16 (cloud metadata), and
+  unspecified addresses still require HTTPS.
+
 ## [Unreleased]
 
 ### Fixed
