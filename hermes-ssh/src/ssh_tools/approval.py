@@ -61,8 +61,14 @@ def check_approval(command: str) -> dict[str, Any] | None:
     return result
 
 
-def approval_error(approval: dict[str, Any] | None, fallback: str) -> str | None:
-    """Error response when an approval result is a denial, else None."""
+def denial_message(approval: dict[str, Any] | None, fallback: str) -> str | None:
+    """Plain-text denial message, or None when the approval result passes."""
     if approval is None or approval.get("approved", True):
         return None
-    return err(str(approval.get("message", fallback)))
+    return str(approval.get("message", fallback))
+
+
+def approval_error(approval: dict[str, Any] | None, fallback: str) -> str | None:
+    """JSON error response when an approval result is a denial, else None."""
+    denied = denial_message(approval, fallback)
+    return err(denied) if denied is not None else None

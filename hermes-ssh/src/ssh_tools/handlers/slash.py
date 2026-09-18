@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..approval import check_approval
+from ..approval import check_approval, denial_message
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,9 +60,9 @@ def _handle_command(manager: SSHManager, name: str, args: list[str]) -> str:
     command = " ".join(command_parts).strip()
     if not command:
         return "Command is required."
-    approval = check_approval(command)
-    if approval is not None and not approval.get("approved", True):
-        return str(approval.get("message", "Command blocked by approval system"))
+    denied = denial_message(check_approval(command), "Command blocked by approval system")
+    if denied is not None:
+        return denied
     result = manager.run_command(name, command, background=background)
     if background and result.get("success"):
         return (
