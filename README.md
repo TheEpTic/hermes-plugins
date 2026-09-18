@@ -7,6 +7,7 @@ Practical community plugins for [Hermes Agent](https://github.com/NousResearch/h
 
 - **hermes-ssh** gives Hermes named, multi-host SSH operations with a machine registry, reusable connections, background sessions, and audit history.
 - **hermes-sfw** routes dependency changes through Socket Firewall Free instead of trusting raw package-manager installs.
+- **hermes-jev-compact** scores stale tool results with TypeSafe Jev during context compression and drops the dead weight, falling back to the built-in prune on any failure.
 
 Want the lazy route? Give your agent this repository and point it at [AGENTS.md](AGENTS.md).
 
@@ -16,8 +17,9 @@ Want the lazy route? Give your agent this repository and point it at [AGENTS.md]
 |---|---|---|
 | [hermes-ssh](hermes-ssh/) | Hermes needs to operate one or more registered machines over SSH | `hermes-ssh` |
 | [hermes-sfw](hermes-sfw/) | Hermes installs or updates npm, Python, or Rust dependencies | `hermes-sfw` |
+| [hermes-jev-compact](hermes-jev-compact/) | context compression should keep only tool results Jev scores as still useful | `hermes-jev-compact` |
 
-They are independent. Install either one or both.
+They are independent. Install any combination.
 
 ## install in about a minute
 
@@ -41,6 +43,16 @@ hermes plugins enable hermes-sfw --no-allow-tool-override
 python -m pip show hermes-sfw
 ```
 
+### hermes-jev-compact
+
+```bash
+python -m pip install hermes-jev-compact
+hermes plugins enable hermes-jev-compact --no-allow-tool-override
+python -m pip show hermes-jev-compact
+```
+
+Then opt in with `context.engine: jev` and `/reset`. See [hermes-jev-compact](hermes-jev-compact/) for settings (conduit2 base URL, key env, thresholds).
+
 Run `/reset` or restart Hermes, then confirm the selected plugin is enabled:
 
 ```bash
@@ -62,7 +74,7 @@ Install the Hermes plugin I ask for from https://github.com/TheEpTic/hermes-plug
 
 Read AGENTS.md first. Identify the exact Python environment used by the `hermes` executable, install the matching PyPI distribution into that environment, enable it with `hermes plugins enable <name> --no-allow-tool-override`, restart or reset Hermes if possible, and verify it appears in `hermes plugins list --enabled --plain`.
 
-Do not use `hermes plugins install TheEpTic/hermes-plugins`; this is a monorepo with two independent PyPI packages. Do not guess SSH credentials, register root accounts, connect to a host, or run a dependency operation merely to prove installation. Report the commands used, detected paths, installed version, and verification result.
+Do not use `hermes plugins install TheEpTic/hermes-plugins`; this is a monorepo with three independent PyPI packages. Do not guess SSH credentials, register root accounts, connect to a host, or run a dependency operation merely to prove installation. Report the commands used, detected paths, installed version, and verification result.
 ```
 
 For machine-readable instructions, agents can also read [llms.txt](llms.txt).
@@ -125,6 +137,10 @@ uv sync --extra dev --locked
 uv run pytest
 
 cd ../hermes-sfw
+uv sync --extra dev --locked
+uv run pytest
+
+cd ../hermes-jev-compact
 uv sync --extra dev --locked
 uv run pytest
 ```

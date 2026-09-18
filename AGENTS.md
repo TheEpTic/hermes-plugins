@@ -4,18 +4,19 @@ Follow this file when a user hands you the repository and asks you to install or
 
 ## rule zero
 
-This repository is a monorepo containing two independent Python distributions:
+This repository is a monorepo containing three independent Python distributions:
 
 | requested plugin | PyPI distribution | Hermes plugin name |
 |---|---|---|
 | SSH | `hermes-ssh` | `hermes-ssh` |
 | Socket Firewall | `hermes-sfw` | `hermes-sfw` |
+| Jev Compact | `hermes-jev-compact` | `hermes-jev-compact` |
 
-Do **not** run `hermes plugins install TheEpTic/hermes-plugins`. Hermes's Git installer expects one installable plugin repository, while this repository contains two packages.
+Do **not** run `hermes plugins install TheEpTic/hermes-plugins`. Hermes's Git installer expects one installable plugin repository, while this repository contains three packages.
 
 ## installation procedure
 
-1. Confirm which plugin the user requested. Do not install both unless they asked for both.
+1. Confirm which plugin the user requested. Do not install others unless they asked for them.
 2. Locate Hermes with `command -v hermes`.
 3. Inspect the executable and determine the exact Python environment that owns it.
 4. Install the requested PyPI distribution into that environment.
@@ -47,6 +48,8 @@ For a normal virtual environment or pip installation:
 /path/to/hermes-python -m pip install hermes-ssh
 # or
 /path/to/hermes-python -m pip install hermes-sfw
+# or
+/path/to/hermes-python -m pip install hermes-jev-compact
 ```
 
 If that interpreter has no `pip`, use an environment-aware tool such as:
@@ -63,6 +66,8 @@ Do not use `sudo pip`, mutate the system Python blindly, or install into whichev
 hermes plugins enable hermes-ssh --no-allow-tool-override
 # or
 hermes plugins enable hermes-sfw --no-allow-tool-override
+# or
+hermes plugins enable hermes-jev-compact --no-allow-tool-override
 
 hermes plugins list --enabled --plain
 ```
@@ -73,7 +78,7 @@ Verify the distribution through the Hermes interpreter too:
 /path/to/hermes-python -c 'from importlib.metadata import version; print(version("hermes-ssh"))'
 ```
 
-Use `hermes-sfw` in the final command when that is the requested package.
+Use `hermes-sfw` / `hermes-jev-compact` in the final command when that is the requested package.
 
 Hermes imports plugin modules once. Run `/reset` in an active session or restart the Hermes process after installation or upgrade.
 
@@ -121,6 +126,17 @@ sfw action=status
 ```
 
 Do not install a throwaway dependency merely to test the plugin.
+
+### hermes-jev-compact
+
+Requirements:
+
+- conduit2 (or compatible router) reachable at the plugin's `conduit_base_url` with a `/v1/systemone` lane
+- a client key in `~/.hermes/.env` under the plugin's `conduit_api_key_env` (default `CONDUIT_NEXUS_API_KEY`)
+
+After enabling, opt a session in with `context.engine: jev` and `/reset`. `compressor` (default) bypasses plugins entirely, so enabling the package alone changes nothing.
+
+Do not run a compression merely to test the plugin on a session carrying secrets outside the Jev endpoint's trust boundary; pruning is lossy by design.
 
 ## completion report
 

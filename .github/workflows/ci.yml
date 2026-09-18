@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [hermes-ssh, hermes-sfw]
+        plugin: [hermes-ssh, hermes-sfw, hermes-jev-compact]
         python-version: ["3.11", "3.12", "3.13"]
     defaults:
       run:

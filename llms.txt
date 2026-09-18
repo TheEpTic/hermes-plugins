@@ -8,6 +8,7 @@ Repository: https://github.com/TheEpTic/hermes-plugins
 
 - `hermes-ssh`: named multi-host SSH inventory, command execution, reusable connections, sessions, and audit history
 - `hermes-sfw`: restricted dependency operations through Socket Firewall Free
+- `hermes-jev-compact`: Jev-scored tool-prune context engine (`context.engine: jev`), needs conduit2 `/v1/systemone` + key
 
 ## installation contract
 
@@ -21,6 +22,9 @@ npm i -g sfw
 sfw --version
 /path/to/hermes-python -m pip install hermes-sfw
 hermes plugins enable hermes-sfw --no-allow-tool-override
+
+/path/to/hermes-python -m pip install hermes-jev-compact
+hermes plugins enable hermes-jev-compact --no-allow-tool-override
 ```
 
 Verify with:
@@ -31,7 +35,7 @@ hermes plugins list --enabled --plain
 
 Run `/reset` or restart Hermes after installation or upgrade.
 
-Do not use `hermes plugins install TheEpTic/hermes-plugins`; this repository contains two independent packages. Read `AGENTS.md` for deterministic environment detection and safety rules.
+Do not use `hermes plugins install TheEpTic/hermes-plugins`; this repository contains three independent packages. Read `AGENTS.md` for deterministic environment detection and safety rules.
 
 ## safety
 
