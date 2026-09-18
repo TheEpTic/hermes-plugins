@@ -66,10 +66,11 @@ def sanitize_oserror(exc: OSError) -> str:
 
 
 def truncate_list(items: list[str], limit: int = _MAX_LIST_ENTRIES) -> list[str]:
-    """Cap a list to prevent context flooding."""
-    if len(items) <= limit:
-        return items
-    return items[:limit] + [f"... and {len(items) - limit} more"]
+    """Deduplicate (order-preserving) and cap a list to prevent context flooding."""
+    deduped = list(dict.fromkeys(items))
+    if len(deduped) <= limit:
+        return deduped
+    return deduped[:limit] + [f"... and {len(deduped) - limit} more"]
 
 
 def strip_ansi(text: str) -> str:
@@ -131,8 +132,4 @@ def parse_output(output: str) -> tuple[list[str], list[str]]:
                 installed.append(candidate)
             break
 
-    # Deduplicate results while preserving order, then cap list size
-    blocked = truncate_list(list(dict.fromkeys(blocked)))
-    installed = truncate_list(list(dict.fromkeys(installed)))
-
-    return blocked, installed
+    return truncate_list(blocked), truncate_list(installed)
