@@ -42,6 +42,12 @@ class EncryptedStore:
 
     # ----- Key management -----
 
+    def _read_key(self) -> Fernet:
+        """Read the existing key file into a Fernet (loser of the create race)."""
+        raw = (self._data_dir / _KEY_FILE).read_text(encoding="utf-8").strip()
+        self._fernet = Fernet(raw.encode())
+        return self._fernet
+
     def _ensure_key(self) -> Fernet:
         """Load or generate the encryption key.
 
@@ -56,9 +62,7 @@ class EncryptedStore:
 
         # Try to read existing key
         if key_path.exists():
-            raw = key_path.read_text(encoding="utf-8").strip()
-            self._fernet = Fernet(raw.encode())
-            return self._fernet
+            return self._read_key()
 
         # Generate new key — atomic create (O_EXCL fails if file already exists)
         key = Fernet.generate_key()
@@ -73,9 +77,7 @@ class EncryptedStore:
                 os.close(fd)
         except FileExistsError:
             # Another process won the race — read their key
-            raw = key_path.read_text(encoding="utf-8").strip()
-            self._fernet = Fernet(raw.encode())
-            return self._fernet
+            return self._read_key()
 
         self._fernet = Fernet(key)
         logger.info("Generated new encryption key at %s", key_path)
