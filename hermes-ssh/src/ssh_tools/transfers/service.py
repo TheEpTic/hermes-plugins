@@ -5,7 +5,6 @@ from __future__ import annotations
 import ctypes
 import errno
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -15,6 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..audit import effective_mode, redact_local_path
+from ..helpers import append_jsonl
+from ..models import Machine
 from .models import RemoteKind, TransferRequest, TransferValidationError
 from .policy import (
     cleanup_local,
@@ -27,13 +29,10 @@ from .policy import (
     remote_shell_path,
     remote_temp,
 )
-from .transport import SFTPTransport
+from .transport import run_sftp
 
 if TYPE_CHECKING:
     from ..manager import SSHManager
-    from ..models import Machine
-
-_AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
 
 
 def _renameat2_no_replace(temporary: Path, destination: Path) -> None:
@@ -85,7 +84,6 @@ class TransferService:
 
     def __init__(self, manager: SSHManager) -> None:
         self.manager = manager
-        self.transport = SFTPTransport(manager)
 
     def execute(self, request: TransferRequest) -> dict[str, Any]:
         machine = self.manager.get_machine(request.machine_name)
@@ -177,7 +175,7 @@ class TransferService:
         local_path: Path,
         remote_path_value: str,
     ) -> subprocess.CompletedProcess[str]:
-        return self.transport.run(machine, request, local_path, remote_path_value)
+        return run_sftp(machine, self.manager.config, request, local_path, remote_path_value)
 
     def _cleanup_remote(
         self,
@@ -581,8 +579,8 @@ class TransferService:
                 "destination_length": len(destination),
             }
         if request.action == "upload":
-            return {"source": TransferService._redact_local(source), "destination": destination}
-        return {"source": source, "destination": TransferService._redact_local(destination)}
+            return {"source": redact_local_path(source), "destination": destination}
+        return {"source": source, "destination": redact_local_path(destination)}
 
     def _audit(
         self,
@@ -595,10 +593,8 @@ class TransferService:
         elapsed: float,
         size: int,
     ) -> None:
-        mode = str(self.manager.config.audit_log_mode).strip().lower()
-        if mode not in _AUDIT_MODES:
-            mode = "redacted"
-        if mode == "off":
+        mode = effective_mode(self.manager.config.audit_log_mode)
+        if mode is None:
             return
 
         entry: dict[str, Any] = {
@@ -615,25 +611,4 @@ class TransferService:
             "bytes": size,
         }
         entry.update(self._audit_paths(mode, request, source, destination))
-
-        try:
-            self.manager.config.data_dir.mkdir(parents=True, exist_ok=True)
-            path = self.manager.config.data_dir / "command_log.jsonl"
-            fd = os.open(
-                str(path),
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                0o600,
-            )
-            with os.fdopen(fd, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
-        except OSError:
-            return
-
-    @staticmethod
-    def _redact_local(path: str) -> str:
-        home = str(Path.home())
-        if path == home:
-            return "~"
-        if path.startswith(home + os.sep):
-            return "~" + path[len(home) :]
-        return path
+        append_jsonl(self.manager.config.data_dir / "command_log.jsonl", entry)

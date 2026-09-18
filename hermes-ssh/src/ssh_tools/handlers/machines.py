@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..models import Machine
-from ..utils import err, ok, require
+from ..helpers import dispatch, err, ok, param_str
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -56,15 +56,24 @@ def _handle_list(manager: SSHManager) -> str:
     )
 
 
+def _take_name(params: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Machine name or (None, error); empty passes through to registry errors."""
+    return param_str(params, "name", allow_empty=True)
+
+
 def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
-    error = require(params, "name", "host")
+    name, error = _take_name(params)
+    host, host_error = param_str(params, "host", allow_empty=True)
     if error:
         return err(error)
+    if host_error:
+        return err(host_error)
+    assert name is not None and host is not None
     try:
         machine = manager.add_machine(
             Machine(
-                name=params["name"],
-                host=params["host"],
+                name=name,
+                host=host,
                 user=params.get("user") or manager.config.default_user,
                 port=params.get("port", 22),
                 key=params.get("key", ""),
@@ -92,12 +101,10 @@ def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
-    error = require(params, "name")
+    name, error = _take_name(params)
     if error:
         return err(error)
-    name = params["name"]
-    if not isinstance(name, str):
-        return err("name must be a string")
+    assert name is not None
     removed = manager.remove_machine(name)
     return ok(
         success=removed,
@@ -106,12 +113,10 @@ def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
-    error = require(params, "name")
+    name, error = _take_name(params)
     if error:
         return err(error)
-    name = params["name"]
-    if not isinstance(name, str):
-        return err("name must be a string")
+    assert name is not None
     inspected = manager.get_machine(name)
     if not inspected:
         return err(f"Machine '{name}' not found")
@@ -120,30 +125,26 @@ def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_test(manager: SSHManager, params: dict[str, Any]) -> str:
-    error = require(params, "name")
+    name, error = _take_name(params)
     if error:
         return err(error)
-    name = params["name"]
-    if not isinstance(name, str):
-        return err("name must be a string")
+    assert name is not None
     return ok(**manager.test_machine(name))
+
+
+_ACTIONS = {
+    "list": lambda manager, params: _handle_list(manager),
+    "add": _handle_add,
+    "remove": _handle_remove,
+    "inspect": _handle_inspect,
+    "test": _handle_test,
+}
 
 
 def handle_ssh_machines(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_machines that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        action = params.get("action", "list")
-        if action == "list":
-            return _handle_list(manager)
-        if action == "add":
-            return _handle_add(manager, params)
-        if action == "remove":
-            return _handle_remove(manager, params)
-        if action == "inspect":
-            return _handle_inspect(manager, params)
-        if action == "test":
-            return _handle_test(manager, params)
-        return err(f"Unknown action: {action}")
+        return dispatch(params, _ACTIONS, manager)
 
     return _handle

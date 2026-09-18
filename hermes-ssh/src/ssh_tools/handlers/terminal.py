@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..approval import check_approval
-from ..utils import err, ok, require
+from ..approval import approval_error, check_approval
+from ..helpers import err, ok, param_bool, param_str
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -17,28 +17,27 @@ def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        error = require(params, "machine", "command")
+        machine, error = param_str(params, "machine")
         if error:
             return err(error)
-
-        machine = params["machine"]
-        command = params["command"]
-        if not isinstance(machine, str) or not machine:
-            return err("machine must be a non-empty string")
-        if not isinstance(command, str) or not command.strip():
-            return err("command must be a non-empty string")
-
-        background = params.get("background", False)
-        if not isinstance(background, bool):
-            return err(f"background must be a boolean, got {type(background).__name__}")
-        new_session = params.get("new_session", False)
-        if not isinstance(new_session, bool):
-            return err(f"new_session must be a boolean, got {type(new_session).__name__}")
+        assert machine is not None
+        command, error = param_str(params, "command")
+        if error:
+            return err(error)
+        assert command is not None
+        background, error = param_bool(params, "background")
+        if error:
+            return err(error)
+        assert background is not None
+        new_session, error = param_bool(params, "new_session")
+        if error:
+            return err(error)
+        assert new_session is not None
 
         # Check command against Hermes approval system.
-        approval = check_approval(command)
-        if approval is not None and not approval.get("approved", True):
-            return err(str(approval.get("message", "Command blocked by approval system")))
+        denied = approval_error(check_approval(command), "Command blocked by approval system")
+        if denied:
+            return denied
 
         result = manager.run_command(
             machine_name=machine,

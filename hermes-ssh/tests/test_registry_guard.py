@@ -13,6 +13,8 @@ import getpass
 import json
 from typing import TYPE_CHECKING, Any
 
+import pytest
+
 from ssh_tools.handlers import handle_ssh_machines
 from ssh_tools.models import Machine
 
@@ -42,13 +44,24 @@ def _make_handler(tmp_path: Path) -> Callable[[dict[str, Any]], str]:
     return handle_ssh_machines(_make_manager(tmp_path))
 
 
-def test_add_same_host_user_different_name_warns(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "first,second,expect_warning",
+    [
+        ("host1", "host2", True),  # same host+user, different name -> warn
+        ("host1", "host1", False),  # exact same name -> update, no warning
+    ],
+)
+def test_add_duplicate_warning(
+    tmp_path: Path, first: str, second: str, expect_warning: bool
+) -> None:
     handler = _make_handler(tmp_path)
-    assert _add(handler, "host1")["success"] is True
+    assert _add(handler, first)["success"] is True
 
-    result = _add(handler, "host2")
+    result = _add(handler, second)
     assert result["success"] is True
-    assert result["warning"] == (f"host {HOST} with user {USER} already registered as name host1")
+    assert ("warning" in result) is expect_warning
+    if expect_warning:
+        assert result["warning"] == f"host {HOST} with user {USER} already registered as name host1"
 
 
 def test_add_duplicate_warning_does_not_block_add(tmp_path: Path) -> None:
@@ -58,6 +71,7 @@ def test_add_duplicate_warning_does_not_block_add(tmp_path: Path) -> None:
     result = _add(handler, "host2")
     assert result["success"] is True
     assert result["machine"]["host"] == HOST
+    assert "warning" in result
 
     listed = json.loads(handler({"action": "list"}))
     assert listed["count"] == 2
@@ -65,30 +79,20 @@ def test_add_duplicate_warning_does_not_block_add(tmp_path: Path) -> None:
     assert "host2" in listed["machines"]
 
 
-def test_add_exact_duplicate_still_handled(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "setup,second,kwargs",
+    [
+        (("host1", {"host": HOST}), "host1", {"host": "2.2.2.2"}),  # same name, other host
+        (("host1", {"user": USER}), "host2", {"user": "deploy"}),  # same host, other user
+    ],
+)
+def test_add_no_warning_for_updates_and_other_users(
+    tmp_path: Path, setup: tuple, second: str, kwargs: dict
+) -> None:
     handler = _make_handler(tmp_path)
-    assert _add(handler, "host1")["success"] is True
+    _add(handler, setup[0], **setup[1])
 
-    # Re-adding the exact same name is an update, not a new alias: no warning.
-    result = _add(handler, "host1")
-    assert result["success"] is True
-    assert "warning" not in result
-
-
-def test_add_same_name_different_host_no_warning(tmp_path: Path) -> None:
-    handler = _make_handler(tmp_path)
-    _add(handler, "host1", host=HOST)
-
-    result = _add(handler, "host1", host="2.2.2.2")
-    assert result["success"] is True
-    assert "warning" not in result
-
-
-def test_add_same_host_different_user_no_warning(tmp_path: Path) -> None:
-    handler = _make_handler(tmp_path)
-    _add(handler, "host1", user=USER)
-
-    result = _add(handler, "host2", user="deploy")
+    result = _add(handler, second, **kwargs)
     assert result["success"] is True
     assert "warning" not in result
 
@@ -99,9 +103,9 @@ def test_add_duplicate_warning_carries_diagnose_hint(tmp_path: Path) -> None:
 
     result = _add(handler, "host2")
     assert "warning" in result
-    assert "host1" in result["hint"]
-    assert "inspect" in result["hint"]
-    assert "list" in result["hint"]
+    assert result["hint"].startswith("If you meant to reuse that host")
+    for fragment in ("host1", "inspect", "list"):
+        assert fragment in result["hint"]
 
 
 def test_add_duplicate_multiple_matches_lists_all(tmp_path: Path) -> None:

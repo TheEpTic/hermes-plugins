@@ -12,6 +12,7 @@ import stat
 import uuid
 from pathlib import Path, PurePosixPath
 
+from ..helpers import coerce_int
 from .models import LocalSource, TransferValidationError
 
 MAX_TIMEOUT = 3600
@@ -57,15 +58,10 @@ _WRITE_DENIED_PREFIXES = tuple(
 def normalise_timeout(value: object | None) -> int:
     if value is None:
         return 300
-    if isinstance(value, bool):
-        raise TransferValidationError("timeout must be an integer from 1 to 3600")
     try:
-        timeout = int(value) if isinstance(value, str) else value
+        return coerce_int(value, "timeout", minimum=1, maximum=MAX_TIMEOUT)
     except ValueError as exc:
         raise TransferValidationError("timeout must be an integer from 1 to 3600") from exc
-    if not isinstance(timeout, int) or not 1 <= timeout <= MAX_TIMEOUT:
-        raise TransferValidationError("timeout must be an integer from 1 to 3600")
-    return timeout
 
 
 def path_text(value: object, label: str) -> str:
@@ -130,26 +126,23 @@ def remote_sensitive_reason(path: str) -> str | None:
     return None
 
 
-def _hermes_read_denied(path: Path) -> bool:
+def _hermes_check(path: Path, checker: str) -> bool:
     try:
         module = importlib.import_module("agent.file_safety")
-        checker = getattr(module, "get_read_block_error", None)
-        return bool(checker(str(path))) if callable(checker) else False
+        func = getattr(module, checker, None)
+        return bool(func(str(path))) if callable(func) else False
     except ImportError:
         return False
     except Exception:
         return True
+
+
+def _hermes_read_denied(path: Path) -> bool:
+    return _hermes_check(path, "get_read_block_error")
 
 
 def _hermes_write_denied(path: Path) -> bool:
-    try:
-        module = importlib.import_module("agent.file_safety")
-        checker = getattr(module, "is_write_denied", None)
-        return bool(checker(str(path))) if callable(checker) else False
-    except ImportError:
-        return False
-    except Exception:
-        return True
+    return _hermes_check(path, "is_write_denied")
 
 
 def _within(path: Path, root: Path) -> bool:
