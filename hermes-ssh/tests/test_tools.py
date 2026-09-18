@@ -234,11 +234,12 @@ def test_approval_mode_off_bypasses(tmp_path: Path) -> None:
     [("", "ssh"), ("help", "ssh"), ("test", "No machines"), ("cleanup", "No idle")],
 )
 def test_slash_builtins(tmp_path: Path, args: str, fragment: str) -> None:
-    result = _slash(tmp_path)(args)
+    slash = _slash(tmp_path)
+    result = slash(args)
     assert result is not None
     assert fragment in result or fragment in result.lower()
     # unknown names get their own error, distinct from unknown slash subcommands
-    unknown = _slash(tmp_path)("nonexistent")
+    unknown = slash("nonexistent")
     assert unknown is not None and "not found" in unknown.lower()
 
 
