@@ -6,8 +6,8 @@ firewall binary into ``<package root>/.sfw-cache/<release>/<asset>`` and points
 tree copied under a new home leaves an absolute link pointing at the old
 location — every routed command dies inside the launcher ("Failed to prepare
 firewall binary") before the package manager runs. The plugin must skip such an
-install in favour of a working one, and when there is none, report the fault and
-its repair instead of letting the failure look like a dependency block.
+install in favour of a working one, and when there is none, report the fault
+and its repair instead of letting the failure look like a dependency block.
 """
 
 from __future__ import annotations
@@ -29,11 +29,11 @@ BOOTSTRAP_ERROR = (
     "[sfw] Failed to prepare firewall binary: Unable to fetch latest release "
     "and no valid cached release found."
 )
-# A path from the provisioning-time tree, i.e. what a stale absolute link holds.
+# Provisioning-time absolute link target, i.e. what a stale link holds.
 STALE_TARGET = "/mnt/skel/home/gotavex/.npm-global/lib/node_modules/sfw/.sfw-cache/v1.15.1/sfw-free-linux-x86_64"
 
 
-class _Layout:
+class Layout:
     """A fake npm-global install of the sfw launcher."""
 
     def __init__(self, tmp_path: Path) -> None:
@@ -73,212 +73,147 @@ class _Layout:
 
 
 @pytest.fixture
-def layout(tmp_path: Path) -> _Layout:
-    return _Layout(tmp_path)
+def layout(tmp_path: Path) -> Layout:
+    return Layout(tmp_path)
+
+
+@pytest.fixture
+def stale_layout(layout: Layout) -> Layout:
+    """Layout with the reported incident shape: cached asset + stale absolute link."""
+    layout.add_cached_asset()
+    layout.link_latest(STALE_TARGET)
+    return layout
+
+
+def _real_binary(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    real = directory / "sfw"
+    real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    real.chmod(0o755)
+    return real
+
+
+def _resolve_env(which_hit: str, candidates: list) -> tuple:
+    return (
+        patch("hermes_sfw.resolve.shutil.which", return_value=which_hit),
+        patch("hermes_sfw.manager.SFWManager._known_candidates", return_value=candidates),
+    )
 
 
 class TestWrapperCacheFault:
-    def test_dangling_latest_with_cached_asset_is_a_fault(self, layout: _Layout) -> None:
-        """The reported incident: an absolute link left over from provisioning."""
+    def test_stale_absolute_link_is_the_reported_fault(self, stale_layout: Layout) -> None:
+        fault = stale_layout.manager().wrapper_cache_fault()
+        assert fault is not None and fault.binary == str(stale_layout.shim)
+        assert "dangling symlink" in fault.reason and STALE_TARGET in fault.reason
+        assert fault.cached_asset is not None
+        assert fault.repair == f"ln -sfn {fault.cached_asset} {stale_layout.latest}"
+        assert f"ln -sfn {fault.cached_asset} {stale_layout.latest}" in fault.note()
+
+    def test_missing_and_relative_links_are_faults(self, layout: Layout) -> None:
         asset = layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-
-        fault = layout.manager().wrapper_cache_fault()
-
-        assert fault is not None
-        assert fault.binary == str(layout.shim)
-        assert "dangling symlink" in fault.reason
-        assert STALE_TARGET in fault.reason
-        assert fault.cached_asset == str(asset)
-        assert fault.repair == f"ln -sfn {asset} {layout.latest}"
-        assert f"ln -sfn {asset} {layout.latest}" in fault.note()
-
-    def test_missing_latest_with_cached_asset_is_a_fault(self, layout: _Layout) -> None:
-        asset = layout.add_cached_asset()
-
-        fault = layout.manager().wrapper_cache_fault()
-
-        assert fault is not None
-        assert "missing" in fault.reason
-        assert fault.repair == f"ln -sfn {asset} {layout.latest}"
-
-    def test_relative_dangling_latest_is_a_fault(self, layout: _Layout) -> None:
-        layout.add_cached_asset()
+        assert layout.manager().wrapper_cache_fault().repair == f"ln -sfn {asset} {layout.latest}"
         layout.link_latest("../gone/sfw-free-linux-x86_64")
-
         fault = layout.manager().wrapper_cache_fault()
+        assert fault is not None and "dangling symlink" in fault.reason
 
-        assert fault is not None
-        assert "dangling symlink" in fault.reason
-
-    def test_resolving_latest_is_healthy(self, layout: _Layout) -> None:
+    def test_healthy_and_empty_states_are_not_faults(self, layout: Layout, tmp_path: Path) -> None:
         asset = layout.add_cached_asset()
         layout.link_latest(str(asset))
-
         assert layout.manager().wrapper_cache_fault() is None
-
-    def test_fresh_install_is_not_a_fault(self, layout: _Layout) -> None:
-        """No cache yet: the launcher downloads on first use, so nothing is broken."""
-        assert not layout.cache_dir.exists()
-
-        assert layout.manager().wrapper_cache_fault() is None
-
-    def test_empty_cache_dir_is_not_a_fault(self, layout: _Layout) -> None:
-        layout.cache_dir.mkdir(parents=True)
-
-        assert layout.manager().wrapper_cache_fault() is None
-
-    def test_real_binary_has_no_cache_layer(self, tmp_path: Path) -> None:
-        real = tmp_path / "sfw"
-        real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        real.chmod(0o755)
-
-        mgr = SFWManager(SFWConfig(sfw_bin=str(real)))
-
-        assert mgr.wrapper_cache_fault() is None
-
-    def test_missing_binary_is_not_a_cache_fault(self, tmp_path: Path) -> None:
-        mgr = SFWManager(SFWConfig(sfw_bin=str(tmp_path / "nowhere" / "sfw")))
-
-        assert mgr.wrapper_cache_fault() is None
+        fresh = Layout(tmp_path / "fresh")
+        assert not fresh.cache_dir.exists()
+        assert fresh.manager().wrapper_cache_fault() is None
+        fresh.cache_dir.mkdir(parents=True)
+        assert fresh.manager().wrapper_cache_fault() is None
+        real = _real_binary(tmp_path / ".local" / "bin")
+        assert SFWManager(SFWConfig(sfw_bin=str(real))).wrapper_cache_fault() is None
+        gone = SFWManager(SFWConfig(sfw_bin=str(tmp_path / "nowhere" / "sfw")))
+        assert gone.wrapper_cache_fault() is None
 
 
 class TestResolutionPrefersUsableInstall:
-    def test_faulty_path_hit_is_skipped_for_a_working_candidate(
-        self, layout: _Layout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_faulty_path_hit_skipped_for_working_candidate(
+        self, stale_layout: Layout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        healthy = tmp_path / ".local" / "bin" / "sfw"
-        healthy.parent.mkdir(parents=True)
-        healthy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        healthy.chmod(0o755)
+        healthy = _real_binary(tmp_path / ".local" / "bin")
         monkeypatch.setenv("HOME", str(tmp_path))
-        with (
-            patch("hermes_sfw.manager.shutil.which", return_value=str(layout.shim)),
-            patch(
-                "hermes_sfw.manager.SFWManager._known_candidates",
-                return_value=[healthy],
-            ),
-        ):
+        which, cands = _resolve_env(str(stale_layout.shim), [healthy])
+        with which, cands:
             mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
+            assert mgr.sfw_path == str(healthy) and mgr.wrapper_cache_fault() is None
 
-            assert mgr.sfw_path == str(healthy)
-            assert mgr.wrapper_cache_fault() is None
-
-    def test_faulty_launcher_is_returned_when_it_is_all_there_is(
-        self, layout: _Layout, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_faulty_launcher_returned_when_it_is_all_there_is(self, stale_layout: Layout) -> None:
         """Never silently become "not installed": the failure must stay explainable."""
-        layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        with (
-            patch("hermes_sfw.manager.shutil.which", return_value=str(layout.shim)),
-            patch("hermes_sfw.manager.SFWManager._known_candidates", return_value=[]),
-        ):
+        which, cands = _resolve_env(str(stale_layout.shim), [])
+        with which, cands:
             mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
-
-            assert mgr.sfw_path == str(layout.shim)
+            assert mgr.sfw_path == str(stale_layout.shim)
             assert mgr.wrapper_cache_fault() is not None
 
-    def test_healthy_path_hit_wins_over_candidates(
-        self, layout: _Layout, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        asset = layout.add_cached_asset()
-        layout.link_latest(str(asset))
-        other = tmp_path / ".local" / "bin" / "sfw"
-        other.parent.mkdir(parents=True)
-        other.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        other.chmod(0o755)
-        with (
-            patch("hermes_sfw.manager.shutil.which", return_value=str(layout.shim)),
-            patch("hermes_sfw.manager.SFWManager._known_candidates", return_value=[other]),
-        ):
-            mgr = SFWManager(SFWConfig(sfw_bin="sfw"))
-
-            assert mgr.sfw_path == str(layout.shim)
+    def test_healthy_path_hit_wins_over_candidates(self, layout: Layout, tmp_path: Path) -> None:
+        layout.link_latest(str(layout.add_cached_asset()))
+        other = _real_binary(tmp_path / ".local" / "bin")
+        which, cands = _resolve_env(str(layout.shim), [other])
+        with which, cands:
+            assert SFWManager(SFWConfig(sfw_bin="sfw")).sfw_path == str(layout.shim)
 
 
 class TestBootstrapFailureNote:
-    def test_note_names_the_fault_and_repair(self, layout: _Layout) -> None:
-        asset = layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        mgr = layout.manager()
-
-        note = mgr.bootstrap_failure_note(f"stdout\n{BOOTSTRAP_ERROR}\n")
-
+    def test_names_fault_and_repair(self, stale_layout: Layout) -> None:
+        asset = stale_layout.cache_dir / "v1.15.1" / ASSET_NAME
+        note = stale_layout.manager().bootstrap_failure_note(f"stdout\n{BOOTSTRAP_ERROR}\n")
         assert note is not None
         assert "cannot prepare its firewall binary" in note
-        assert f"ln -sfn {asset} {layout.latest}" in note
+        assert f"ln -sfn {asset} {stale_layout.latest}" in note
         assert "not a dependency block" in note
 
-    def test_unrelated_failure_is_untouched(self, layout: _Layout) -> None:
-        layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
+    def test_unrelated_failure_untouched(self, stale_layout: Layout) -> None:
+        assert stale_layout.manager().bootstrap_failure_note("error: could not compile `x`") is None
 
-        assert layout.manager().bootstrap_failure_note("error: could not compile `x`") is None
-
-    def test_note_without_a_determinable_fault_is_still_actionable(self, tmp_path: Path) -> None:
+    def test_faultless_note_still_actionable(self, tmp_path: Path) -> None:
         mgr = SFWManager(SFWConfig(sfw_bin=str(tmp_path / "nowhere" / "sfw")))
-
         note = mgr.bootstrap_failure_note(BOOTSTRAP_ERROR)
-
-        assert note is not None
-        assert "action=status" in note
+        assert note is not None and "action=status" in note
 
 
 class TestRunCommandAnnotation:
-    def test_bootstrap_failure_stderr_gains_the_repair(self, layout: _Layout) -> None:
-        asset = layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        mgr = layout.manager()
+    @pytest.mark.parametrize(
+        "stdout,stderr,code,expect",
+        [
+            (b"", BOOTSTRAP_ERROR.encode(), 1, True),
+            (b"Fetched 0 crates", b"", 0, False),
+        ],
+    )
+    def test_annotation_matches_outcome(
+        self, stale_layout: Layout, stdout: bytes, stderr: bytes, code: int, expect: bool
+    ) -> None:
         proc = MagicMock()
-        proc.communicate.return_value = (b"", BOOTSTRAP_ERROR.encode())
-        proc.returncode = 1
-        with patch("hermes_sfw.manager.subprocess.Popen", return_value=proc):
-            result = mgr.run_command("cargo fetch")
-
-        assert result.success is False
-        assert result.exit_code == 1
-        assert f"ln -sfn {asset} {layout.latest}" in result.stderr
-
-    def test_success_output_is_not_annotated(self, layout: _Layout) -> None:
-        layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        mgr = layout.manager()
-        proc = MagicMock()
-        proc.communicate.return_value = (b"Fetched 0 crates", b"")
-        proc.returncode = 0
-        with patch("hermes_sfw.manager.subprocess.Popen", return_value=proc):
-            result = mgr.run_command("cargo fetch")
-
-        assert result.success is True
-        assert "hermes-sfw:" not in result.stderr
+        proc.communicate.return_value = (stdout, stderr)
+        proc.returncode = code
+        with patch("hermes_sfw.output.subprocess.Popen", return_value=proc):
+            result = stale_layout.manager().run_command("cargo fetch")
+        if expect:
+            assert result.exit_code == 1 and "ln -sfn" in result.stderr
+        else:
+            assert "hermes-sfw:" not in result.stderr
 
 
 class TestTerminalTransformHook:
-    def test_annotates_only_the_bootstrap_failure(self, layout: _Layout) -> None:
-        asset = layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        with patch.object(hermes_sfw, "_manager", layout.manager()):
+    def test_annotates_only_bootstrap_failure(self, stale_layout: Layout) -> None:
+        with patch.object(hermes_sfw, "_manager", stale_layout.manager()):
             annotated = _annotate_sfw_bootstrap_failure(output=BOOTSTRAP_ERROR)
             untouched = _annotate_sfw_bootstrap_failure(output="Compiling eternal-core v0.1.0")
+        assert annotated is not None and annotated.startswith(BOOTSTRAP_ERROR)
+        assert "ln -sfn" in annotated and untouched is None
 
-        assert annotated is not None
-        assert annotated.startswith(BOOTSTRAP_ERROR)
-        assert f"ln -sfn {asset} {layout.latest}" in annotated
-        assert untouched is None
-
-    def test_non_string_output_is_ignored(self, layout: _Layout) -> None:
-        layout.add_cached_asset()
-        layout.link_latest(STALE_TARGET)
-        with patch.object(hermes_sfw, "_manager", layout.manager()):
+    def test_non_string_output_ignored(self, stale_layout: Layout) -> None:
+        with patch.object(hermes_sfw, "_manager", stale_layout.manager()):
             assert _annotate_sfw_bootstrap_failure(output=None) is None
 
-    def test_hook_is_registered(self) -> None:
+    def test_hooks_registered(self) -> None:
         registered: dict[str, list] = {}
 
-        class _Ctx:
+        class Ctx:
             def register_tool(self, **kwargs: object) -> None:
                 pass
 
@@ -286,31 +221,21 @@ class TestTerminalTransformHook:
                 registered.setdefault(name, []).append(fn)
 
         with patch.object(hermes_sfw, "_manager", None):
-            hermes_sfw.register(_Ctx())
-
-        assert "transform_terminal_output" in registered
-        assert "pre_tool_call" in registered
+            hermes_sfw.register(Ctx())
+        assert "transform_terminal_output" in registered and "pre_tool_call" in registered
 
 
 class TestStatusReportsFault:
-    def test_status_marks_launcher_unusable(self, layout: _Layout) -> None:
+    def test_fault_and_healthy_status(self, layout: Layout) -> None:
         asset = layout.add_cached_asset()
         layout.link_latest(STALE_TARGET)
-
         payload = json.loads(handle_sfw(layout.manager())({"action": "status"}))
-
-        assert payload["success"] is True
-        assert payload["installed"] is True
+        assert payload["success"] is True and payload["installed"] is True
         assert payload["usable"] is False
         assert payload["cache_fault"]["cached_asset"] == str(asset)
         assert payload["cache_fault"]["repair"] == f"ln -sfn {asset} {layout.latest}"
-
-    def test_status_stays_plain_when_healthy(self, layout: _Layout) -> None:
-        asset = layout.add_cached_asset()
+        layout.latest.unlink()
         layout.link_latest(str(asset))
-
-        payload = json.loads(handle_sfw(layout.manager())({"action": "status"}))
-
-        assert payload["installed"] is True
-        assert "cache_fault" not in payload
-        assert "usable" not in payload
+        plain = json.loads(handle_sfw(layout.manager())({"action": "status"}))
+        assert plain["installed"] is True
+        assert "cache_fault" not in plain and "usable" not in plain

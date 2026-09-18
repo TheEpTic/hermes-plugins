@@ -33,7 +33,73 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from .manager import contains_package_manager_command
+from .validate import _ALLOWED_COMMAND_PREFIXES
+
+_PACKAGE_MANAGER_WRAPPERS = frozenset(
+    {"command", "env", "exec", "nice", "nohup", "sudo", "timeout"}
+)
+_SHELL_WRAPPERS = frozenset({"bash", "dash", "fish", "ksh", "sh", "zsh"})
+_SHELL_COMMAND_BOUNDARIES = frozenset({";", "&&", "||", "|", "&", "(", ")"})
+
+
+def _shell_command_tokens(command: str) -> list[str]:
+    """Tokenize shell syntax enough to identify nested command segments."""
+    lexer = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|()")
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _segment_start_state(name: str) -> tuple[bool, str | None]:
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, None
+    wrapper_mode = "shell" if name in _SHELL_WRAPPERS else None
+    return False, "generic" if name in _PACKAGE_MANAGER_WRAPPERS else wrapper_mode
+
+
+def _wrapped_command_state(name: str, wrapper_mode: str | None) -> tuple[bool, str | None]:
+    if wrapper_mode != "generic":
+        return wrapper_mode == "shell" and contains_package_manager_command(name), wrapper_mode
+    if name in _ALLOWED_COMMAND_PREFIXES:
+        return True, wrapper_mode
+    return False, "shell" if name in _SHELL_WRAPPERS else wrapper_mode
+
+
+def contains_package_manager_command(command: str) -> bool:
+    """Return True when a shell command segment invokes a supported manager."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+
+    try:
+        parts = _shell_command_tokens(command)
+    except ValueError:
+        # A malformed command beginning with a known manager still needs to be
+        # stopped before the terminal backend gets a chance to interpret it.
+        return bool(
+            re.search(
+                r"(?<![\w.-])(?:npm|yarn|pnpm|pip3?|uv|cargo)(?=\s|$)",
+                command,
+            )
+        )
+
+    segment_start = True
+    wrapper_mode: str | None = None
+    for token in parts:
+        if token in _SHELL_COMMAND_BOUNDARIES:
+            segment_start = True
+            wrapper_mode = None
+            continue
+
+        name = Path(token).name
+        if segment_start:
+            matched, wrapper_mode = _segment_start_state(name)
+            segment_start = False
+        else:
+            matched, wrapper_mode = _wrapped_command_state(name, wrapper_mode)
+        if matched:
+            return True
+
+    return False
+
 
 _MANAGERS = frozenset({"cargo", "npm", "npx", "pip", "pip3", "pnpm", "uv", "uvx", "yarn"})
 _TRANSPARENT = frozenset({"command", "env", "exec", "nice", "nohup", "setsid", "time", "timeout"})
@@ -76,6 +142,23 @@ def _tokenize(text: str) -> list[_Token]:
     Newlines are statement separators like ``;``. Quoted spans are consumed
     whole so their contents are never treated as shell syntax.
     """
+
+    def consume_quoted(i: int, quote: str, value: list[str]) -> int:
+        i += 1
+        while i < len(text) and text[i] != quote:
+            escaped = text[i] == "\\" and i + 1 < len(text)
+            value.append(text[i + 1] if escaped else text[i])
+            i += 2 if escaped else 1
+        if i == len(text):
+            raise ValueError(f"no closing {quote} quote")
+        return i + 1
+
+    def consume_escaped(i: int, value: list[str]) -> int:
+        if i + 1 == len(text):
+            raise ValueError("trailing backslash")
+        value.append(text[i + 1])
+        return i + 2
+
     tokens: list[_Token] = []
     i = 0
     while i < len(text):
@@ -97,33 +180,15 @@ def _tokenize(text: str) -> list[_Token]:
             ch = text[i]
             if ch in "'\"":
                 quoted = True
-                i, value = _consume_quoted(text, i, ch, value)
+                i = consume_quoted(i, ch, value)
                 continue
             if ch == "\\":
-                i, value = _consume_escaped(text, i, value)
+                i = consume_escaped(i, value)
                 continue
             value.append(ch)
             i += 1
         tokens.append(_Token("".join(value), start, i, quoted))
     return tokens
-
-
-def _consume_quoted(text: str, i: int, quote: str, value: list[str]) -> tuple[int, list[str]]:
-    i += 1
-    while i < len(text) and text[i] != quote:
-        escaped = text[i] == "\\" and i + 1 < len(text)
-        value.append(text[i + 1] if escaped else text[i])
-        i += 2 if escaped else 1
-    if i == len(text):
-        raise ValueError(f"no closing {quote} quote")
-    return i + 1, value
-
-
-def _consume_escaped(text: str, i: int, value: list[str]) -> tuple[int, list[str]]:
-    if i + 1 == len(text):
-        raise ValueError("trailing backslash")
-    value.append(text[i + 1])
-    return i + 2, value
 
 
 def _manager(value: str) -> bool:
@@ -192,16 +257,12 @@ def _payload_offset(token: _Token, text: str) -> int | None:
 def _unsafe_feature(tokens: list[_Token], text: str) -> str | None:
     """Return a block reason when the command uses structures we cannot rewrite."""
     for token in tokens:
-        if token.operator and token.value == "(" and False:
-            continue
         if token.operator:
             continue
-        if text[token.start : token.end].startswith("<<"):
+        if token.value.startswith("<<") or text[token.start : token.end].startswith("<<"):
             return "heredocs cannot be routed through sfw"
         if "$(" in token.value or "`" in token.value:
             return "command substitutions ($(...) / backticks) cannot be routed through sfw"
-        if token.value.startswith("<<"):
-            return "heredocs cannot be routed through sfw"
     return None
 
 
@@ -318,9 +379,8 @@ def _scan_segment(
             mode, wrapper, duration_seen, i = "wrapper", value, False, i + 1
             continue
         hidden = contains_package_manager_command(value)
-        blocks.extend(
-            ["package-manager invocation is hidden behind an unsupported wrapper"] if hidden else []
-        )
+        if hidden:
+            blocks.append("package-manager invocation is hidden behind an unsupported wrapper")
         mode, i = "args", i + 1
     return inserts, blocks
 
