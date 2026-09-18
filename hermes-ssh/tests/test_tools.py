@@ -85,7 +85,7 @@ def test_terminal_background(tmp_path: Path) -> None:
     assert result["status"] == "running" and result["session_id"] is not None
 
 
-def test_machines_add_list_remove(tmp_path: Path) -> None:
+def test_machines_crud_flow(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     assert _call(handle_ssh_machines(mgr), {"action": "list"})["count"] == 0
     result = _call(
@@ -96,14 +96,14 @@ def test_machines_add_list_remove(tmp_path: Path) -> None:
     listed = _call(handle_ssh_machines(mgr), {"action": "list"})
     assert listed["count"] == 1 and listed["machines"]["host1"]["host"] == "10.0.0.1"
     assert _call(handle_ssh_machines(mgr), {"action": "remove", "name": "host1"})["success"] is True
-
-
-def test_machines_add_defaults_local_user(tmp_path: Path) -> None:
-    result = _call(
-        handle_ssh_machines(_make_manager(tmp_path)),
-        {"action": "add", "name": "host1", "host": "10.0.0.1"},
+    # omitted user resolves to the local user; aliases resolve on inspect
+    defaulted = _call(
+        handle_ssh_machines(mgr),
+        {"action": "add", "name": "host2", "host": "10.0.0.2", "aliases": ["h2"]},
     )
-    assert result["machine"]["user"] == getpass.getuser()
+    assert defaulted["machine"]["user"] == getpass.getuser()
+    inspected = _call(handle_ssh_machines(mgr), {"action": "inspect", "name": "h2"})
+    assert inspected["success"] is True and inspected["name"] == "host2"
 
 
 @pytest.mark.parametrize(
@@ -122,13 +122,6 @@ def test_machines_add_defaults_local_user(tmp_path: Path) -> None:
 def test_machines_errors(tmp_path: Path, params: dict, fragment: str) -> None:
     result = _call(handle_ssh_machines(_make_manager(tmp_path)), params)
     assert result["success"] is False and fragment in result["error"]
-
-
-def test_machines_inspect_by_alias(tmp_path: Path) -> None:
-    mgr = _make_manager(tmp_path)
-    mgr.add_machine(Machine(name="host1", host="10.0.0.1", aliases=["h1"]))
-    result = _call(handle_ssh_machines(mgr), {"action": "inspect", "name": "h1"})
-    assert result["success"] is True and result["name"] == "host1"
 
 
 def test_machines_schema_no_root_default() -> None:
@@ -231,11 +224,7 @@ def test_approval_mode_off_bypasses(tmp_path: Path) -> None:
         result = _call(handle_ssh_terminal(mgr), {"machine": "h", "command": "rm -rf /tmp/test"})
     assert result["success"] is True
     mock_run.assert_called_once()
-
-
-def test_approval_required_names_commands(tmp_path: Path) -> None:
-    """gateway wording tells the user to reply with /approve or /deny."""
-    mgr = _add_h(tmp_path)
+    # gateway wording tells the user to reply with /approve or /deny
     waiting = {
         "approved": False,
         "status": "approval_required",
