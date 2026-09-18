@@ -1,8 +1,10 @@
 """hermes-jev-compact — Jev-powered smart tool-prune context engine for Hermes.
 
 A ContextCompressor subclass named ``jev`` that scores stale tool call/result
-units with TypeSafe Jev (via conduit2 /v1/systemone) and keeps/drops them by
-probability, falling back to the built-in deterministic prune on any failure.
+units with TypeSafe Jev (any OpenAI-style ``POST {base_url}/systemone``
+endpoint — TypeSafe's own API at https://api.typesafe.ai/v1 is the reference)
+and keeps/drops them by probability, falling back to the built-in
+deterministic prune on any failure.
 """
 
 from __future__ import annotations
@@ -49,7 +51,7 @@ def _build_engine(ctx: Any) -> Any:
     from .engine import _JEV_KNOBS, JevContextCompressor
 
     knobs = {attr: _setting(ctx, key, default) for attr, key, default in _JEV_KNOBS}
-    return JevContextCompressor(model="typesafe:jev-latest", **knobs)
+    return JevContextCompressor(model="jev-latest", **knobs)
 
 
 def register(ctx: Any) -> None:

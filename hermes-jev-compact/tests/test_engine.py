@@ -81,7 +81,7 @@ def test_init_forwards_base_params_and_sets_jev_defaults():
     assert eng.threshold_percent == 0.9
     assert eng.protect_last_n == 5
     assert eng.jev_keep_threshold == 0.5
-    assert eng.jev_model == "typesafe:jev-latest"
+    assert eng.jev_model == "jev-latest"
     assert (eng.jev_calls, eng.jev_pruned_units, eng.jev_fallbacks) == (0, 0, 0)
     # Host contract: update_model exists so the host can re-supply the chat key
     # per agent (summary LLM path); our instances keep api_key stripped.
@@ -101,7 +101,7 @@ def test_proactive_path_never_touches_jev(monkeypatch):
     # exactly like the base implementation.
     eng = _engine(jev_min_result_chars=1)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     with (
         patch("hermes_jev_compact.engine._resolve_secret") as secret,
         patch("hermes_jev_compact.engine.JevAsker") as asker_cls,
@@ -119,7 +119,7 @@ def test_jev_success_replaces_base_without_double_count(monkeypatch):
     # jev's output, and the count must be exactly the jev drop/truncate count.
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=3, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "test-key")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     probs = {}
     for i in range(1, 4):
         probs[f"call_t{i}"] = 0.1
@@ -157,7 +157,7 @@ def test_jev_success_replaces_base_without_double_count(monkeypatch):
 def test_jev_path_prunes_and_counts(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=3, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "test-key")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     probs = {}
     for i in range(1, 4):
         probs[f"call_t{i}"] = 0.1
@@ -187,7 +187,7 @@ def test_no_candidates_falls_back_to_super():
 def test_missing_key_falls_back(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.delenv("CONDUIT_NEXUS_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     with patch("hermes_jev_compact.engine._resolve_secret", return_value=""):
         out, count = eng._prune_old_tool_results(messages, 1, None, 200)
     expected, expected_count = ContextCompressor._prune_old_tool_results(
@@ -199,7 +199,7 @@ def test_missing_key_falls_back(monkeypatch):
 def test_jev_error_falls_back(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
 
     class Boom:
         def __init__(self, *a: Any, **k: Any) -> None:
@@ -220,7 +220,7 @@ def test_cancel_consult_falls_back(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     eng._compression_cancelled_check = lambda: True  # type: ignore[attr-defined]
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     with patch("hermes_jev_compact.engine.JevAsker") as asker_cls:
         out, count = eng._prune_old_tool_results(messages, 1, None, 200)
     asker_cls.assert_not_called()
@@ -233,7 +233,7 @@ def test_cancel_consult_falls_back(monkeypatch):
 def test_keep_everything_falls_back(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     with patch(
         "hermes_jev_compact.engine.JevAsker",
         side_effect=lambda *a, **k: _fake_factory({})(*a, **k),
@@ -248,7 +248,7 @@ def test_keep_everything_falls_back(monkeypatch):
 
 def test_secret_never_cached_on_instance(monkeypatch):
     eng = _engine()
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k1")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k1")
     messages = make_tool_transcript(n_calls=1, result_chars=9000)
     with patch(
         "hermes_jev_compact.engine.JevAsker",
@@ -267,7 +267,7 @@ def test_deepcopy_safe():
     clone = copy.deepcopy(eng)
     assert clone.name == "jev"
     assert clone is not eng
-    assert clone.jev_conduit_base_url == eng.jev_conduit_base_url
+    assert clone.jev_base_url == eng.jev_base_url
 
 
 def test_deepcopy_survives_host_runtime_state():
@@ -304,7 +304,7 @@ def test_sequential_batches_cancel_between_asks(monkeypatch):
     eng = _engine(jev_min_result_chars=100)
     n = 4
     messages = make_tool_transcript(n_calls=n, result_chars=5000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     from hermes_jev_compact.protocol import JevOptions as _Opts
 
     from hermes_jev_compact.adapter import collect_candidates as _cc
@@ -351,7 +351,7 @@ def test_cancel_after_ask_falls_back_and_commits_nothing(monkeypatch):
     # no counters, no jev output — straight to the deterministic prune.
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     state = {"cancel": False}
 
     class SlowCancelAsker:
@@ -482,7 +482,7 @@ def test_duplicate_assistant_ids_never_scored(monkeypatch):
         {"role": "tool", "tool_call_id": "dup", "content": "D" * 9000},
         {"role": "user", "content": "tail"},
     ]
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     with patch("hermes_jev_compact.engine.JevAsker") as asker_cls:
         out, count = eng._prune_old_tool_results(messages, 1, None, 1)
     asker_cls.assert_not_called()
@@ -496,7 +496,7 @@ def test_invalid_jev_output_falls_back(monkeypatch):
     # (simulated by forcing the checker to fail) must fall back to super().
     eng = _engine(jev_min_result_chars=100)
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("CONDUIT_NEXUS_API_KEY", "k")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
     probs = {}
     for i in range(1, 3):
         probs[f"call_t{i}"] = 0.1

@@ -4,13 +4,17 @@ Jev-powered smart tool-prune context engine for Hermes Agent.
 
 `JevContextCompressor` subclasses the built-in `ContextCompressor` and overrides
 only `_prune_old_tool_results`: stale tool call/result units are scored by
-TypeSafe Jev through conduit2 `/v1/systemone` (keep / truncate / drop by
-probability). Any Jev failure — transport, validation, timeout, cancel,
-missing key — falls back to the inherited deterministic prune. Worst case is
-exactly built-in behavior.
+TypeSafe Jev over any OpenAI-style `POST {base_url}/systemone` endpoint (keep /
+truncate / drop by probability). Any Jev failure — transport, validation,
+timeout, cancel, missing key — falls back to the inherited deterministic
+prune. Worst case is exactly built-in behavior.
 
-Requires conduit2 with the `typesafe:jev-latest` systemone route (key in
-`~/.hermes/.env` as `CONDUIT_NEXUS_API_KEY`).
+Works with any System One-compatible endpoint. TypeSafe's own API is the
+reference: `base_url: https://api.typesafe.ai/v1`, `jev_model: jev-latest`,
+key from [console.typesafe.ai](https://console.typesafe.ai/settings/keys) in
+`~/.hermes/.env` as `TYPESAFE_API_KEY`. Self-hosted routers that relay the
+same `{model, state, questions}` shape work too — just point `base_url` at
+them.
 
 ## install
 
@@ -28,9 +32,9 @@ plugins:
   entries:
     hermes-jev-compact:
       settings:
-        conduit_base_url: http://127.0.0.1:8765/v1
-        conduit_api_key_env: CONDUIT_NEXUS_API_KEY
-        jev_model: typesafe:jev-latest
+        base_url: https://api.typesafe.ai/v1
+        api_key_env: TYPESAFE_API_KEY
+        jev_model: jev-latest
         keep_threshold: 0.5
         max_state_tokens: 25000
         max_request_tokens: 30000
