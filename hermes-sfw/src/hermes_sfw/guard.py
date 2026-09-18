@@ -142,6 +142,23 @@ def _tokenize(text: str) -> list[_Token]:
     Newlines are statement separators like ``;``. Quoted spans are consumed
     whole so their contents are never treated as shell syntax.
     """
+
+    def consume_quoted(i: int, quote: str, value: list[str]) -> int:
+        i += 1
+        while i < len(text) and text[i] != quote:
+            escaped = text[i] == "\\" and i + 1 < len(text)
+            value.append(text[i + 1] if escaped else text[i])
+            i += 2 if escaped else 1
+        if i == len(text):
+            raise ValueError(f"no closing {quote} quote")
+        return i + 1
+
+    def consume_escaped(i: int, value: list[str]) -> int:
+        if i + 1 == len(text):
+            raise ValueError("trailing backslash")
+        value.append(text[i + 1])
+        return i + 2
+
     tokens: list[_Token] = []
     i = 0
     while i < len(text):
@@ -163,33 +180,15 @@ def _tokenize(text: str) -> list[_Token]:
             ch = text[i]
             if ch in "'\"":
                 quoted = True
-                i, value = _consume_quoted(text, i, ch, value)
+                i = consume_quoted(i, ch, value)
                 continue
             if ch == "\\":
-                i, value = _consume_escaped(text, i, value)
+                i = consume_escaped(i, value)
                 continue
             value.append(ch)
             i += 1
         tokens.append(_Token("".join(value), start, i, quoted))
     return tokens
-
-
-def _consume_quoted(text: str, i: int, quote: str, value: list[str]) -> tuple[int, list[str]]:
-    i += 1
-    while i < len(text) and text[i] != quote:
-        escaped = text[i] == "\\" and i + 1 < len(text)
-        value.append(text[i + 1] if escaped else text[i])
-        i += 2 if escaped else 1
-    if i == len(text):
-        raise ValueError(f"no closing {quote} quote")
-    return i + 1, value
-
-
-def _consume_escaped(text: str, i: int, value: list[str]) -> tuple[int, list[str]]:
-    if i + 1 == len(text):
-        raise ValueError("trailing backslash")
-    value.append(text[i + 1])
-    return i + 2, value
 
 
 def _manager(value: str) -> bool:
