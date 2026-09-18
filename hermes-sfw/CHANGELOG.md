@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.14] - 2026-09-13
+
+### Fixed
+- **Unusable sfw launchers no longer surface as opaque blocks.** An npm/pnpm install of sfw is a launcher: it downloads a platform firewall binary into `.sfw-cache/<release>/` and points `.sfw-cache/latest` at it. When that link does not resolve — a provisioned install tree copied under a new home leaves an absolute link aimed at the old path — every routed command exits 1 inside the launcher (`Failed to prepare firewall binary: Unable to fetch latest release and no valid cached release found.`) before the package manager runs, so an unrelated dev command such as `cargo build --release` is blocked with no visible cause. The plugin now detects that state offline, skips the unusable launcher in favour of a working install when one exists, and reports the exact repair (`ln -sfn <cached asset> .sfw-cache/latest`) instead of the launcher's one-line error alone.
+- Failure notes are attached only when sfw's bootstrap actually failed; unrelated errors and successful output are untouched.
+- Announce a launcher whose cache does not resolve as unusable in `sfw action=status` (`usable: false`, `cache_fault`); `installed: true` on its own read as healthy while every routed command died at startup.
+
+### Added
+- `transform_terminal_output` hook: a routed terminal command that failed inside the launcher gains the local cause and its repair in the returned output.
+- `SFWManager.wrapper_cache_fault()` and `SFWManager.bootstrap_failure_note()`, with regression coverage for dangling, missing, relative, and healthy `.sfw-cache/latest` links, launcher preference during discovery, and the annotation paths.
+
 ## [0.2.13] - 2026-09-12
 
 ### Fixed

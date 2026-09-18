@@ -105,6 +105,8 @@ executed command: /home/user/.local/share/pnpm/bin/sfw npm install express
 
 The model does not need to notice a block or issue a second tool call. Opaque-wrapper calls (`sudo`, `doas`, `xargs`), path-qualified managers, command substitutions, heredocs, malformed commands, and other forms the hook cannot rewrite without changing semantics are blocked before raw execution. Non-package-manager terminal commands are unaffected.
 
+A routed command that fails because the sfw launcher cannot start its own engine is annotated with the local cause and its repair, so a blocked `cargo build` is not just sfw's one-line error — see [troubleshooting](#troubleshooting).
+
 The hook only runs when Hermes exposes `pre_tool_call` hooks. Set `HERMES_SFW_ENFORCE_DIRECT=off` before starting Hermes only when you deliberately want to bypass automatic terminal enforcement. The default is on.
 
 ### `sfw status` — check installation
@@ -115,7 +117,7 @@ Verify sfw is installed and get the version.
 sfw action=status
 ```
 
-Returns: `installed` (bool), `version` (string), `binary` (path). `version` is the sfw binary's own `--version` output, which can differ from the npm package version you installed — see [troubleshooting](#troubleshooting).
+Returns: `installed` (bool), `version` (string), `binary` (path). `version` is the sfw binary's own `--version` output, which can differ from the npm package version you installed — see [troubleshooting](#troubleshooting). When the resolved binary is a launcher whose downloaded firewall binary is unreachable, the response also carries `usable: false` plus a `cache_fault` object (`reason`, `cached_asset`, `repair`) — `installed: true` alone does not mean the launcher can run.
 
 ## how it works
 
@@ -228,6 +230,22 @@ The binary was not found on `PATH` or in any known shim location at the moment o
 **Broken shim: `sfw` exists but every run fails**
 
 pnpm-style installs create a wrapper script at the shim path that points at the real `sfw.mjs`. If that target file is missing or stale, even `npm ci` can fail and `sfw --version` may error. Verify the resolved binary from `sfw action=status` (the `binary` field), inspect that path, and repair with `npm i -g sfw` (or your package manager's equivalent) so the shim is regenerated. As a workaround, point `SFWConfig(sfw_bin=...)` at a known-good binary.
+
+**`[sfw] Failed to prepare firewall binary: Unable to fetch latest release and no valid cached release found.`**
+
+The shim and its `sfw.mjs` target are fine, but the launcher cannot start its engine. `sfw.mjs` keeps the downloaded firewall binary in `<package root>/.sfw-cache/<release>/` and points `.sfw-cache/latest` at it; when that link does not resolve it falls back to fetching the release from the GitHub API, which is rate-limited (60 requests/hour for anonymous calls, shared per IP) and commonly blocked on hosted or cloud IPs. The launcher then exits before your package manager runs, so a routed command like `cargo build --release` is blocked even though it never touched a registry.
+
+`sfw action=status` reports this as `usable: false` with a `cache_fault` object, and since 0.2.14 the same diagnosis is appended to the failing terminal output. Inspect and repair:
+
+```bash
+sfw action=status                    # binary + cache_fault.repair
+ls -l <package root>/.sfw-cache/     # the latest link and the cached release
+ln -sfn <package root>/.sfw-cache/<release>/sfw-free-linux-x86_64 <package root>/.sfw-cache/latest
+```
+
+The cached release directory already holds a working 140 MB `sfw-free-*` binary; relinking is offline and immediate. If no release directory exists at all, the install never downloaded one: reinstall while the network can reach `api.github.com`, or copy a `.sfw-cache` tree from a machine where sfw works.
+
+Discovery prefers a usable install, so a second working sfw (for example one under `~/.hermes/node/bin`) is chosen over a broken one. When the only install is broken it is still reported rather than hidden as "not installed".
 
 **Command rejected with "not allowed"**
 
