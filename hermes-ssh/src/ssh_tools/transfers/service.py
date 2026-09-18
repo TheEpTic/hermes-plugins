@@ -175,13 +175,21 @@ class TransferService:
         error = result.get("error") or result.get("stderr") or "remote scan failed"
         return None, str(error)
 
-    def _scan_directory(
+    def _scan_error(
         self, machine: str, source: str, timeout: int, is_directory: bool
-    ) -> tuple[bool | None, str | None] | None:
-        """Unsafe-entry scan result, or None when no scan applies."""
+    ) -> str | None:
+        """Refusal message for a scanned remote directory, or None when safe/unscanned."""
         if not is_directory:
             return None
-        return self._tree_has_unsafe_entry(machine, source, timeout)
+        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
+        if has_unsafe_entry:
+            return (
+                "remote directory contains a symbolic link or credential path; "
+                "refusing recursive download"
+            )
+        if scan_error:
+            return f"Could not safely scan remote directory: {scan_error}"
+        return None
 
     @staticmethod
     def _download_kind_error(kind: RemoteKind | None) -> str | None:
@@ -195,19 +203,6 @@ class TransferService:
             if kind is not None
             else None
         )
-
-    @staticmethod
-    def _unsafe_entry_error(entry: tuple[bool | None, str | None]) -> str | None:
-        """Refusal message for a scanned remote directory, or None when safe."""
-        has_unsafe_entry, scan_error = entry
-        if has_unsafe_entry:
-            return (
-                "remote directory contains a symbolic link or credential path; "
-                "refusing recursive download"
-            )
-        if scan_error:
-            return f"Could not safely scan remote directory: {scan_error}"
-        return None
 
     def _sftp_or_error(
         self,
@@ -421,8 +416,7 @@ class TransferService:
                 machine.name,
                 "recursive=true is required to download a directory",
             )
-        scan = self._scan_directory(machine.name, source, request.timeout, is_directory)
-        scan_error = self._unsafe_entry_error(scan) if scan is not None else None
+        scan_error = self._scan_error(machine.name, source, request.timeout, is_directory)
         if scan_error:
             return self._error(machine.name, scan_error)
 
