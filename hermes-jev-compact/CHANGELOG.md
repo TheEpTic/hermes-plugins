@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2] - 2026-09-18
+
+### Fixed
+
+- Context engine survived plugin hot-reloads. The host clears its engine
+  slot during a plugin reload (`unload`/`discover_and_load(force=True)`) then
+  re-invokes each plugin's `register()`. The module-global `_registered` latch
+  survived that clear, so Jev skipped re-registering and the slot stayed empty —
+  `context.engine: jev` resolved to nothing and silently fell back to the
+  built-in compressor. Registration is now keyed to the host's live slot
+  (read via `ctx._manager`), so a cleared slot is re-filled on the next
+  `register()` call.
+
 ## [0.1.1] - 2026-09-18
 
 ### Fixed
