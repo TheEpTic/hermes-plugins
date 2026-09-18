@@ -97,12 +97,12 @@ def _is_env_file(name: str) -> bool:
 
 def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
     folded = tuple(part.casefold() for part in parts)
-    if set(folded).intersection(_SENSITIVE_PARTS):
-        return "credential directory"
-    for index, part in enumerate(folded[:-1]):
-        if part == ".config" and folded[index + 1] in {"gh", "gcloud"}:
-            return "credential directory"
-    if set(folded).intersection({"mcp-tokens", "pairing"}):
+    credential_dir = set(folded).intersection(_SENSITIVE_PARTS | _CREDENTIAL_DIRS)
+    config_dir = any(
+        part == ".config" and folded[index + 1] in _GH_CONFIG
+        for index, part in enumerate(folded[:-1])
+    )
+    if credential_dir or config_dir:
         return "credential directory"
     lowered = name.casefold()
     if lowered in _SENSITIVE_NAMES or _is_env_file(lowered):
@@ -112,6 +112,10 @@ def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
 
 def local_sensitive_reason(path: Path) -> str | None:
     return _sensitive_reason(path.parts, path.name)
+
+
+_CREDENTIAL_DIRS = frozenset({"mcp-tokens", "pairing"})
+_GH_CONFIG = frozenset({"gh", "gcloud"})
 
 
 def remote_sensitive_reason(path: str) -> str | None:
