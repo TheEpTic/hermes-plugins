@@ -18,6 +18,18 @@ def _timeout(default: int, maximum: int, verb: str) -> dict[str, Any]:
     }
 
 
+def _flag(description: str) -> dict[str, Any]:
+    return {**_BOOL, "description": description, "default": False}
+
+
+def _int(description: str, default: int, maximum: int | None = None) -> dict[str, Any]:
+    field: dict[str, Any] = {"type": "integer", "description": description, "default": default}
+    if maximum is not None:
+        field["minimum"] = 1
+        field["maximum"] = maximum
+    return field
+
+
 def _tool(
     name: str, description: str, props: dict[str, Any], required: list[str]
 ) -> dict[str, Any]:
@@ -35,23 +47,15 @@ SSH_TERMINAL_SCHEMA = _tool(
         "machine": {**_S, "description": "Machine name or alias (e.g. 'myserver', 'web1')"},
         "command": {**_S, "description": "Command to run on the remote machine"},
         "timeout": _timeout(30, 600, "killing the command"),
-        "new_session": {
-            **_BOOL,
-            "description": "Force a new connection instead of reusing existing (default: false)",
-            "default": False,
-        },
-        "background": {
-            **_BOOL,
-            "description": "Run in background and return immediately. Use ssh_sessions to poll/read output.",
-            "default": False,
-        },
-        "max_output_chars": {
-            "type": "integer",
-            "description": "Max output characters to return. Truncated if exceeded (default: 50000, max: 500000).",
-            "default": 50000,
-            "minimum": 1,
-            "maximum": 500000,
-        },
+        "new_session": _flag("Force a new connection instead of reusing existing (default: false)"),
+        "background": _flag(
+            "Run in background and return immediately. Use ssh_sessions to poll/read output."
+        ),
+        "max_output_chars": _int(
+            "Max output characters to return. Truncated if exceeded (default: 50000, max: 500000).",
+            50000,
+            500000,
+        ),
     },
     ["machine", "command"],
 )
@@ -83,21 +87,9 @@ SSH_TRANSFER_SCHEMA = _tool(
                 "Download: local destination path."
             ),
         },
-        "recursive": {
-            **_BOOL,
-            "description": "Required for directory transfers (default: false)",
-            "default": False,
-        },
-        "preserve": {
-            **_BOOL,
-            "description": "Preserve file times and modes where supported (default: false)",
-            "default": False,
-        },
-        "overwrite": {
-            **_BOOL,
-            "description": "Allow replacing an existing regular file (default: false)",
-            "default": False,
-        },
+        "recursive": _flag("Required for directory transfers (default: false)"),
+        "preserve": _flag("Preserve file times and modes where supported (default: false)"),
+        "overwrite": _flag("Allow replacing an existing regular file (default: false)"),
         "timeout": _timeout(300, 3600, "cancelling the transfer"),
     },
     ["action", "machine", "source", "destination"],
@@ -118,7 +110,7 @@ SSH_MACHINES_SCHEMA = _tool(
             **_S,
             "description": "SSH username (defaults to the current local user when omitted)",
         },
-        "port": {"type": "integer", "description": "SSH port (default: 22)", "default": 22},
+        "port": _int("SSH port (default: 22)", 22),
         "key": {
             **_S,
             "description": "Path to SSH key (e.g. '~/.ssh/id_ed25519')",
@@ -152,11 +144,9 @@ SSH_SESSIONS_SCHEMA = _tool(
             **_S,
             "description": "Session ID (required for kill, poll, read_output)",
         },
-        "max_idle_minutes": {
-            "type": "integer",
-            "description": "Max idle minutes before auto-kill (for cleanup, default: 30)",
-            "default": 30,
-        },
+        "max_idle_minutes": _int(
+            "Max idle minutes before auto-kill (for cleanup, default: 30)", 30
+        ),
     },
     ["action"],
 )
