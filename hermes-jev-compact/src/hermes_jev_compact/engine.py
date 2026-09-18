@@ -59,6 +59,7 @@ except Exception:
 
 _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_base_url", "base_url", "https://api.typesafe.ai/v1"),
+    ("jev_endpoint_path", "endpoint_path", "/systemone"),
     ("jev_api_key_env", "api_key_env", "TYPESAFE_API_KEY"),
     ("jev_model", "jev_model", "jev-latest"),
     ("jev_keep_threshold", "keep_threshold", 0.5),
@@ -111,6 +112,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     """Built-in compressor with Jev keep/drop scoring inside the prune seam."""
 
     jev_base_url: str
+    jev_endpoint_path: str
     jev_api_key_env: str
     jev_model: str
     jev_keep_threshold: float
@@ -258,7 +260,13 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             asker = (
                 asker_factory(self.jev_base_url, key, self.jev_model, options)
                 if asker_factory is not None
-                else JevAsker(self.jev_base_url, key, self.jev_model, options.request_timeout_s)
+                else JevAsker(
+                    self.jev_base_url,
+                    key,
+                    self.jev_model,
+                    options.request_timeout_s,
+                    endpoint_path=self.jev_endpoint_path,
+                )
             )
             decisions = self._ask_batches(asker, fitted["state"], batches, options)
         except JevError as exc:

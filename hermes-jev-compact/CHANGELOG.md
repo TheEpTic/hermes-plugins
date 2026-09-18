@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3] - 2026-09-18
+
+### Added
+
+- `endpoint_path` setting (default `/systemone`): the request path appended
+  to `base_url`. Lets the plugin talk to any router speaking the same
+  `{model, state, questions}` → `{answers}` shape on a different path —
+  e.g. OpenRouter's Decisions API (`base_url: https://openrouter.ai`,
+  `endpoint_path: /api/alpha/decisions`, `jev_model: typesafe/jev-1.13`).
+  Only plain absolute paths are accepted; anything else fails closed to
+  the default. Existing configs are unaffected.
+
 ## [0.1.2] - 2026-09-18
 
 ### Fixed

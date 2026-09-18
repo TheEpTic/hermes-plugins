@@ -52,6 +52,7 @@ def test_register_installs_jev_engine_with_defaults():
     assert ctx.engine.name == "jev"
     assert ctx.engine.jev_api_key_env == "TYPESAFE_API_KEY"
     assert ctx.engine.jev_base_url == "https://api.typesafe.ai/v1"
+    assert ctx.engine.jev_endpoint_path == "/systemone"
 
 
 def test_register_honors_settings_and_is_idempotent():
@@ -63,6 +64,22 @@ def test_register_honors_settings_and_is_idempotent():
     hermes_jev_compact.register(ctx)
     # Host still holds our engine -> skip, no second registration.
     assert ctx.engine is first
+
+
+def test_register_honors_endpoint_path_setting():
+    ctx = FakeCtx(
+        {
+            "base_url": "https://openrouter.ai",
+            "endpoint_path": "/api/alpha/decisions",
+            "api_key_env": "OPENROUTER_API_KEY",
+            "jev_model": "typesafe/jev-1.13",
+        }
+    )
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_base_url == "https://openrouter.ai"
+    assert ctx.engine.jev_endpoint_path == "/api/alpha/decisions"
+    assert ctx.engine.jev_api_key_env == "OPENROUTER_API_KEY"
+    assert ctx.engine.jev_model == "typesafe/jev-1.13"
 
 
 def test_register_rejects_garbage_settings():

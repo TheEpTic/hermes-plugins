@@ -88,7 +88,8 @@ plugins:
   entries:
     hermes-jev-compact:
       settings:
-        base_url: https://api.typesafe.ai/v1   # any POST {base}/systemone endpoint
+        base_url: https://api.typesafe.ai/v1   # any Decisions-shaped endpoint
+        endpoint_path: /systemone              # path appended to base_url
         api_key_env: TYPESAFE_API_KEY              # env var holding the key
         jev_model: jev-latest
         keep_threshold: 0.5        # noul >= this keeps the unit
@@ -97,6 +98,26 @@ plugins:
         truncate_head_chars: 300   # kept head of a dropped result
         request_timeout_s: 30
         min_result_chars: 8000     # results below this never become candidates
+```
+
+`endpoint_path` lets the plugin talk to any router speaking the
+`{model, state, questions}` → `{answers}` shape even when its path differs
+from TypeSafe's `/systemone`. Only plain absolute paths are accepted
+(anything else fails closed to the default), so this knob can never turn
+the request into a different host, add credentials, or smuggle a query.
+
+OpenRouter example (Jev via their Decisions API — same input/output
+shape, same $0.042/MTok input / $0 output pricing):
+
+```yaml
+plugins:
+  entries:
+    hermes-jev-compact:
+      settings:
+        base_url: https://openrouter.ai
+        endpoint_path: /api/alpha/decisions
+        api_key_env: OPENROUTER_API_KEY
+        jev_model: typesafe/jev-1.13   # OpenRouter route id, not jev-latest
 ```
 
 `compressor` (default) bypasses plugins entirely; `jev` only activates when

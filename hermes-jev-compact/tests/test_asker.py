@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_jev_compact.asker import JevAsker, _default_transport
+from hermes_jev_compact.asker import JevAsker, _default_transport, _normalize_endpoint_path
 from hermes_jev_compact.protocol import JevError
 from hermes_jev_compact.request import build_jev_body, noul_answer, parse_jev_response
 
@@ -83,6 +83,57 @@ def test_asker_uses_transport_and_refuses_without_key():
     for bad_timeout in (float("inf"), float("nan"), 0, -1):
         with pytest.raises(JevError, match="invalid jev timeout"):
             JevAsker("http://x:8765/v1", "k", "m", timeout_s=bad_timeout)
+
+
+def test_asker_endpoint_path_override():
+    seen = {}
+
+    def fake_transport(url, body, headers, timeout):
+        seen["url"] = url
+        return (200, json.dumps({"answers": {"q": {"noul": 0.4}}}))
+
+    # OpenRouter Decisions API shape: absolute base + alpha path.
+    asker = JevAsker(
+        "https://openrouter.ai",
+        "k",
+        "typesafe/jev-1.13",
+        transport=fake_transport,
+        endpoint_path="/api/alpha/decisions",
+    )
+    assert asker.ask("state", {"q": {}})["q"] == {"noul": 0.4}
+    assert seen["url"] == "https://openrouter.ai/api/alpha/decisions"
+    # Default unchanged: existing configs keep hitting /systemone.
+    assert (
+        JevAsker("https://x/v1", "k", "m", transport=fake_transport)._url
+        == "https://x/v1/systemone"
+    )
+    # Trailing slash on the path is tolerated, not doubled.
+    assert (
+        JevAsker(
+            "https://x/v1/", "k", "m", transport=fake_transport, endpoint_path="/systemone/"
+        )._url
+        == "https://x/v1/systemone"
+    )
+    # Garbage / hostile paths fail closed to the default — never a surprising URL.
+    for bad_path in (
+        "",
+        "systemone",
+        "https://evil.example/pwn",
+        "//evil.example/pwn",
+        "/systemone?tenant=t",
+        "/systemone#frag",
+        "/sys temone",
+        "/x@evil.example",
+        "/",
+        "/%2f%2fevil.example/pwn",
+        "/x%3fy=1",
+    ):
+        assert (
+            JevAsker(
+                "https://x/v1", "k", "m", transport=fake_transport, endpoint_path=bad_path
+            )._url
+            == "https://x/v1/systemone"
+        ), bad_path
 
     def failing(url, body, headers, timeout):
         raise TimeoutError("slow")
@@ -161,6 +212,48 @@ def test_default_transport_rejects_oversize_body():
         resp.read.return_value = b"x" * (1_000_000 + 1)
         with pytest.raises(JevError, match="over .* byte cap"):
             _default_transport("https://api.typesafe.ai/v1/systemone", b"{}", {}, 5.0)
+
+
+def test_normalize_endpoint_path():
+    assert _normalize_endpoint_path("/api/alpha/decisions") == "/api/alpha/decisions"
+    assert _normalize_endpoint_path("/v1/systemone") == "/v1/systemone"
+    assert _normalize_endpoint_path("/a.b_c-d~e") == "/a.b_c-d~e"
+    assert _normalize_endpoint_path("  /systemone  ") == "/systemone"
+    for bad in (
+        "",
+        "relative",
+        "https://x/y",
+        "//x/y",
+        "/a?b=c",
+        "/a#f",
+        "/a b",
+        "/@x",
+        "/",
+        # Review finding: escapes/unicode must not reach the URL — a proxy
+        # could reinterpret them as delimiters.
+        "/%2f%2fevil.com/pwn",
+        "/x%3fy=1",
+        "/x%00",
+        "/x\x00y",
+        "/x\ny",
+        "/x\ty",
+        "/x y",
+        "/x∕y",
+        "/x／y",
+        "/x\\y",
+        "/x;y",
+        "/x:y",
+        "/x,y",
+        "/x=y",
+        "/x+y",
+        "/x$y",
+        "/x!y",
+        "/x'y",
+        '/x"y',
+        "/x(y)",
+        "/x[y]",
+    ):
+        assert _normalize_endpoint_path(bad) == "/systemone", bad
 
 
 def test_parse_jev_response_hides_upstream_error_body():

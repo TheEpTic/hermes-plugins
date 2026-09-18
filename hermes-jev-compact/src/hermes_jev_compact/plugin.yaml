@@ -1,5 +1,5 @@
 name: hermes-jev-compact
-version: 0.1.2
+version: 0.1.3
 description: "Jev-powered smart tool-prune context engine — scores stale tool calls via any System One API endpoint, falls back to built-in prune."
 author: TheEpTic
 kind: standalone

@@ -51,7 +51,7 @@ def _engine(**kw: Any) -> Any:
 
 def _fake_factory(probs: Dict[str, float]):
 
-    def factory(base_url: str, key: str, model: str, options: Any):
+    def factory(base_url: str, key: str, model: str, options: Any, **kw: Any):
         calls_made: List[Dict[str, Any]] = []
 
         class Fake:
@@ -79,6 +79,7 @@ def test_init_forwards_base_params_and_sets_jev_defaults():
     assert eng.protect_last_n == 5
     assert eng.jev_keep_threshold == 0.5
     assert eng.jev_model == "jev-latest"
+    assert eng.jev_endpoint_path == "/systemone"
     assert (eng.jev_calls, eng.jev_pruned_units, eng.jev_fallbacks) == (0, 0, 0)
     assert callable(getattr(eng, "update_model", None))
     assert getattr(eng, "api_key", "") == ""
@@ -292,6 +293,37 @@ def test_deepcopy_safe():
     assert clone.name == "jev"
     assert clone is not eng
     assert clone.jev_base_url == eng.jev_base_url
+    assert clone.jev_endpoint_path == eng.jev_endpoint_path
+
+
+def test_engine_passes_endpoint_path_to_asker(monkeypatch):
+    # The knob must reach the wire: an OpenRouter-shaped config builds the
+    # Decisions URL, not /systemone.
+    eng = _engine(
+        jev_min_result_chars=100,
+        jev_base_url="https://openrouter.ai",
+        jev_endpoint_path="/api/alpha/decisions",
+        jev_model="typesafe/jev-1.13",
+    )
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    seen: dict[str, Any] = {}
+
+    class CaptureAsker:
+        def __init__(self, base_url: str, key: str, model: str, *a: Any, **k: Any) -> None:
+            from hermes_jev_compact.asker import JevAsker as _Real
+
+            real = _Real(base_url, key, model, *a, **k)
+            seen["url"] = real._url
+            seen["model"] = model
+
+        def ask(self, state: Any, questions: dict[str, Any]) -> dict[str, Any]:
+            return {name: {"noul": 0.1} for name in questions}
+
+    with patch("hermes_jev_compact.engine.JevAsker", CaptureAsker):
+        eng._prune_old_tool_results(messages, 1, None, 200)
+    assert seen["url"] == "https://openrouter.ai/api/alpha/decisions"
+    assert seen["model"] == "typesafe/jev-1.13"
 
 
 def test_deepcopy_survives_host_runtime_state():

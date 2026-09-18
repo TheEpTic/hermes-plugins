@@ -9,6 +9,12 @@ from typing import Any
 from .protocol import JevError
 
 SYSTEMONE_PATH = "/systemone"
+
+#: Default endpoint path when the operator does not set one. The System One
+#: wire shape ({model, state, questions} in, {answers} out) is the same on
+#: every endpoint; only this path differs (TypeSafe/conduit use /systemone,
+#: OpenRouter's Decisions API uses /api/alpha/decisions).
+DEFAULT_ENDPOINT_PATH = SYSTEMONE_PATH
 DEFAULT_MODEL = "jev-latest"
 
 
