@@ -168,6 +168,40 @@ class TransferService:
         error = result.get("error") or result.get("stderr") or "remote scan failed"
         return None, str(error)
 
+    def _scan_directory(
+        self, machine: str, source: str, timeout: int, is_directory: bool
+    ) -> tuple[bool | None, str | None] | None:
+        """Unsafe-entry scan result, or None when no scan applies."""
+        if not is_directory:
+            return None
+        return self._tree_has_unsafe_entry(machine, source, timeout)
+
+    @staticmethod
+    def _download_kind_error(kind: RemoteKind | None) -> str | None:
+        """Refusal message for non-downloadable remote kinds, or None if probeable."""
+        return (
+            {
+                "missing": "remote source does not exist",
+                "symlink": "remote source must not be a symbolic link",
+                "special": "remote source must be a regular file or directory",
+            }.get(kind)
+            if kind is not None
+            else None
+        )
+
+    @staticmethod
+    def _unsafe_entry_error(entry: tuple[bool | None, str | None]) -> str | None:
+        """Refusal message for a scanned remote directory, or None when safe."""
+        has_unsafe_entry, scan_error = entry
+        if has_unsafe_entry:
+            return (
+                "remote directory contains a symbolic link or credential path; "
+                "refusing recursive download"
+            )
+        if scan_error:
+            return f"Could not safely scan remote directory: {scan_error}"
+        return None
+
     def _sftp_or_error(
         self,
         machine: Machine,
@@ -198,25 +232,6 @@ class TransferService:
             timeout=min(timeout, 30),
             max_output_chars=1_000,
         )
-
-    def _validate_remote_directory(
-        self,
-        machine: str,
-        source: str,
-        timeout: int,
-        is_directory: bool,
-    ) -> str | None:
-        if not is_directory:
-            return None
-        has_unsafe_entry, scan_error = self._tree_has_unsafe_entry(machine, source, timeout)
-        if has_unsafe_entry:
-            return (
-                "remote directory contains a symbolic link or credential path; "
-                "refusing recursive download"
-            )
-        if scan_error:
-            return f"Could not safely scan remote directory: {scan_error}"
-        return None
 
     @staticmethod
     def _validate_download_destination(
@@ -384,12 +399,9 @@ class TransferService:
         kind, error = self._probe(machine.name, source, request.timeout)
         if error:
             return self._error(machine.name, f"Could not inspect remote source: {error}")
-        if kind == "missing":
-            return self._error(machine.name, "remote source does not exist")
-        if kind == "symlink":
-            return self._error(machine.name, "remote source must not be a symbolic link")
-        if kind == "special":
-            return self._error(machine.name, "remote source must be a regular file or directory")
+        kind_error = self._download_kind_error(kind)
+        if kind_error:
+            return self._error(machine.name, kind_error)
 
         is_directory = kind == "directory"
         if is_directory and not request.recursive:
@@ -397,14 +409,10 @@ class TransferService:
                 machine.name,
                 "recursive=true is required to download a directory",
             )
-        directory_error = self._validate_remote_directory(
-            machine.name,
-            source,
-            request.timeout,
-            is_directory,
-        )
-        if directory_error:
-            return self._error(machine.name, directory_error)
+        scan = self._scan_directory(machine.name, source, request.timeout, is_directory)
+        scan_error = self._unsafe_entry_error(scan) if scan is not None else None
+        if scan_error:
+            return self._error(machine.name, scan_error)
 
         destination_error = self._validate_download_destination(
             destination,

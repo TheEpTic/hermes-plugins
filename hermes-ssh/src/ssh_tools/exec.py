@@ -231,20 +231,15 @@ class Executor:
         if result.returncode == 0 and "ok" in result.stdout:
             self._registry.remember_key(machine)
             return {"success": True, "status": "connected", "host": machine.host}
-        failure = _failure_context(machine, result.returncode, result.stderr)
-        error = (
-            failure["error"]
-            if failure is not None and "error" in failure
-            else result.stderr.strip() or f"exit code {result.returncode}"
-        )
         resp: dict[str, Any] = {
             "success": False,
             "status": "unreachable",
             "host": machine.host,
-            "error": error,
+            "error": result.stderr.strip() or f"exit code {result.returncode}",
         }
+        failure = _failure_context(machine, result.returncode, result.stderr)
         if failure is not None:
-            resp.update({k: v for k, v in failure.items() if k != "error"})
+            resp.update(failure)  # error key overwrites; keys_attempted merges in
         return resp
 
     def run_command(
@@ -314,20 +309,18 @@ class Executor:
     ) -> dict[str, Any]:
         try:
             result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=timeout + 5)
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, OSError) as e:
             elapsed = round(time.monotonic() - start_time, 2)
             self._audit.log_command(canonical, command, -1, elapsed, session_id)
-            return {
-                "success": False,
-                "error": f"Command timed out after {timeout}s",
-                "exit_code": -1,
-                "elapsed_secs": elapsed,
-                "machine": canonical,
-            }
-        except OSError as e:
+            if isinstance(e, subprocess.TimeoutExpired):
+                return {
+                    "success": False,
+                    "error": f"Command timed out after {timeout}s",
+                    "exit_code": -1,
+                    "elapsed_secs": elapsed,
+                    "machine": canonical,
+                }
             logger.debug("run_command failed for %s: %s", canonical, e, exc_info=True)
-            elapsed = round(time.monotonic() - start_time, 2)
-            self._audit.log_command(canonical, command, -1, elapsed, session_id)
             return {"success": False, "error": str(e), "exit_code": -1, "machine": canonical}
 
         elapsed = round(time.monotonic() - start_time, 2)
