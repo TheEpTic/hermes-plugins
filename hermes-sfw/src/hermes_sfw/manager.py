@@ -24,8 +24,8 @@ from .resolve import (
     find_sfw,
     is_bootstrap_failure,
     known_candidates,
+    resolve_shim_target,
 )
-from .resolve import resolve_shim_target
 from .run import run_sfw
 from .validate import (
     is_dependency_operation,
