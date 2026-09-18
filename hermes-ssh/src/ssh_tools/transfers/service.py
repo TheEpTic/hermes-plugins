@@ -194,15 +194,12 @@ class TransferService:
     @staticmethod
     def _download_kind_error(kind: RemoteKind | None) -> str | None:
         """Refusal message for non-downloadable remote kinds, or None if probeable."""
-        return (
-            {
-                "missing": "remote source does not exist",
-                "symlink": "remote source must not be a symbolic link",
-                "special": "remote source must be a regular file or directory",
-            }.get(kind)
-            if kind is not None
-            else None
-        )
+        errors: dict[str | None, str] = {
+            "missing": "remote source does not exist",
+            "symlink": "remote source must not be a symbolic link",
+            "special": "remote source must be a regular file or directory",
+        }
+        return errors.get(kind)
 
     def _sftp_or_error(
         self,

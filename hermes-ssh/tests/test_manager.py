@@ -169,26 +169,30 @@ def test_session_lifecycle(tmp_path: Path) -> None:
     assert mgr.get_session("s3").started == "2026-01-01T00:00:00+00:00"
 
 
-def _aged_session_blob(
-    mgr: Any, sid: str, age: timedelta, *, status: str = "active", started: str | None = None
-) -> None:
-    """Write a session with an aged timestamp straight into the sessions blob."""
-    stamp = (datetime.now(UTC) - age).isoformat()
-    fresh = datetime.now(UTC).isoformat()
-    _rewrite_sessions_blob(
-        mgr,
-        lambda sessions: sessions.update(
-            {
-                sid: {
-                    "machine": "host1",
-                    "pid": 101,
-                    "started": started or (stamp if status == "closed" else fresh),
-                    "last_active": stamp if status == "active" else fresh,
-                    "status": status,
-                }
+def _aged_sessions(mgr: Any, *rows: tuple[str, timedelta, str, str | None]) -> None:
+    """Seed age-sensitive sessions straight into the sessions blob.
+
+    Each row is (sid, age, status, started_override) — the blob write is a
+    single helper call, not a register-then-mutate dance through the manager.
+    """
+    from ssh_tools.helpers import read_json, write_json_atomic
+
+    path = mgr._config.sessions_file
+    blob = read_json(path, {"sessions": {}})
+    now = datetime.now(UTC)
+    blob["sessions"].update(
+        {
+            sid: {
+                "machine": "host1",
+                "pid": 101,
+                "started": started or (now - age).isoformat(),
+                "last_active": (now - age).isoformat(),
+                "status": status,
             }
-        ),
+            for sid, age, status, started in rows
+        }
     )
+    write_json_atomic(path, blob)
 
 
 @pytest.mark.parametrize(
@@ -197,7 +201,7 @@ def _aged_session_blob(
 )
 def test_cleanup_idle(tmp_path: Path, age: timedelta, expected: int) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "s1", age)
+    _aged_sessions(mgr, ("s1", age, "active", None))
     assert mgr.cleanup_idle(max_idle_minutes=30)["count"] == expected
 
 
@@ -211,8 +215,9 @@ def test_cleanup_idle_empty(tmp_path: Path) -> None:
 def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
     mgr.add_machine(Machine(name="h", host="1.1.1.1"))
-    for sid in ("s1", "s2"):
-        _aged_session_blob(mgr, sid, timedelta(hours=1))
+    _aged_sessions(
+        mgr, ("s1", timedelta(hours=1), "active", None), ("s2", timedelta(hours=1), "active", None)
+    )
     with (
         patch("ssh_tools.exec.time.sleep"),
         patch("ssh_tools.exec.os.kill", side_effect=OSError("gone")),
@@ -224,24 +229,27 @@ def test_cleanup_idle_batch_marks_orphaned(tmp_path: Path) -> None:
 
 def test_prune_closed_old(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "s1", timedelta(hours=48), status="closed")
+    _aged_sessions(mgr, ("s1", timedelta(hours=48), "closed", None))
     assert mgr.prune_closed(max_age_hours=24) == 1
-    _aged_session_blob(mgr, "s2", timedelta(0), status="closed", started="2020-01-01T00:00:00")
+    _aged_sessions(mgr, ("s2", timedelta(0), "closed", "2020-01-01T00:00:00"))
     assert mgr.prune_closed(max_age_hours=24) == 1  # naive datetime still prunes
 
 
 def test_prune_closed_keeps(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "fresh", timedelta(seconds=1), status="closed")
-    _aged_session_blob(mgr, "active", timedelta(hours=48), status="active")
-    _aged_session_blob(mgr, "bad", timedelta(0), status="closed", started="not-a-date")
+    _aged_sessions(
+        mgr,
+        ("fresh", timedelta(seconds=1), "closed", None),
+        ("active", timedelta(hours=48), "active", None),
+        ("bad", timedelta(0), "closed", "not-a-date"),
+    )
     assert mgr.prune_closed(max_age_hours=24) == 0
     assert set(mgr.list_sessions(status="")) == {"fresh", "active", "bad"}
 
 
 def test_prune_uses_config_default(tmp_path: Path) -> None:
     mgr = _make_manager(tmp_path)
-    _aged_session_blob(mgr, "old", timedelta(hours=48), status="closed")
+    _aged_sessions(mgr, ("old", timedelta(hours=48), "closed", None))
     assert mgr.prune_closed() == 1  # config default 24h
     assert mgr.get_session("old") is None
 
@@ -249,15 +257,6 @@ def test_prune_uses_config_default(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # json persistence
 # ---------------------------------------------------------------------------
-
-
-def _rewrite_sessions_blob(mgr: Any, mutate: Any) -> None:
-    from ssh_tools.helpers import read_json, write_json_atomic
-
-    path = mgr._config.sessions_file
-    blob = read_json(path, {"sessions": {}})
-    mutate(blob["sessions"])
-    write_json_atomic(path, blob)
 
 
 @pytest.mark.parametrize(
