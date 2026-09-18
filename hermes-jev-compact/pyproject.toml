@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-jev-compact"
+version = "0.1.0"
+description = "Jev-powered smart tool-prune context engine for Hermes Agent (via conduit2 systemone)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "TheEpTic", email = "nexus@eptic.me" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+    "Operating System :: OS Independent",
+]
+
+keywords = ["hermes", "agent", "plugin", "context", "compaction", "jev", "systemone"]
+
+[project.urls]
+Homepage = "https://github.com/TheEpTic/hermes-plugins"
+Repository = "https://github.com/TheEpTic/hermes-plugins"
+Issues = "https://github.com/TheEpTic/hermes-plugins/issues"
+Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-jev-compact/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "black==26.5.1",
+    "mypy==2.3.0",
+    "pytest==9.0.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hermes_jev_compact"]
+
+[project.entry-points."hermes_agent.plugins"]
+hermes-jev-compact = "hermes_jev_compact"
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["agent.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+pythonpath = ["src"]
