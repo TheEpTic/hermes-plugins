@@ -58,9 +58,8 @@ def _take_name(params: dict[str, Any]) -> tuple[str | None, str | None]:
     return param_str(params, "name", allow_empty=True)
 
 
-def _named(manager: SSHManager, params: dict[str, Any]) -> tuple[str | None, str | None]:
+def _named(params: dict[str, Any]) -> tuple[str | None, str | None]:
     """Validated machine name for remove/inspect/test, or (None, error)."""
-    del manager
     return _take_name(params)
 
 
@@ -103,7 +102,7 @@ def _handle_add(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _named(manager, params)
+    name, error = _named(params)
     if error or name is None:
         return err(error or "unreachable")
     removed = manager.remove_machine(name)
@@ -114,7 +113,7 @@ def _handle_remove(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _named(manager, params)
+    name, error = _named(params)
     if error or name is None:
         return err(error or "unreachable")
     inspected = manager.get_machine(name)
@@ -125,7 +124,7 @@ def _handle_inspect(manager: SSHManager, params: dict[str, Any]) -> str:
 
 
 def _handle_test(manager: SSHManager, params: dict[str, Any]) -> str:
-    name, error = _named(manager, params)
+    name, error = _named(params)
     if error or name is None:
         return err(error or "unreachable")
     return ok(**manager.test_machine(name))
