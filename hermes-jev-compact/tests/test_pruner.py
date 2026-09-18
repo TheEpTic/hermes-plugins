@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import json
 
+from dataclasses import replace
+
 import pytest
 
 from hermes_jev_compact.adapter import collect_candidates, to_internal
-from hermes_jev_compact.protocol import JevCallAnswer, JevOptions
+from hermes_jev_compact.protocol import JevCallAnswer, JevOptions, JevToolCall
 from hermes_jev_compact.pruner import (
+    _compact_call,
     apply_decisions_openai,
     batch_calls,
     decide_call,
@@ -116,21 +119,23 @@ def test_batching_splits_and_throws():
         batch_calls(calls, 29990, 30000)
 
 
-def test_decide_call_matrix():
+@pytest.mark.parametrize(
+    ("answer", "threshold", "action"),
+    [
+        (JevCallAnswer(0.9, 0.7), 0.5, "keep"),
+        (JevCallAnswer(0.9, 0.2), 0.5, "drop_result"),
+        (JevCallAnswer(0.1, 0.2), 0.5, "drop_call"),
+    ],
+)
+def test_decide_call_matrix(answer, threshold, action):
     _, calls = _calls(n=1)
-    call = calls[0]
-    assert decide_call(call, JevCallAnswer(0.9, 0.7), 0.5).action == "keep"
-    assert decide_call(call, JevCallAnswer(0.9, 0.2), 0.5).action == "drop_result"
-    assert decide_call(call, JevCallAnswer(0.1, 0.2), 0.5).action == "drop_call"
+    assert decide_call(calls[0], answer, threshold).action == action
 
 
 def test_decide_call_pinned_short_circuits_like_ts():
     # TS test.ts 'decisions' block: pinned + (0,0) -> keep/pinned.
-    from dataclasses import replace
-
     _, calls = _calls(n=1)
-    pinned_call = replace(calls[0], pinned=True)
-    decision = decide_call(pinned_call, JevCallAnswer(0.0, 0.0), 0.5)
+    decision = decide_call(replace(calls[0], pinned=True), JevCallAnswer(0.0, 0.0), 0.5)
     assert (decision.action, decision.reason) == ("keep", "pinned")
 
 
@@ -236,35 +241,29 @@ def test_truncated_result_text_short_passthrough_and_zero_head():
     assert truncated_result_text("z" * 500, False, -1) == out
 
 
-def test_compact_call_multikey_ts_vector():
+@pytest.mark.parametrize(
+    ("call_id", "tool_call_id", "tool", "input_data", "result_chars", "is_error", "expected"),
+    [
+        (
+            "t1",
+            "a",
+            "Read",
+            {"file_path": "/repo/src/a.ts", "limit": 50},
+            100,
+            False,
+            't1 Read file_path=/repo/src/a.ts limit={"limit":50} → ok 100ch',
+        ),
+        ("t2", "b", "Grep", {"pattern": "a\n  b"}, 5, True, "t2 Grep pattern=a b → error 5ch"),
+    ],
+)
+def test_compact_call_multikey_ts_vector(
+    call_id, tool_call_id, tool, input_data, result_chars, is_error, expected
+):
     # TS state.ts:110-120 verbatim semantics: key=value per entry, string
     # values raw (no JSON quotes), non-strings via inputText({k: v}, 200),
     # whitespace flattened PER ENTRY, joined line truncated to 60.
-    from hermes_jev_compact.protocol import JevToolCall
-    from hermes_jev_compact.pruner import _compact_call
-
-    call = JevToolCall(
-        id="t1",
-        tool_call_id="a",
-        tool="Read",
-        input={"file_path": "/repo/src/a.ts", "limit": 50},
-        call_index=1,
-        result_index=2,
-        result_chars=100,
-        is_error=False,
-    )
-    assert _compact_call(call) == 't1 Read file_path=/repo/src/a.ts limit={"limit":50} → ok 100ch'
-    wsy = JevToolCall(
-        id="t2",
-        tool_call_id="b",
-        tool="Grep",
-        input={"pattern": "a\n  b"},
-        call_index=1,
-        result_index=2,
-        result_chars=5,
-        is_error=True,
-    )
-    assert _compact_call(wsy) == "t2 Grep pattern=a b → error 5ch"
+    call = JevToolCall(call_id, tool_call_id, tool, input_data, 1, 2, result_chars, is_error)
+    assert _compact_call(call) == expected
 
 
 def test_apply_rejects_ambiguous_input():
