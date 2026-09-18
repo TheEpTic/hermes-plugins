@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .detect import contains_package_manager_command
+from .guard import contains_package_manager_command
 from .diagnose import diagnose as _diagnose
 from .models import SFWBinaryInfo, SFWCacheFault, SFWConfig, SFWDiagnosis, SFWResult
 from .output import parse_output as _parse_output
