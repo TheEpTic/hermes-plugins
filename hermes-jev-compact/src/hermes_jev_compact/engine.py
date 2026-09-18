@@ -274,7 +274,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             return None, 0
         key = _resolve_secret(self.jev_api_key_env)
         if not key:
-            logger.debug("jev: no api key (%s); built-in prune", self.jev_api_key_env)
+            logger.debug("jev: no api key configured; built-in prune")
             return None, 0
         try:
             fitted = fit_state(to_internal(messages), candidates, options)
