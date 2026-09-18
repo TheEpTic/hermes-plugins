@@ -41,9 +41,10 @@ def _handle_kill(manager: SSHManager, params: dict[str, Any]) -> str:
 def _handle_cleanup(manager: SSHManager, params: dict[str, Any]) -> str:
     try:
         value = params.get("max_idle_minutes")
-        max_idle = None if value is None else coerce_int(value, "max_idle_minutes")
-    except ValueError as exc:
-        return err(str(exc))
+        # main parity: str/int (even negative/zero) pass to cleanup_idle's `or` chain.
+        max_idle = None if value is None else coerce_int(value, "max_idle_minutes_integer")
+    except ValueError:
+        return err("max_idle_minutes must be an integer")
     result = manager.cleanup_idle(max_idle)
     return ok(cleaned=result["count"], details=result["killed"])
 

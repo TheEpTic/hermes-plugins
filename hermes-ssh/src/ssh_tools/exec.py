@@ -147,9 +147,9 @@ def _collected_response(
 
 
 def _coerce_positive(value: object, field: str, fallback: int) -> int:
-    """Positive-int-or-fallback for soft limits; invalid means config default."""
+    """Positive-int-or-fallback for soft limits: garbage raises, <=0 falls back."""
     try:
-        out = coerce_int(value, field, minimum=0)
+        out = coerce_int(value, field)
     except ValueError:
         raise ValueError(f"{field} must be a positive integer") from None
     return fallback if out <= 0 else out

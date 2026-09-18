@@ -363,6 +363,7 @@ def test_run_command_sync_and_coercions(tmp_path: Path) -> None:
         mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
         assert mgr.run_command("h", "echo ok", timeout="5")["success"] is True
         assert mgr.run_command("h", "echo ok", timeout=0)["success"] is True
+        assert mgr.run_command("h", "echo ok", timeout=-1)["success"] is True
     bad = mgr.run_command("h", "echo ok", timeout="abc")
     assert bad["success"] is False and "timeout" in bad["error"]
     # main behaviour: a bool timeout is garbage and raises, not silently coerced.

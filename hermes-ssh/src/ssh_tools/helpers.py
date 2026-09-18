@@ -56,7 +56,9 @@ def param_bool(
     return value, None
 
 
-def coerce_int(value: object, field: str, minimum: int = 0, maximum: int | None = None) -> int:
+def coerce_int(
+    value: object, field: str, minimum: int | None = None, maximum: int | None = None
+) -> int:
     """Coerce str/int to int, rejecting bools and range violations."""
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a positive integer")
@@ -66,7 +68,7 @@ def coerce_int(value: object, field: str, minimum: int = 0, maximum: int | None 
         raise ValueError(f"{field} must be a positive integer") from exc
     if not isinstance(out, int):
         raise ValueError(f"{field} must be a positive integer")
-    if out < minimum or (maximum is not None and out > maximum):
+    if (minimum is not None and out < minimum) or (maximum is not None and out > maximum):
         raise ValueError(f"{field} must be a positive integer")
     return out
 
