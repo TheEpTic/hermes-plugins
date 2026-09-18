@@ -16,7 +16,6 @@ from typing import Any, BinaryIO
 
 from .audit import AuditLog
 from .config import SSHConfig
-from .helpers import coerce_int
 from .models import Machine, Session
 from .registry import MachineRegistry
 from .sessions import SessionStore
@@ -146,12 +145,16 @@ def _collected_response(
     return {"success": False, "error": error}
 
 
-def _coerce_positive(value: object, field: str, fallback: int) -> int:
-    """Positive-int-or-fallback for soft limits: garbage raises, <=0 falls back."""
+def _normalize(value: object, field: str, fallback: int) -> int:
+    """Caller-supplied soft limit: garbage raises, <=0 falls back to the default."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a positive integer")
     try:
-        out = coerce_int(value, field)
-    except ValueError:
-        raise ValueError(f"{field} must be a positive integer") from None
+        out = int(value) if isinstance(value, str) else value
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a positive integer") from exc
+    if not isinstance(out, int):
+        raise ValueError(f"{field} must be a positive integer")
     return fallback if out <= 0 else out
 
 
@@ -178,12 +181,10 @@ class Executor:
     def _normalize_timeout(self, timeout: object | None) -> int:
         if timeout is None:
             return self._config.command_timeout
-        return _coerce_positive(timeout, "timeout", self._config.command_timeout)
+        return _normalize(timeout, "timeout", self._config.command_timeout)
 
     def _normalize_max_output_chars(self, max_output_chars: object) -> int:
-        limit = _coerce_positive(
-            max_output_chars, "max_output_chars", self._config.max_output_chars
-        )
+        limit = _normalize(max_output_chars, "max_output_chars", self._config.max_output_chars)
         return min(limit, _MAX_OUTPUT_RETURN_CHARS)
 
     def _finish_response(
