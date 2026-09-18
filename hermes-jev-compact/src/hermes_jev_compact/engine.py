@@ -84,6 +84,31 @@ _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
 _JEV_DEFAULTS = {attr: default for attr, _, default in _JEV_KNOBS}
 
 
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _finite_float(value: Any, default: float) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _answers_for_batch(batch: list[JevToolCall], raw: dict[str, Any]) -> dict[str, JevCallAnswer]:
+    return {
+        call.id: JevCallAnswer(
+            keep_call=noul_answer(raw, f"call_{call.id}"),
+            keep_result=noul_answer(raw, f"result_{call.id}"),
+        )
+        for call in batch
+    }
+
+
 def _resolve_secret(key_env: str) -> str:
     """Call-time secret read: agent.secret_scope when importable, else os.environ."""
     try:
@@ -207,20 +232,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             return False
 
     def _jev_options(self) -> JevOptions:
-        threshold = self.jev_keep_threshold
-        try:
-            threshold = float(threshold)
-        except (TypeError, ValueError):
-            threshold = 0.5
-        if not math.isfinite(threshold):
-            threshold = 0.5
+        threshold = _finite_float(self.jev_keep_threshold, 0.5)
         return JevOptions(
             keep_threshold=min(1.0, max(0.0, threshold)),
-            max_state_tokens=max(1, int(self.jev_max_state_tokens)),
-            max_request_tokens=max(1, int(self.jev_max_request_tokens)),
-            truncate_head_chars=max(0, int(self.jev_truncate_head_chars)),
-            request_timeout_s=max(1.0, float(self.jev_request_timeout_s)),
-            min_result_chars=max(0, int(self.jev_min_result_chars)),
+            max_state_tokens=max(1, _safe_int(self.jev_max_state_tokens, 25000)),
+            max_request_tokens=max(1, _safe_int(self.jev_max_request_tokens, 30000)),
+            truncate_head_chars=max(0, _safe_int(self.jev_truncate_head_chars, 300)),
+            request_timeout_s=max(1.0, _finite_float(self.jev_request_timeout_s, 30.0)),
+            min_result_chars=max(0, _safe_int(self.jev_min_result_chars, 8000)),
         )
 
     def _ask_batches(
@@ -234,6 +253,8 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         # batches run SEQUENTIALLY so cancellation can stop between asks and
         # the shared JevAsker deadline applies in order. Same questions, same
         # state per batch; only latency/parallelism differs.
+        # Answers recorded per batch (sequential: cancellation can stop between
+        # asks). Each asked call MUST have an entry here before decisions run.
         answers: dict[str, JevCallAnswer] = {}
         for batch in batches:
             if self._cancelled():
@@ -244,16 +265,13 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             # host no longer wants — fall back to the deterministic prune.
             if self._cancelled():
                 raise JevError("compression cancelled during jev batch")
-            for call in batch:
-                answers[call.id] = JevCallAnswer(
-                    keep_call=noul_answer(raw, f"call_{call.id}"),
-                    keep_result=noul_answer(raw, f"result_{call.id}"),
-                )
+            answers.update(_answers_for_batch(batch, raw))
         decisions = []
         for call in (c for b in batches for c in b):
-            if call.id not in answers:
+            answer = answers.get(call.id)
+            if answer is None:
                 raise JevError(f"missing jev answers for {call.id}")
-            decisions.append(decide_call(call, answers[call.id], options.keep_threshold))
+            decisions.append(decide_call(call, answer, options.keep_threshold))
         return decisions
 
     def _jev_prune(

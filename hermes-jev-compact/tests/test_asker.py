@@ -97,8 +97,18 @@ def test_asker_uses_transport_and_refuses_without_key():
         "file:///etc/passwd",
         "gopher://x:70/1",
         "ftp://x/f",
-        "http://192.168.0.25:8765/v1/systemone",  # cleartext off loopback
-        "http://jev.internal:8765/v1/systemone",
+        "http://jev.internal:8765/v1/systemone",  # DNS names must use https
+        "http://8.8.8.8:8765/v1/systemone",  # cleartext to public ip
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata endpoint
+        "http://0.0.0.0:8765/v1/systemone",  # unspecified
+        "http://2130706433:8765/v1/systemone",  # decimal-encoded loopback
+        "http://0177.0.0.1:8765/v1/systemone",  # octal-encoded loopback
+        "http://0x7f000001:8765/v1/systemone",  # hex-encoded loopback
+        "http://127.1:8765/v1/systemone",  # short-form loopback
+        "http://127.0.0.1.:8765/v1/systemone",  # trailing-dot loopback
+        "http://[::ffff:127.0.0.1]:8765/v1/systemone",  # v4-mapped loopback
+        "http://[ff02::1]:8765/v1/systemone",  # multicast
+        "http://[2001:db8::1]:8765/v1/systemone",  # public v6 (docs range)
         "https://user:pass@api.typesafe.ai/v1/systemone",  # embedded creds
         "http://@127.0.0.1:8765/v1/systemone",  # empty userinfo still refused
         "http://[::1/x",  # malformed IPv6 literal
@@ -117,6 +127,13 @@ def test_default_transport_refuses_ssrf_and_cleartext(url: str):
         "http://127.0.0.1:8765/v1/systemone",
         "http://localhost:8765/v1/systemone",
         "http://127.0.0.2:8765/v1/systemone",  # full 127/8 loopback range
+        "http://192.168.0.25:8765/v1/systemone",  # RFC1918 LAN (conduit2)
+        "http://10.99.0.1:8765/v1/systemone",  # RFC1918 10/8
+        "http://172.16.5.4:8765/v1/systemone",  # RFC1918 172.16/12
+        "http://100.103.204.82:8765/v1/systemone",  # Tailscale CGNAT
+        "http://[::1]:8765/v1/systemone",  # IPv6 loopback
+        "http://[fc00::1]:8765/v1/systemone",  # IPv6 ULA
+        "http://[fe80::1]:8765/v1/systemone",  # IPv6 link-local
         "https://api.typesafe.ai/v1/systemone",
         "https://api.typesafe.ai/v1/systemone?key=secret",  # query w/o userinfo: allowed
     ],

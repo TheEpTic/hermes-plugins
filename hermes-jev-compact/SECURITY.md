@@ -21,8 +21,9 @@ the data in-house — point `base_url` at them.
   excluded from `__deepcopy__`); only per-agent copies hold the host chat key
   the summary path needs, exactly like the built-in compressor.
 - The transport refuses redirects, embedded credentials, non-HTTP schemes,
-  and cleartext HTTP off loopback — a misconfigured `base_url` fails closed
-  to the built-in prune instead of sending the bearer key somewhere
+  and cleartext HTTP outside loopback + private LAN ranges (RFC1918,
+  Tailscale CGNAT, ULA/link-local IPv6) — a misconfigured `base_url` fails
+  closed to the built-in prune instead of sending the bearer key somewhere
   surprising.
 - Upstream error bodies and raw transport exceptions are never echoed into
   logs (status category only); response bodies are capped at 1 MiB.
