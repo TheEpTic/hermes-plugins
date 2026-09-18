@@ -165,14 +165,26 @@ def _xfer(manager: Any, **kw: Any) -> dict:
     return execute_transfer(manager, machine_name=kw.pop("machine_name", "web1"), **kw)
 
 
+def _faked(probe: tuple = ("missing", None), fake: Any = None, which: str = "/usr/bin/sftp") -> Any:
+    """Stack the which/probe/run_sftp patches most transfer tests need."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch(_WHICH, return_value=which))
+    stack.enter_context(patch.object(TransferService, "_probe", return_value=probe))
+    entered = stack.enter_context(
+        patch.object(TransferService, "_run_sftp", **({"return_value": fake} if fake else {}))
+        if isinstance(fake, subprocess.CompletedProcess) or fake is None
+        else patch.object(TransferService, "_run_sftp", side_effect=fake)
+    )
+    stack.fake = entered  # type: ignore[attr-defined]
+    return stack
+
+
 def test_upload_temp_then_rename_and_refusals(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     source = _up_source(tmp_path)
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("missing", None)),
-        patch.object(TransferService, "_run_sftp", return_value=_ok()) as run_sftp,
-    ):
+    with _faked(fake=_ok()) as stack:
         result = _xfer(
             manager,
             action="upload",
@@ -182,19 +194,15 @@ def test_upload_temp_then_rename_and_refusals(tmp_path: Path) -> None:
         )
     assert result["success"] is True and result["machine"] == "web1"
     assert result["bytes"] == len(b"payload")
-    assert ".release.tar.gz.hermes-upload-" in run_sftp.call_args.args[3]
+    assert ".release.tar.gz.hermes-upload-" in stack.fake.call_args.args[3]
     assert any("mv -n --" in c for c in manager.commands)
     # existing destination without overwrite
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp") as run_sftp,
-    ):
+    with _faked(probe=("file", None)) as stack:
         refused = _xfer(
             manager, action="upload", source=str(source), destination="/srv/release.tar.gz"
         )
     assert refused["success"] is False and "overwrite=true" in refused["error"]
-    run_sftp.assert_not_called()
+    stack.fake.assert_not_called()
 
 
 _MV_MKDIR = (
@@ -223,11 +231,7 @@ def test_upload_race_detection(
     source = _up_source(tmp_path)
     destination = tmp_path / "remote" / "release.tar.gz"
     _fake_mv_bin(tmp_path, monkeypatch, script)
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("missing", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=_upload_locally(None)),
-    ):
+    with _faked(fake=_upload_locally(None)):
         result = _xfer(manager, action="upload", source=str(source), destination=str(destination))
     assert result["success"] is False and fragment in result["error"]
     if check == "isdir":
@@ -240,11 +244,7 @@ def test_upload_race_detection(
 def test_download_staged_atomic_replace(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
     destination = tmp_path / "downloads" / "app.log"
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=_writes_file(b"remote log")),
-    ):
+    with _faked(probe=("file", None), fake=_writes_file(b"remote log")):
         result = _xfer(
             manager, action="download", source="/var/log/app.log", destination=str(destination)
         )
@@ -263,11 +263,7 @@ def test_download_concurrent_and_failed_cleanup(tmp_path: Path) -> None:
         destination.write_bytes(b"concurrent writer")
         return _ok()
 
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(TransferService, "_run_sftp", side_effect=racing),
-    ):
+    with _faked(probe=("file", None), fake=racing):
         raced = _xfer(
             manager, action="download", source="/var/log/app.log", destination=str(destination)
         )
@@ -276,13 +272,7 @@ def test_download_concurrent_and_failed_cleanup(tmp_path: Path) -> None:
     assert not list(destination.parent.glob("*.hermes-download-*"))
     # failed sftp removes the partial temp
     partial = tmp_path / "app.log"
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("file", None)),
-        patch.object(
-            TransferService, "_run_sftp", side_effect=_writes_file(b"partial", 1, "network failed")
-        ),
-    ):
+    with _faked(probe=("file", None), fake=_writes_file(b"partial", 1, "network failed")):
         failed = _xfer(
             manager, action="download", source="/var/log/app.log", destination=str(partial)
         )
@@ -292,10 +282,7 @@ def test_download_concurrent_and_failed_cleanup(tmp_path: Path) -> None:
 
 def test_download_guardrails(tmp_path: Path) -> None:
     manager = cast(Any, StubManager(tmp_path))
-    with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("directory", None)),
-    ):
+    with _faked(probe=("directory", None)):
         no_recurse = _xfer(
             manager,
             action="download",
@@ -312,14 +299,12 @@ def test_download_guardrails(tmp_path: Path) -> None:
         )
     assert creds["success"] is False and "credential" in creds["error"]
     with (
-        patch(_WHICH, return_value="/usr/bin/sftp"),
-        patch.object(TransferService, "_probe", return_value=("directory", None)),
+        _faked(probe=("directory", None)) as stack,
         patch.object(
             TransferService,
             "_tree_has_unsafe_entry",
             return_value=(True, "/srv/export/.ssh/id_ed25519"),
         ),
-        patch.object(TransferService, "_run_sftp") as run_sftp,
     ):
         nested = _xfer(
             manager,
@@ -329,7 +314,7 @@ def test_download_guardrails(tmp_path: Path) -> None:
             recursive=True,
         )
     assert nested["success"] is False and "credential path" in nested["error"]
-    run_sftp.assert_not_called()
+    stack.fake.assert_not_called()
     # the scanner itself flags a real nested key dir
     scan_export = tmp_path / "scan_export"
     (scan_export / ".ssh").mkdir(parents=True)

@@ -138,12 +138,21 @@ def _collected_response(
     """
     if not still_running_error and state is True:
         return {"success": True, "session_id": session_id, "running": True}
-    messages = {
-        None: f"No background process for session '{session_id}'",
-        True: f"Process for session '{session_id}' is still running",
-        False: f"No background process for session '{session_id}'",
-    }
-    return {"success": False, "error": messages[state]}
+    error = (
+        f"Process for session '{session_id}' is still running"
+        if state is True
+        else f"No background process for session '{session_id}'"
+    )
+    return {"success": False, "error": error}
+
+
+def _coerce_positive(value: object, field: str, fallback: int) -> int:
+    """Positive-int-or-fallback for soft limits; invalid means config default."""
+    try:
+        out = coerce_int(value, field, minimum=0)
+    except ValueError:
+        raise ValueError(f"{field} must be a positive integer") from None
+    return fallback if out <= 0 else out
 
 
 class Executor:
@@ -169,19 +178,12 @@ class Executor:
     def _normalize_timeout(self, timeout: object | None) -> int:
         if timeout is None:
             return self._config.command_timeout
-        try:
-            out = coerce_int(timeout, "timeout", minimum=0)
-        except ValueError:
-            raise ValueError("timeout must be a positive integer") from None
-        return self._config.command_timeout if out <= 0 else out
+        return _coerce_positive(timeout, "timeout", self._config.command_timeout)
 
     def _normalize_max_output_chars(self, max_output_chars: object) -> int:
-        try:
-            limit = coerce_int(max_output_chars, "max_output_chars", minimum=0)
-        except ValueError:
-            raise ValueError("max_output_chars must be a positive integer") from None
-        if limit <= 0:
-            return self._config.max_output_chars
+        limit = _coerce_positive(
+            max_output_chars, "max_output_chars", self._config.max_output_chars
+        )
         return min(limit, _MAX_OUTPUT_RETURN_CHARS)
 
     def _finish_response(
@@ -223,7 +225,7 @@ class Executor:
                 "host": machine.host,
                 "error": "Connection timed out",
             }
-        except Exception as e:
+        except OSError as e:
             return {"success": False, "status": "error", "host": machine.host, "error": str(e)}
         if result.returncode == 0 and "ok" in result.stdout:
             self._registry.remember_key(machine)
@@ -273,8 +275,8 @@ class Executor:
         ssh_args = build_ssh_args(self._config, machine, command, control_path, timeout_secs)
         start_time = time.monotonic()
 
-        if background:
-            return self._run_background(
+        return (
+            self._run_background(
                 machine,
                 canonical,
                 command,
@@ -285,8 +287,17 @@ class Executor:
                 timeout_secs,
                 max_chars,
             )
-        return self._run_sync(
-            machine, canonical, command, ssh_args, session_id, start_time, timeout_secs, max_chars
+            if background
+            else self._run_sync(
+                machine,
+                canonical,
+                command,
+                ssh_args,
+                session_id,
+                start_time,
+                timeout_secs,
+                max_chars,
+            )
         )
 
     def _run_sync(
@@ -312,7 +323,7 @@ class Executor:
                 "elapsed_secs": elapsed,
                 "machine": canonical,
             }
-        except Exception as e:
+        except OSError as e:
             logger.debug("run_command failed for %s: %s", canonical, e, exc_info=True)
             elapsed = round(time.monotonic() - start_time, 2)
             self._audit.log_command(canonical, command, -1, elapsed, session_id)
@@ -369,7 +380,7 @@ class Executor:
             stdout_handle.close()
             stderr_handle.close()
             stdout_handle = stderr_handle = None
-        except Exception as e:
+        except OSError as e:
             self._cleanup_failed_background(
                 proc, stdout_handle, stderr_handle, stdout_path, stderr_path
             )

@@ -177,6 +177,26 @@ class TransferService:
     ) -> subprocess.CompletedProcess[str]:
         return run_sftp(machine, self.manager.config, request, local_path, remote_path_value)
 
+    def _sftp_or_error(
+        self,
+        machine: Machine,
+        request: TransferRequest,
+        local_path: Path,
+        remote_path_value: str,
+        fail: Any,
+    ) -> subprocess.CompletedProcess[str] | dict[str, Any]:
+        """Run the sftp batch, mapping timeout/exit failures to audited errors."""
+        try:
+            result = self._run_sftp(machine, request, local_path, remote_path_value)
+        except subprocess.TimeoutExpired:
+            failed: dict[str, Any] = fail(-1, "Transfer timed out")
+            return failed
+        if result.returncode:
+            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
+            failed = fail(result.returncode, message)
+            return failed
+        return result
+
     def _cleanup_remote(
         self,
         machine: str,
@@ -322,31 +342,16 @@ class TransferService:
 
         started = time.monotonic()
         temporary = remote_temp(destination)
-        try:
-            result = self._run_sftp(machine, request, local.path, temporary)
-        except subprocess.TimeoutExpired:
+
+        def fail(code: int, message: str) -> dict[str, Any]:
             self._cleanup_remote(machine.name, temporary, request.timeout)
             return self._audited_error(
-                request,
-                machine.name,
-                local.path,
-                destination,
-                started,
-                -1,
-                "Transfer timed out",
+                request, machine.name, local.path, destination, started, code, message
             )
-        if result.returncode:
-            self._cleanup_remote(machine.name, temporary, request.timeout)
-            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
-            return self._audited_error(
-                request,
-                machine.name,
-                local.path,
-                destination,
-                started,
-                result.returncode,
-                message,
-            )
+
+        result = self._sftp_or_error(machine, request, local.path, temporary, fail)
+        if isinstance(result, dict):
+            return result
 
         finalise = self._finalise_upload(
             request,
@@ -432,31 +437,16 @@ class TransferService:
         started = time.monotonic()
         temporary = local_temp(destination)
         cleanup_local(temporary)
-        try:
-            result = self._run_sftp(machine, request, temporary, source)
-        except subprocess.TimeoutExpired:
+
+        def fail(code: int, message: str) -> dict[str, Any]:
             cleanup_local(temporary)
             return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                -1,
-                "Transfer timed out",
+                request, machine.name, source, destination, started, code, message
             )
-        if result.returncode:
-            cleanup_local(temporary)
-            message = result.stderr.strip() or f"sftp exited with code {result.returncode}"
-            return self._audited_error(
-                request,
-                machine.name,
-                source,
-                destination,
-                started,
-                result.returncode,
-                message,
-            )
+
+        result = self._sftp_or_error(machine, request, temporary, source, fail)
+        if isinstance(result, dict):
+            return result
         try:
             if request.overwrite:
                 os.replace(temporary, destination)

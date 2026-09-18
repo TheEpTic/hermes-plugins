@@ -72,21 +72,27 @@ def test_session_model() -> None:
 
 
 @pytest.mark.parametrize(
-    "session,expected",
+    "age,expected",
     [
-        (_active_session(timedelta(minutes=5)), "5m 0s"),
-        (_active_session(timedelta(seconds=30)), "30s"),
-        (_active_session(timedelta(hours=2, minutes=15)), "2h 15m"),
-        (Session(id="s1", machine="h", status="closed"), "unknown"),
-        (Session(id="s1", machine="h", status="active", last_active=""), "unknown"),
-        (
-            Session(id="s1", machine="h", status="active", last_active="not-a-date"),
-            "unknown",
-        ),
+        (timedelta(minutes=5), "5m 0s"),
+        (timedelta(seconds=30), "30s"),
+        (timedelta(hours=2, minutes=15), "2h 15m"),
     ],
 )
-def test_session_idle_human(session: Session, expected: str) -> None:
-    assert session.idle_human == expected
+def test_session_idle_human(age: timedelta, expected: str) -> None:
+    assert _active_session(age).idle_human == expected
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        Session(id="s1", machine="h", status="closed"),
+        Session(id="s1", machine="h", status="active", last_active=""),
+        Session(id="s1", machine="h", status="active", last_active="not-a-date"),
+    ],
+)
+def test_session_idle_human_unknown(session: Session) -> None:
+    assert session.idle_human == "unknown"
 
 
 def test_session_idle_seconds_bounds() -> None:
@@ -329,10 +335,12 @@ def test_build_ssh_args(tmp_path: Path) -> None:
     assert "ControlMaster" not in str(bare) and "-i" not in bare
 
 
-def _run_ok(mgr: Any, machine: str = "h", stdout: str = "ok", code: int = 0) -> dict:
+def _run_ok(
+    mgr: Any, machine: str = "h", stdout: str = "ok", code: int = 0, cmd: str = "echo ok"
+) -> dict:
     with patch("ssh_tools.exec.subprocess.run") as mock_run:
         mock_run.return_value = MagicMock(returncode=code, stdout=stdout, stderr="")
-        result = mgr.run_command(machine, "echo ok")
+        result = mgr.run_command(machine, cmd)
     assert mgr.list_sessions("active") == {}
     return result
 
@@ -454,9 +462,7 @@ def test_poll_and_read_errors(tmp_path: Path) -> None:
 
 
 def _audited_run(mgr: Any, cmd: str, **kw: Any) -> None:
-    with patch("ssh_tools.exec.subprocess.run") as mock_run:
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        mgr.run_command("h", cmd, **kw)
+    _run_ok(mgr, cmd=cmd, **kw)
 
 
 def test_audit_log_modes(tmp_path: Path) -> None:
@@ -477,26 +483,20 @@ def test_audit_log_modes(tmp_path: Path) -> None:
 def test_audit_redaction_and_metadata(tmp_path: Path) -> None:
     redacted = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="redacted"))
     redacted.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.exec.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        redacted.run_command("h", "TOKEN=super-secret deploy --password hunter2")
+    _run_ok(redacted, cmd="TOKEN=super-secret deploy --password hunter2")
     entry = redacted.list_command_log()[-1]
     assert "super-secret" not in entry["command"] and "hunter2" not in entry["command"]
     assert "<redacted>" in entry["command"] and len(entry["command_sha256"]) == 64
     meta = SSHManager(SSHConfig(data_dir=tmp_path, audit_log_mode="metadata"))
-    with patch("ssh_tools.exec.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        meta.run_command("h", "GITHUB_TOKEN=short deploy")
-        meta.run_command("h", "GITHUB_TOKEN=a-much-longer-secret deploy")
+    _run_ok(meta, cmd="GITHUB_TOKEN=short deploy")
+    _run_ok(meta, cmd="GITHUB_TOKEN=a-much-longer-secret deploy")
     first, second = meta.list_command_log(limit=2)
     assert "command" not in first
     assert first["command_length"] == second["command_length"]
     assert first["command_sha256"] == second["command_sha256"]
     off = SSHManager(SSHConfig(data_dir=tmp_path / "off", audit_log_mode="off"))
     off.add_machine(Machine(name="h", host="1.1.1.1"))
-    with patch("ssh_tools.exec.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        off.run_command("h", "echo private")
+    _run_ok(off, cmd="echo private")
     assert not (tmp_path / "off" / "command_log.jsonl").exists()
 
 
@@ -591,29 +591,21 @@ def test_idle_checker_lifecycle(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_spool_large_output_file_survives(tmp_path: Path) -> None:
-    mgr, sid, proc = _bg_ready(tmp_path, "verbose command", max_output_chars=10)
+@pytest.mark.parametrize("large", [True, False])
+def test_spool_lifecycle(tmp_path: Path, large: bool) -> None:
+    """Large bg output keeps its spool file; short output deletes both spools."""
+    mgr, sid, proc = _bg_ready(tmp_path, "command", **({"max_output_chars": 10} if large else {}))
     stdout_path, stderr_path, _ = mgr._background_outputs[sid]
-    stdout_path.write_text("x" * 100)
+    stdout_path.write_text("x" * 100 if large else "done")
     stderr_path.write_text("")
-    proc.poll.return_value = 0
-    proc.returncode = 0
+    proc.poll.return_value = proc.returncode = 0
     result = mgr.poll_session(sid)
-    assert result["running"] is False
-    assert Path(result["stdout_file"]).read_text() == "x" * 100
-    assert not stderr_path.exists()
-
-
-def test_spool_short_output_removed(tmp_path: Path) -> None:
-    mgr, sid, proc = _bg_ready(tmp_path, "small command")
-    stdout_path, stderr_path, _ = mgr._background_outputs[sid]
-    stdout_path.write_text("done")
-    stderr_path.write_text("")
-    proc.poll.return_value = 0
-    proc.returncode = 0
-    result = mgr.poll_session(sid)
-    assert result["stdout"] == "done" and "stdout_file" not in result
-    assert not stdout_path.exists() and not stderr_path.exists()
+    if large:
+        assert Path(result["stdout_file"]).read_text() == "x" * 100
+        assert not stderr_path.exists()
+    else:
+        assert result["stdout"] == "done" and "stdout_file" not in result
+        assert not stdout_path.exists() and not stderr_path.exists()
 
 
 def test_background_registered_before_process(tmp_path: Path) -> None:
