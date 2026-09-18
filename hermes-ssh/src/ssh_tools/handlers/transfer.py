@@ -6,7 +6,7 @@ import shlex
 from typing import TYPE_CHECKING, Any
 
 from ..approval import approval_error, check_approval
-from ..helpers import err, ok, param_bool, param_str
+from ..helpers import err, ok, param_bool, param_str, take
 from ..transfers import execute_transfer
 
 if TYPE_CHECKING:
@@ -32,12 +32,9 @@ def handle_ssh_transfer(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
         action = params.get("action")
         if action not in {"upload", "download"}:
             return err("action must be 'upload' or 'download'")
-        args: dict[str, Any] = {}
-        for field, take in _FIELDS:
-            value, error = take(params, field)
-            if error or value is None:
-                return err(error or "unreachable")
-            args[field] = value
+        args, failure = take(params, _FIELDS)
+        if failure is not None:
+            return failure
         if any(ord(char) < 32 or ord(char) == 127 for char in args["source"] + args["destination"]):
             return err("source and destination must not contain control characters")
 

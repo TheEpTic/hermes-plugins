@@ -32,6 +32,19 @@ def dispatch(
     return handler(manager, params) if handler else err(f"Unknown action: {action}")
 
 
+def take(
+    params: dict[str, Any], fields: tuple[tuple[str, Any], ...]
+) -> tuple[dict[str, Any], str | None]:
+    """Validate table-driven handler params: (args, None), or ({}, error json)."""
+    args: dict[str, Any] = {}
+    for field, getter in fields:
+        value, error = getter(params, field)
+        if error or value is None:
+            return {}, err(error or "unreachable")
+        args[field] = value
+    return args, None
+
+
 def param_str(
     params: dict[str, Any], field: str, *, allow_empty: bool = False
 ) -> tuple[str | None, str | None]:

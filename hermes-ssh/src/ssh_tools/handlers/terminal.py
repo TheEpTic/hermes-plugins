@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..approval import approval_error, check_approval
-from ..helpers import err, ok, param_bool, param_str
+from ..helpers import ok, param_bool, param_str, take
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,12 +24,9 @@ def handle_ssh_terminal(manager: SSHManager) -> Callable[[dict[str, Any]], str]:
     """Create a handler for ssh_terminal that captures manager via closure."""
 
     def _handle(params: dict[str, Any], **kwargs: Any) -> str:
-        args: dict[str, Any] = {}
-        for field, take in _FIELDS:
-            value, error = take(params, field)
-            if error or value is None:
-                return err(error or "unreachable")
-            args[field] = value
+        args, error = take(params, _FIELDS)
+        if error is not None:
+            return error
 
         # Check command against Hermes approval system.
         denied = approval_error(
