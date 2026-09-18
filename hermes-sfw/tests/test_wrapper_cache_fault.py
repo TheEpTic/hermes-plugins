@@ -224,6 +224,11 @@ class TestTerminalTransformHook:
             hermes_sfw.register(Ctx())
         assert "transform_terminal_output" in registered and "pre_tool_call" in registered
 
+    def test_manifest_declares_registered_hooks(self) -> None:
+        manifest = Path("src/hermes_sfw/plugin.yaml").read_text(encoding="utf-8")
+        assert "  - pre_tool_call\n" in manifest
+        assert "  - transform_terminal_output\n" in manifest
+
 
 class TestStatusReportsFault:
     def test_fault_and_healthy_status(self, layout: Layout) -> None:
