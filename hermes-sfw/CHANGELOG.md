@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.15] - 2026-09-18
+
+### Fixed
+- **Unreleased 0.2.14 included:** unusable sfw launchers (dangling `.sfw-cache/latest`) no longer surface as opaque blocks. the plugin detects that state offline, prefers a working install when one exists, and reports the repair instead of the launcher's one-line error alone.
+
+### Changed
+- Internal refactor: split the manager into focused detection, diagnosis, resolution, output, and validation modules with no behaviour change.
+- Plugin manifest declares the `transform_terminal_output` hook it already registers (plugin-catalog admission fix).
+
 ## [0.2.14] - 2026-09-13
 
 ### Fixed
