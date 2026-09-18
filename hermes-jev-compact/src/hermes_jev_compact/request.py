@@ -9,18 +9,20 @@ from typing import Any
 from .protocol import JevError
 
 SYSTEMONE_PATH = "/systemone"
-DEFAULT_MODEL = "typesafe:jev-latest"
+DEFAULT_MODEL = "jev-latest"
 
 
 def build_jev_body(model: str, state: Any, questions: dict[str, Any]) -> str:
-    """JSON body for one systemone call. No `stream` key — conduit2 400s on it."""
+    """JSON body for one systemone call. No `stream` key — routers 400 on it."""
     return json.dumps({"model": model, "state": state, "questions": questions})
 
 
 def parse_jev_response(status: int, ok: bool, text: str) -> dict[str, Any]:
     """Validate a systemone response body; JevError on anything but an answers object."""
     if not ok:
-        raise JevError(f"Jev request failed ({status}): {text[:200]}")
+        # Upstream error bodies are attacker-influenced: log a category, not
+        # the body — no newlines/control bytes, no echoed creds in the log.
+        raise JevError(f"jev request failed (http {status})")
     try:
         parsed = json.loads(text)
     except ValueError:

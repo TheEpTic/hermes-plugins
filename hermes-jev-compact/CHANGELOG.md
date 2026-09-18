@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Generic System One endpoint: settings are now `base_url` /
+  `api_key_env` (defaults `https://api.typesafe.ai/v1` / `TYPESAFE_API_KEY`)
+  and `jev_model` defaults to `jev-latest`. Works with TypeSafe's API or any
+  router relaying the same `{model, state, questions}` shape. The old
+  `conduit_*` keys and `CONDUIT_NEXUS_API_KEY` default are gone (pre-release
+  rename — no migration).
+- Transport hardening: redirects refused, response bodies capped at 1 MiB,
+  upstream error bodies no longer echoed into logs.
+
 ## [0.1.0] - 2026-09-18
 
 ### Added

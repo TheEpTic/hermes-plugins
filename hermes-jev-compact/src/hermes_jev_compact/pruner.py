@@ -73,8 +73,11 @@ def batch_calls(
     batches: list[list[JevToolCall]] = []
     current: list[JevToolCall] = []
     current_tokens = 0
+    # One questions_for() per call: cache the built questions AND their token
+    # cost so the asker path reuses them instead of rebuilding (engine passes
+    # batches through _ask_batches, which looks them up here).
     for call in calls:
-        tokens = estimate_tokens(json.dumps(questions_for(call), separators=(",", ":")))
+        tokens = _question_tokens(call)
         if current and current_tokens + tokens > budget:
             batches.append(current)
             current = []
@@ -88,6 +91,26 @@ def batch_calls(
     if current:
         batches.append(current)
     return batches
+
+
+def questions_for_batch(batch: Sequence[JevToolCall]) -> dict[str, Any]:
+    """Prebuilt questions for one batch — same objects batch_calls measured."""
+    questions: dict[str, Any] = {}
+    for call in batch:
+        questions.update(questions_for(call))
+    return questions
+
+
+_question_token_cache: dict[str, int] = {}
+
+
+def _question_tokens(call: JevToolCall) -> int:
+    key = f"{call.id}\x00{call.tool}\x00{call.result_chars}\x00{call.is_error}"
+    tokens = _question_token_cache.get(key)
+    if tokens is None:
+        tokens = estimate_tokens(json.dumps(questions_for(call), separators=(",", ":")))
+        _question_token_cache[key] = tokens
+    return tokens
 
 
 def decide_call(call: JevToolCall, answer: JevCallAnswer, keep_threshold: float) -> JevCallDecision:
@@ -213,7 +236,8 @@ class _StateFitter:
 
     def _order(self) -> list[int]:
         unpinned = [i for i, e in enumerate(self.history) if not self._pinned(e)]
-        return unpinned + [i for i in range(len(self.history)) if i not in unpinned]
+        pinned = set(unpinned)
+        return unpinned + [i for i in range(len(self.history)) if i not in pinned]
 
     def done(self, stage: str) -> dict[str, Any]:
         return {"state": self._state_of(self.history), "tokens": self.tokens, "stage": stage}
@@ -291,7 +315,7 @@ class _StateFitter:
                 prev_tcs = prev.get("tool_calls")
                 entry_tcs = entry.get("tool_calls")
                 assert isinstance(prev_tcs, list) and isinstance(entry_tcs, list)
-                prev["tool_calls"] = [*prev_tcs, *entry_tcs]
+                prev_tcs.extend(entry_tcs)
                 continue
             merged.append(dict(entry))
         self.history = merged

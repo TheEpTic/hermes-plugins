@@ -131,8 +131,8 @@ Do not install a throwaway dependency merely to test the plugin.
 
 Requirements:
 
-- conduit2 (or compatible router) reachable at the plugin's `conduit_base_url` with a `/v1/systemone` lane
-- a client key in `~/.hermes/.env` under the plugin's `conduit_api_key_env` (default `CONDUIT_NEXUS_API_KEY`)
+- a System One endpoint reachable at the plugin's `base_url` (default TypeSafe's API, `https://api.typesafe.ai/v1`) with a `/v1/systemone` lane
+- a client key in `~/.hermes/.env` under the plugin's `api_key_env` (default `TYPESAFE_API_KEY`)
 
 After enabling, opt a session in with `context.engine: jev` and `/reset`. `compressor` (default) bypasses plugins entirely, so enabling the package alone changes nothing.
 

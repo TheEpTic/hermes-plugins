@@ -1,7 +1,15 @@
-"""Sync Jev asker over conduit2 systemone (stdlib urllib, per-call transport)."""
+"""Sync Jev asker over any OpenAI-style /v1/systemone endpoint (stdlib urllib).
+
+Threat posture: base_url + key come from OPERATOR config + operator .env, so
+a malicious URL is a self-own, not remote input. The guard below exists to
+catch config typos/redirects (file:, gopher:, cleartext-off-loopback) before
+the bearer key is sent anywhere surprising — fail closed, fall back to the
+built-in prune.
+"""
 
 from __future__ import annotations
 
+import ipaddress
 import ssl
 import time
 import urllib.error
@@ -15,32 +23,79 @@ from .request import SYSTEMONE_PATH, build_jev_body, parse_jev_response
 
 Transport = Callable[[str, bytes, dict[str, str], float], tuple[int, str]]
 
+# Largest systemone body we will buffer: jev answers are small probabilities
+# (~hundreds of bytes/question). Anything past this is a broken/compromised
+# endpoint — fail closed rather than buffering unbounded bytes into prune.
+MAX_RESPONSE_BYTES = 1_000_000
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in {"localhost", "127.0.0.1", "::1", "0:0:0:0:0:0:0:1"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_url(url: str) -> tuple[str, str]:
+    """Fail-closed URL policy: https anywhere, http loopback-only, no userinfo.
+
+    Returns (scheme, host) for the caller. Raises JevError on anything else —
+    the caller treats that as a failed jev attempt (built-in prune).
+    """
+    parts = urlsplit(url)
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
+    if scheme not in {"http", "https"}:
+        raise JevError(f"refusing non-http jev url: {scheme or '(none)'}")
+    if parts.username or parts.password:
+        raise JevError("refusing jev url with embedded credentials")
+    if scheme == "http" and not _is_loopback_host(host):
+        raise JevError(f"refusing cleartext jev url for non-loopback host: {host or '(none)'}")
+    return scheme, host
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urllib follows 3xx automatically — a redirect would bypass _check_url.
+
+    Raise instead: jev endpoints answer POST in place; a redirect means the
+    base_url is wrong, not that we should chase it with the bearer key.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        raise JevError(f"refusing redirect to {urlsplit(newurl).scheme or '(none)'}://…")
+
+
+def _read_capped(resp: Any) -> str:
+    raw: bytes = resp.read(MAX_RESPONSE_BYTES + 1)
+    if len(raw) > MAX_RESPONSE_BYTES:
+        raise JevError(f"jev response over {MAX_RESPONSE_BYTES} byte cap")
+    return raw.decode("utf-8", "replace")
+
 
 def _default_transport(
     url: str, body: bytes, headers: dict[str, str], timeout_s: float
 ) -> tuple[int, str]:
-    # Fail closed on scheme: https anywhere, http only for loopback
-    # (conduit2 defaults to http://127.0.0.1:8765). Anything else (file:,
-    # gopher:, remote http:) is a config error, not a request.
-    parts = urlsplit(url)
-    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
-    if scheme not in {"http", "https"}:
-        raise JevError(f"refusing non-http conduit url: {scheme or '(none)'}")
-    if scheme == "http" and host not in {
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "0:0:0:0:0:0:0:1",
-    }:
-        raise JevError(f"refusing cleartext conduit url for non-loopback host: {host}")
+    scheme, _ = _check_url(url)
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    ctx = ssl.create_default_context() if scheme == "https" else None
+    handlers: list[Any] = [_NoRedirect()]
+    if scheme == "https":
+        handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
-            return (int(resp.status), resp.read().decode("utf-8", "replace"))
+        with opener.open(req, timeout=timeout_s) as resp:
+            return (int(resp.status), _read_capped(resp))
     except urllib.error.HTTPError as exc:
         try:
-            text = exc.read().decode("utf-8", "replace")
+            text = _read_capped(exc)
         except Exception:
             text = ""
         return (int(exc.code or 0), text)
@@ -58,7 +113,7 @@ class JevAsker:
         transport: Transport | None = None,
     ) -> None:
         if not api_key:
-            raise JevError("conduit api key is not configured")
+            raise JevError("jev api key is not configured")
         self._url = base_url.rstrip("/") + SYSTEMONE_PATH
         self._api_key = api_key
         self._model = model
@@ -82,7 +137,9 @@ class JevAsker:
         except JevError:
             raise
         except Exception as exc:
-            raise JevError(f"Jev transport failed: {exc}") from exc
+            # Transport exceptions can echo the request URL (and its query);
+            # _check_url already rejects userinfo, but never log a raw URL.
+            raise JevError(f"jev transport failed: {type(exc).__name__}") from exc
         answers = parse_jev_response(status, 200 <= status < 300, text).get("answers")
         if not isinstance(answers, dict):
             raise JevError("Jev response is missing answers")

@@ -36,16 +36,16 @@ def test_register_installs_jev_engine_with_defaults():
     hermes_jev_compact.register(ctx)
     assert isinstance(ctx.engine, JevContextCompressor)
     assert ctx.engine.name == "jev"
-    assert ctx.engine.jev_api_key_env == "CONDUIT_NEXUS_API_KEY"
-    assert ctx.engine.jev_conduit_base_url == "http://127.0.0.1:8765/v1"
+    assert ctx.engine.jev_api_key_env == "TYPESAFE_API_KEY"
+    assert ctx.engine.jev_base_url == "https://api.typesafe.ai/v1"
 
 
 def test_register_honors_settings_and_is_idempotent():
     hermes_jev_compact._registered = False
-    ctx = FakeCtx({"keep_threshold": 0.7, "jev_model": "typesafe:jev-test"})
+    ctx = FakeCtx({"keep_threshold": 0.7, "jev_model": "jev-test"})
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.7
-    assert ctx.engine.jev_model == "typesafe:jev-test"
+    assert ctx.engine.jev_model == "jev-test"
     first = ctx.engine
     hermes_jev_compact.register(ctx)
     assert ctx.engine is first
@@ -57,4 +57,4 @@ def test_register_rejects_garbage_settings():
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.5
     assert ctx.engine.jev_max_state_tokens == 25000
-    assert ctx.engine.jev_model == "typesafe:jev-latest"
+    assert ctx.engine.jev_model == "jev-latest"

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "hermes-jev-compact"
 version = "0.1.0"
-description = "Jev-powered smart tool-prune context engine for Hermes Agent (via conduit2 systemone)"
+description = "Jev-powered smart tool-prune context engine for Hermes Agent (any OpenAI-style System One endpoint)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

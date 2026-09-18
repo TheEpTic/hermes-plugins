@@ -24,7 +24,13 @@ from typing import Any
 from .adapter import collect_candidates, is_well_formed_tool_call, to_internal
 from .asker import JevAsker
 from .protocol import JevCallAnswer, JevCallDecision, JevError, JevOptions, JevToolCall
-from .pruner import apply_decisions_openai, batch_calls, decide_call, fit_state, questions_for
+from .pruner import (
+    apply_decisions_openai,
+    batch_calls,
+    decide_call,
+    fit_state,
+    questions_for_batch,
+)
 from .request import noul_answer
 
 logger = logging.getLogger(__name__)
@@ -60,10 +66,13 @@ except Exception:  # pragma: no cover
 
 
 # jev-only knobs: (attribute, setting key, default). Immutable policy, deepcopy-safe.
+# Any /v1/systemone-compatible endpoint works here — TypeSafe's API
+# (https://api.typesafe.ai/v1) is the reference; self-hosted routers that relay
+# the same shape are fine too.
 _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
-    ("jev_conduit_base_url", "conduit_base_url", "http://127.0.0.1:8765/v1"),
-    ("jev_api_key_env", "conduit_api_key_env", "CONDUIT_NEXUS_API_KEY"),
-    ("jev_model", "jev_model", "typesafe:jev-latest"),
+    ("jev_base_url", "base_url", "https://api.typesafe.ai/v1"),
+    ("jev_api_key_env", "api_key_env", "TYPESAFE_API_KEY"),
+    ("jev_model", "jev_model", "jev-latest"),
     ("jev_keep_threshold", "keep_threshold", 0.5),
     ("jev_max_state_tokens", "max_state_tokens", 25000),
     ("jev_max_request_tokens", "max_request_tokens", 30000),
@@ -89,7 +98,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     """Built-in compressor with Jev keep/drop scoring inside the prune seam."""
 
     # jev-only knobs (declared here so type-checkers see them; set in __init__).
-    jev_conduit_base_url: str
+    jev_base_url: str
     jev_api_key_env: str
     jev_model: str
     jev_keep_threshold: float
@@ -219,9 +228,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         for batch in batches:
             if self._cancelled():
                 raise JevError("compression cancelled before jev batch")
-            questions: dict[str, Any] = {}
-            for call in batch:
-                questions.update(questions_for(call))
+            questions = questions_for_batch(batch)
             raw = asker.ask(state, questions)
             # Cancellation may have landed mid-flight: never apply answers the
             # host no longer wants — fall back to the deterministic prune.
@@ -263,11 +270,9 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             fitted = fit_state(to_internal(messages), candidates, options)
             batches = batch_calls(candidates, int(fitted["tokens"]), options.max_request_tokens)
             asker = (
-                asker_factory(self.jev_conduit_base_url, key, self.jev_model, options)
+                asker_factory(self.jev_base_url, key, self.jev_model, options)
                 if asker_factory is not None
-                else JevAsker(
-                    self.jev_conduit_base_url, key, self.jev_model, options.request_timeout_s
-                )
+                else JevAsker(self.jev_base_url, key, self.jev_model, options.request_timeout_s)
             )
             decisions = self._ask_batches(asker, fitted["state"], batches, options)
         except JevError as exc:

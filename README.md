@@ -51,7 +51,7 @@ hermes plugins enable hermes-jev-compact --no-allow-tool-override
 python -m pip show hermes-jev-compact
 ```
 
-Then opt in with `context.engine: jev` and `/reset`. See [hermes-jev-compact](hermes-jev-compact/) for settings (conduit2 base URL, key env, thresholds).
+Then opt in with `context.engine: jev` and `/reset`. See [hermes-jev-compact](hermes-jev-compact/) for settings (endpoint base URL, key env, thresholds).
 
 Run `/reset` or restart Hermes, then confirm the selected plugin is enabled:
 
