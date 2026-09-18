@@ -222,6 +222,17 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             decisions.append(decide_call(call, answer, options.keep_threshold))
         return decisions
 
+    def _fallback(
+        self,
+        message: str | None = None,
+        *args: Any,
+        level: str = "info",
+        **kwargs: Any,
+    ) -> tuple[None, int]:
+        if message is not None:
+            getattr(logger, level)(message, *args, **kwargs)
+        return (None, 0)
+
     def _jev_prune(
         self,
         messages: list[dict[str, Any]],
@@ -237,11 +248,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             messages, boundary, max(min_prune_chars, options.min_result_chars)
         )
         if not candidates or self._cancelled():
-            return (None, 0)
+            return self._fallback()
         key = _resolve_secret(self.jev_api_key_env)
         if not key:
-            logger.debug("jev: no api key configured; built-in prune")
-            return (None, 0)
+            return self._fallback("jev: no api key configured; built-in prune", level="debug")
         try:
             fitted = fit_state(to_internal(messages), candidates, options)
             batches = batch_calls(candidates, int(fitted["tokens"]), options.max_request_tokens)
@@ -252,36 +262,30 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             )
             decisions = self._ask_batches(asker, fitted["state"], batches, options)
         except JevError as exc:
-            logger.info("jev prune failed (%s); built-in prune", exc)
-            return (None, 0)
+            return self._fallback("jev prune failed (%s); built-in prune", exc)
         except (ValueError, TimeoutError) as exc:
-            logger.info("jev prune skipped (%s); built-in prune", exc)
-            return (None, 0)
+            return self._fallback("jev prune skipped (%s); built-in prune", exc)
         except Exception:
-            logger.warning("jev prune crashed; built-in prune", exc_info=True)
-            return (None, 0)
+            return self._fallback(
+                "jev prune crashed; built-in prune", level="warning", exc_info=True
+            )
         try:
             applied = apply_decisions_openai(
                 messages, decisions, candidates, options.truncate_head_chars
             )
         except JevError as exc:
-            logger.warning("jev output ambiguous (%s); built-in prune", exc)
-            return (None, 0)
+            return self._fallback("jev output ambiguous (%s); built-in prune", exc, level="warning")
         pruned_units = sum((1 for d in decisions if d.action != "keep"))
         if pruned_units == 0 or applied == messages or (not _valid_openai_sequence(applied)):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
-            return (None, 0)
-        chars_before = sum(
-            (len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
-        )
-        chars_after = sum((len(str(m.get("content", ""))) for m in applied if isinstance(m, dict)))
+            return self._fallback()
+        chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
+        chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
         if chars_before > 0 and (chars_before - chars_after) / chars_before < 0.25:
-            logger.info("jev reduction under 25%%; built-in prune")
-            return (None, 0)
+            return self._fallback("jev reduction under 25%%; built-in prune")
         if self._cancelled():
-            logger.info("jev prune cancelled before commit; built-in prune")
-            return (None, 0)
+            return self._fallback("jev prune cancelled before commit; built-in prune")
         self.jev_calls += len(batches)
         self.jev_pruned_units += pruned_units
         if not self.quiet_mode:
