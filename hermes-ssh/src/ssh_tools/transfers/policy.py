@@ -160,30 +160,8 @@ def download_denied_reason(path: Path) -> str | None:
     return None
 
 
-def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
-    source = Path(value).expanduser()
-    if source.is_symlink():
-        raise TransferValidationError("upload source must not be a symbolic link")
-    try:
-        source = source.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise TransferValidationError(f"upload source does not exist: {value}") from exc
-    if _GLOB_RE.search(str(source)):
-        raise TransferValidationError("upload source must not contain wildcard characters")
-    reason = local_sensitive_reason(source)
-    if reason:
-        raise TransferValidationError(f"upload source is blocked because it is a {reason}")
-    if _hermes_read_denied(source):
-        raise TransferValidationError("upload source is blocked by Hermes read policy")
-
-    mode = source.stat().st_mode
-    if stat.S_ISREG(mode):
-        return LocalSource(source, False, source.stat().st_size)
-    if not stat.S_ISDIR(mode):
-        raise TransferValidationError("upload source must be a regular file or directory")
-    if not recursive:
-        raise TransferValidationError("recursive=true is required to upload a directory")
-
+def _scan_tree(source: Path) -> int:
+    """Walk a recursive-upload tree: total byte size, or raise on unsafe entries."""
     size = 0
     entries = 0
     for root, directories, files in os.walk(source, followlinks=False):
@@ -215,7 +193,33 @@ def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
                 raise TransferValidationError(
                     f"recursive upload contains a special file: {relative}"
                 )
-    return LocalSource(source, True, size)
+    return size
+
+
+def prepare_upload_source(value: str, recursive: bool) -> LocalSource:
+    source = Path(value).expanduser()
+    if source.is_symlink():
+        raise TransferValidationError("upload source must not be a symbolic link")
+    try:
+        source = source.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise TransferValidationError(f"upload source does not exist: {value}") from exc
+    if _GLOB_RE.search(str(source)):
+        raise TransferValidationError("upload source must not contain wildcard characters")
+    reason = local_sensitive_reason(source)
+    if reason:
+        raise TransferValidationError(f"upload source is blocked because it is a {reason}")
+    if _hermes_read_denied(source):
+        raise TransferValidationError("upload source is blocked by Hermes read policy")
+
+    mode = source.stat().st_mode
+    if stat.S_ISREG(mode):
+        return LocalSource(source, False, source.stat().st_size)
+    if not stat.S_ISDIR(mode):
+        raise TransferValidationError("upload source must be a regular file or directory")
+    if not recursive:
+        raise TransferValidationError("recursive=true is required to upload a directory")
+    return LocalSource(source, True, _scan_tree(source))
 
 
 def prepare_download_destination(value: str) -> Path:
