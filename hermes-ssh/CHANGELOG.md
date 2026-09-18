@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.10] - 2026-09-18
+
+### Changed
+- Internal refactor: split the manager into focused execution, registry, session, audit, and validation modules with no behaviour change; dropped dead one-shot migrate script.
+
+### Fixed
+- Remote system-credential denylist compares by path segment, also refusing `/etc//shadow` and `/etc/shadow/` which resolve to `/etc/shadow` remotely (plugin-catalog admission fix).
+- Plugin manifest declares the `cryptography==50.0.0` runtime dependency so directory installs get it.
+
 ## [0.4.9] - 2026-09-12
 
 ### Fixed
