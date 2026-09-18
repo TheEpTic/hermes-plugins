@@ -1,8 +1,8 @@
 """Adapter tests: pairing, pins, exclusions (hermes openai format)."""
 
-from __future__ import annotations
+import pytest
 
-from hermes_jev_compact.adapter import collect_candidates, to_internal
+from hermes_jev_compact.adapter import _flatten_text, collect_candidates, is_pinned, to_internal
 from tests.conftest import make_tool_transcript
 
 
@@ -118,8 +118,6 @@ def test_multi_call_row_and_duplicate_ids():
 
 
 def test_pinned_bit_marks_index_zero_and_recent():
-    from hermes_jev_compact.adapter import is_pinned
-
     messages = make_tool_transcript(n_calls=2, result_chars=9000)
     # preserve_recent=1 → last message (tail user) is pinned; with the default
     # 0 only index 0 is pinned and no candidate is near it.
@@ -129,6 +127,12 @@ def test_pinned_bit_marks_index_zero_and_recent():
     assert all(c.pinned is False for c in collect_candidates(messages, 99, 8000))
     pinned = collect_candidates(messages, 99, 8000, preserve_recent=len(messages))
     assert pinned and all(c.pinned is True for c in pinned)
+    # Oversized boundary clamps to len (all eligible); negative clamps to 0.
+    one_call = make_tool_transcript(n_calls=1, result_chars=9000)
+    assert len(collect_candidates(one_call, 10**9, 1)) == 1
+    assert collect_candidates(one_call, -5, 1) == []
+    assert is_pinned(3, 9, -1) is False
+    assert is_pinned(3, 9, 10**9) is True
 
 
 def test_to_internal_excludes_system():
@@ -165,25 +169,18 @@ def test_skips_duplicate_result_ids_and_out_of_order():
     assert collect_candidates(ooo, 99, 1) == []
 
 
-def test_flattens_multimodal_parts_like_host():
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}], "a\nb"),
+        ([{"type": "image_url", "image_url": {"url": "x"}}], ""),
+        ([{"type": "text", "text": "keep"}, {"type": "image_url"}], "keep"),
+        (None, ""),
+        (b"\x00", None),
+        (42, None),
+    ],
+)
+def test_flattens_multimodal_parts_like_host(content, expected):
     # Host parity (context_compressor _part_text): text parts join, image/file
     # parts contribute nothing, and the row keeps its text for state.
-    from hermes_jev_compact.adapter import _flatten_text
-
-    assert _flatten_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]) == "a\nb"
-    assert _flatten_text([{"type": "image_url", "image_url": {"url": "x"}}]) == ""
-    assert _flatten_text([{"type": "text", "text": "keep"}, {"type": "image_url"}]) == "keep"
-    assert _flatten_text(None) == ""
-    assert _flatten_text(b"\x00") is None
-    assert _flatten_text(42) is None
-
-
-def test_normalizes_boundary_and_preserve_recent():
-    from hermes_jev_compact.adapter import is_pinned
-
-    messages = make_tool_transcript(n_calls=1, result_chars=9000)
-    # Oversized boundary clamps to len (all eligible); negative clamps to 0.
-    assert len(collect_candidates(messages, 10**9, 1)) == 1
-    assert collect_candidates(messages, -5, 1) == []
-    assert is_pinned(3, 9, -1) is False
-    assert is_pinned(3, 9, 10**9) is True
+    assert _flatten_text(content) == expected

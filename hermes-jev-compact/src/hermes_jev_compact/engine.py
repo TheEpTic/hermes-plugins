@@ -13,7 +13,6 @@ Host-seam contract (see agent/context_compressor.py):
 """
 
 from __future__ import annotations
-
 import contextlib
 import copy
 import inspect
@@ -21,24 +20,16 @@ import logging
 import math
 import os
 from typing import Any
-
 from .adapter import collect_candidates, is_well_formed_tool_call, to_internal
 from .asker import JevAsker
 from .protocol import JevCallAnswer, JevCallDecision, JevError, JevOptions, JevToolCall
-from .pruner import (
-    apply_decisions_openai,
-    batch_calls,
-    decide_call,
-    fit_state,
-    questions_for_batch,
-)
+from .pruner import apply_decisions_openai, batch_calls, decide_call, fit_state, questions_for_batch
 from .request import noul_answer
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - host import; CI uses the fallback below
+try:
     from agent.context_compressor import ContextCompressor
-except Exception:  # pragma: no cover
+except Exception:
 
     class ContextCompressor:  # type: ignore[no-redef]
         """Minimal stand-in so the override logic is testable without hermes installed."""
@@ -63,13 +54,9 @@ except Exception:  # pragma: no cover
             protect_tail_tokens: int | None = None,
             min_prune_chars: int = 200,
         ) -> tuple[list[dict[str, Any]], int]:
-            return messages, 0
+            return (messages, 0)
 
 
-# jev-only knobs: (attribute, setting key, default). Immutable policy, deepcopy-safe.
-# Any /v1/systemone-compatible endpoint works here — TypeSafe's API
-# (https://api.typesafe.ai/v1) is the reference; self-hosted routers that relay
-# the same shape are fine too.
 _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_base_url", "base_url", "https://api.typesafe.ai/v1"),
     ("jev_api_key_env", "api_key_env", "TYPESAFE_API_KEY"),
@@ -117,15 +104,12 @@ def _resolve_secret(key_env: str) -> str:
         value = get_secret(key_env)
     except Exception:
         value = os.environ.get(key_env)
-    # BaseException (KeyboardInterrupt/SystemExit) intentionally propagates —
-    # swallowing process-control signals to attempt a prune would be wrong.
     return value if isinstance(value, str) else ""
 
 
 class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     """Built-in compressor with Jev keep/drop scoring inside the prune seam."""
 
-    # jev-only knobs (declared here so type-checkers see them; set in __init__).
     jev_base_url: str
     jev_api_key_env: str
     jev_model: str
@@ -147,23 +131,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         self.jev_calls = 0
         self.jev_pruned_units = 0
         self.jev_fallbacks = 0
-        # The summary LLM only ever runs inside the host's compress(), which we
-        # inherit — but the shared plugin singleton must never RETAIN the chat
-        # api key: the deepcopy at agent_init.py:1785-1801 would carry it into
-        # every child, and register() builds us with model=jev-latest anyway.
-        # Strip it; the host re-supplies it via update_model() per agent.
         with contextlib.suppress(Exception):
             self.api_key = ""
 
     def update_model(self, *args: Any, **kwargs: Any) -> None:
-        # Host calls this per agent with the REAL chat key (agent_init
-        # :1849-1852: summary + context-length resolution need it). The base
-        # stores it on self.api_key and the summary path reads it back at
-        # call time (:3357), so stripping here would BREAK the summary LLM.
-        # Secret posture instead: the deepcopy below never copies api_key,
-        # and register() never passes a real key (model=jev-latest, key="").
-        # The key lives only on the per-agent deepcopies, exactly like the
-        # built-in compressor — never on the shared plugin singleton.
         super().update_model(*args, **kwargs)
 
     @property
@@ -171,12 +142,6 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         return "jev"
 
     def __deepcopy__(self, memo: dict[int, Any]) -> JevContextCompressor:
-        # Allowlist copy: host installs uncopyable runtime state on the shared
-        # singleton (_session_db handle, _compression_cancelled_check callback
-        # bound to the parent agent, possibly locks). Copying the callback
-        # would also pin the child to the PARENT's cancellation generation.
-        # So: fresh instance via the real __init__ (correct base invariants),
-        # then copy only jev policy + safe scalar/counter state.
         cls = self.__class__
         fresh = cls.__new__(cls)
         memo[id(self)] = fresh
@@ -189,17 +154,12 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             for k, v in self.__dict__.items()
             if k in params and k not in {"api_key"}
         }
-        # model is required positional on the base; fall back to current value.
         model = base_kwargs.pop("model", getattr(self, "model", ""))
         try:
             fresh.__init__(model, **base_kwargs)  # type: ignore[misc]
         except Exception:
-            # Last resort: shallow-copy scalars only, never callbacks/handles.
             for key, value in self.__dict__.items():
-                if key.startswith("_compression_cancelled") or key in {
-                    "_session_db",
-                    "api_key",
-                }:
+                if key.startswith("_compression_cancelled") or key in {"_session_db", "api_key"}:
                     continue
                 try:
                     fresh.__dict__[key] = copy.deepcopy(value, memo)
@@ -218,8 +178,6 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             fresh.__dict__[counter] = int(getattr(self, counter, 0) or 0)
         fresh.__dict__["api_key"] = ""
         return fresh
-
-    # -- seam ---------------------------------------------------------------
 
     def _cancelled(self) -> bool:
         check = getattr(self, "_compression_cancelled_check", None)
@@ -243,16 +201,8 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         )
 
     def _ask_batches(
-        self,
-        asker: JevAsker,
-        state: Any,
-        batches: list[list[JevToolCall]],
-        options: JevOptions,
+        self, asker: JevAsker, state: Any, batches: list[list[JevToolCall]], options: JevOptions
     ) -> list[JevCallDecision]:
-        # NOTE: deliberate drift from TS (compact.ts:275-278 Promise.all):
-        # batches run SEQUENTIALLY so cancellation can stop between asks and
-        # the shared JevAsker deadline applies in order. Same questions, same
-        # state per batch; only latency/parallelism differs.
         # Answers recorded per batch (sequential: cancellation can stop between
         # asks). Each asked call MUST have an entry here before decisions run.
         answers: dict[str, JevCallAnswer] = {}
@@ -261,8 +211,6 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 raise JevError("compression cancelled before jev batch")
             questions = questions_for_batch(batch)
             raw = asker.ask(state, questions)
-            # Cancellation may have landed mid-flight: never apply answers the
-            # host no longer wants — fall back to the deterministic prune.
             if self._cancelled():
                 raise JevError("compression cancelled during jev batch")
             answers.update(_answers_for_batch(batch, raw))
@@ -273,6 +221,17 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 raise JevError(f"missing jev answers for {call.id}")
             decisions.append(decide_call(call, answer, options.keep_threshold))
         return decisions
+
+    def _fallback(
+        self,
+        message: str | None = None,
+        *args: Any,
+        level: str = "info",
+        **kwargs: Any,
+    ) -> tuple[None, int]:
+        if message is not None:
+            getattr(logger, level)(message, *args, **kwargs)
+        return (None, 0)
 
     def _jev_prune(
         self,
@@ -289,11 +248,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             messages, boundary, max(min_prune_chars, options.min_result_chars)
         )
         if not candidates or self._cancelled():
-            return None, 0
+            return self._fallback()
         key = _resolve_secret(self.jev_api_key_env)
         if not key:
-            logger.debug("jev: no api key configured; built-in prune")
-            return None, 0
+            return self._fallback("jev: no api key configured; built-in prune", level="debug")
         try:
             fitted = fit_state(to_internal(messages), candidates, options)
             batches = batch_calls(candidates, int(fitted["tokens"]), options.max_request_tokens)
@@ -304,40 +262,30 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             )
             decisions = self._ask_batches(asker, fitted["state"], batches, options)
         except JevError as exc:
-            logger.info("jev prune failed (%s); built-in prune", exc)
-            return None, 0
+            return self._fallback("jev prune failed (%s); built-in prune", exc)
         except (ValueError, TimeoutError) as exc:
-            logger.info("jev prune skipped (%s); built-in prune", exc)
-            return None, 0
+            return self._fallback("jev prune skipped (%s); built-in prune", exc)
         except Exception:
-            logger.warning("jev prune crashed; built-in prune", exc_info=True)
-            return None, 0
+            return self._fallback(
+                "jev prune crashed; built-in prune", level="warning", exc_info=True
+            )
         try:
             applied = apply_decisions_openai(
                 messages, decisions, candidates, options.truncate_head_chars
             )
         except JevError as exc:
-            logger.warning("jev output ambiguous (%s); built-in prune", exc)
-            return None, 0
-        pruned_units = sum(1 for d in decisions if d.action != "keep")
-        if pruned_units == 0 or applied == messages or not _valid_openai_sequence(applied):
+            return self._fallback("jev output ambiguous (%s); built-in prune", exc, level="warning")
+        pruned_units = sum((1 for d in decisions if d.action != "keep"))
+        if pruned_units == 0 or applied == messages or (not _valid_openai_sequence(applied)):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
-            return None, 0
-        # TS README parity (reductionRatio < 0.25 → "not worth it"): a jev pass
-        # that barely shrinks the transcript is worse than the deterministic
-        # prune — it spent a network round-trip to keep everything. Measure in
-        # chars (same unit TS uses) and fall back under 25% reduction.
+            return self._fallback()
         chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
         chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
         if chars_before > 0 and (chars_before - chars_after) / chars_before < 0.25:
-            logger.info("jev reduction under 25%%; built-in prune")
-            return None, 0
-        # Final cancellation consult before committing counters/output: an ask
-        # that finished just as the host cancelled must not mutate state.
+            return self._fallback("jev reduction under 25%%; built-in prune")
         if self._cancelled():
-            logger.info("jev prune cancelled before commit; built-in prune")
-            return None, 0
+            return self._fallback("jev prune cancelled before commit; built-in prune")
         self.jev_calls += len(batches)
         self.jev_pruned_units += pruned_units
         if not self.quiet_mode:
@@ -348,18 +296,13 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 pruned_units,
                 fitted["stage"],
             )
-        return applied, pruned_units
+        return (applied, pruned_units)
 
     def prune_tool_results_only(
-        self,
-        messages: list[dict[str, Any]],
-        current_tokens: int | None = None,
+        self, messages: list[dict[str, Any]], current_tokens: int | None = None
     ) -> tuple[list[dict[str, Any]], int]:
-        # KEEP the host's deterministic/no-LLM contract (host :2987, hot path
-        # turn_preflight.py:364): bypass Jev entirely — straight to base.
-        # Keyword form: survives a host reorder; name is the stable contract.
         out, n = super().prune_tool_results_only(messages, current_tokens=current_tokens)
-        return list(out), int(n)
+        return (list(out), int(n))
 
     def _prune_old_tool_results(
         self,
@@ -374,17 +317,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             )
         except Exception:
             logger.warning("jev prune path failed; built-in prune", exc_info=True)
-            applied, count = None, 0
+            applied, count = (None, 0)
         if applied is not None and count > 0:
-            # Jev REPLACES the base prune (never jev-then-base): exactly one
-            # pass owns the output, so counts stay single-report and base
-            # passes can't re-munge jev-truncated rows.
-            return applied, count
+            return (applied, count)
         self.jev_fallbacks += 1
         out, n = super()._prune_old_tool_results(
             messages, protect_tail_count, protect_tail_tokens, min_prune_chars
         )
-        return list(out), int(n)
+        return (list(out), int(n))
 
 
 def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
@@ -397,31 +337,19 @@ def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
     top-level rows (non-dict, missing/unknown role)."""
     call_rows: dict[str, int] = {}
     for index, msg in enumerate(messages):
-        # Fail closed on malformed rows: jev output must be a clean transcript.
         if not isinstance(msg, dict):
             return False
         role = msg.get("role")
-        if not isinstance(role, str) or role not in {
-            "system",
-            "user",
-            "assistant",
-            "tool",
-        }:
+        if not isinstance(role, str) or role not in {"system", "user", "assistant", "tool"}:
             return False
         if role != "assistant":
             continue
         tcs = msg.get("tool_calls")
         if tcs is None:
-            # None == absent: host treats tool_calls=None as "no calls"
-            # (chat_completion_helpers.py:1567 getattr default, :1644 truthiness
-            # gate), and orphans still fail below (cid not in call_rows).
             continue
-        # Fail closed: a present-but-non-list container is malformed output.
         if not isinstance(tcs, list):
             return False
         for tc in tcs:
-            # Fail closed on anything below the host-canonical call shape, and
-            # on duplicate call ids (ambiguous pairing address).
             if not is_well_formed_tool_call(tc):
                 return False
             if tc["id"] in call_rows:
@@ -429,7 +357,6 @@ def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
             call_rows[tc["id"]] = index
     seen_results: set[str] = set()
     for index, msg in enumerate(messages):
-        # (dict + role already validated above; re-check cheaply for mypy.)
         if not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
         cid = msg.get("tool_call_id")
@@ -437,9 +364,7 @@ def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
             return False
         if cid in seen_results:
             return False
-        # Ordering: a result before its call is malformed output.
         if index <= call_rows[cid]:
             return False
         seen_results.add(cid)
-    # Every assistant tool call must keep exactly its result row.
     return set(call_rows) <= seen_results

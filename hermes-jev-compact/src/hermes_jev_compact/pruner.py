@@ -1,12 +1,10 @@
 """Pruner: state fitting, batching, questions, decisions, apply. Port of compact.ts."""
 
 from __future__ import annotations
-
 import json
 import re
 from collections.abc import Sequence
 from typing import Any
-
 from .protocol import (
     JevCallAnswer,
     JevCallDecision,
@@ -26,8 +24,6 @@ from .shaping import (
 )
 
 REQUEST_OVERHEAD_TOKENS = 20
-# TS reference marker verbatim (compact.ts:135-140): downstream tooling and the
-# TS vectors match on this string; do NOT rebrand it.
 TRUNCATION_TAG = "fast-jev-compaction"
 
 
@@ -40,16 +36,13 @@ def _input_text(input: dict[str, Any], limit: int) -> str:
 
 
 def _result_note(call: JevToolCall) -> str:
-    return f"{'error' if call.is_error else 'ok'}, {call.result_chars} chars (omitted)"
+    return f"{('error' if call.is_error else 'ok')}, {call.result_chars} chars (omitted)"
 
 
-_WS_RUN = re.compile(r"\s+")
+_WS_RUN = re.compile("\\s+")
 
 
 def _compact_call(call: JevToolCall) -> str:
-    # TS parity (state.ts:110-120): key=value per entry, string values raw,
-    # non-strings via inputText({key: value}, 200); the JOINED line truncates
-    # to 60 chars — not each input up front.
     parts = []
     for key, value in call.input.items():
         text = value if isinstance(value, str) else _input_text({key: value}, 200)
@@ -63,18 +56,11 @@ def questions_for(call: JevToolCall) -> dict[str, dict[str, str]]:
     return {
         f"call_{call.id}": {
             "type": "noul",
-            "instructions": (
-                f"Tool call {call.id} ({call.tool}) should stay in the history: knowing this call "
-                "was made, with its input, still matters for what the assistant does next"
-            ),
+            "instructions": f"Tool call {call.id} ({call.tool}) should stay in the history: knowing this call was made, with its input, still matters for what the assistant does next",
         },
         f"result_{call.id}": {
             "type": "noul",
-            "instructions": (
-                f"The full output of tool call {call.id} ({call.tool}, {call.result_chars} chars) "
-                "should stay in the history verbatim: the assistant still needs its contents and "
-                "re-running the tool would not do"
-            ),
+            "instructions": f"The full output of tool call {call.id} ({call.tool}, {call.result_chars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do",
         },
     }
 
@@ -86,9 +72,6 @@ def batch_calls(
     batches: list[list[JevToolCall]] = []
     current: list[JevToolCall] = []
     current_tokens = 0
-    # One questions_for() per call: cache the built questions AND their token
-    # cost so the asker path reuses them instead of rebuilding (engine passes
-    # batches through _ask_batches, which looks them up here).
     for call in calls:
         tokens = _question_tokens(call)
         if current and current_tokens + tokens > budget:
@@ -118,9 +101,6 @@ _question_token_cache: dict[tuple[str, str, int, bool], int] = {}
 
 
 def _question_tokens(call: JevToolCall) -> int:
-    # Tuple key (no separator-collision class) + bounded size: prune runs in a
-    # long-lived process, and unique ids would grow an unbounded dict forever.
-    # 4096 entries ≈ 200KB; overflow clears (token costs are pure recompute).
     key = (call.id, call.tool, call.result_chars, call.is_error)
     tokens = _question_token_cache.get(key)
     if tokens is None:
@@ -137,17 +117,16 @@ def decide_call(call: JevToolCall, answer: JevCallAnswer, keep_threshold: float)
         "tool": call.tool,
         "keep_call": answer.keep_call,
         "keep_result": answer.keep_result,
-    }
-    # TS parity (compact.ts:107): pinned short-circuits before probabilities.
+    }  # type: dict[str, Any]
     if call.pinned:
-        return JevCallDecision(action="keep", reason="pinned", **base)  # type: ignore[arg-type]
+        return JevCallDecision(action="keep", reason="pinned", **base)
     if answer.keep_result >= keep_threshold:
-        action, reason = "keep", "kept"
+        action, reason = ("keep", "kept")
     elif answer.keep_call >= keep_threshold:
-        action, reason = "drop_result", "result_dropped"
+        action, reason = ("drop_result", "result_dropped")
     else:
-        action, reason = "drop_call", "call_dropped"
-    return JevCallDecision(action=action, reason=reason, **base)  # type: ignore[arg-type]
+        action, reason = ("drop_call", "call_dropped")
+    return JevCallDecision(action=action, reason=reason, **base)
 
 
 def _calls_by_index(calls: Sequence[JevToolCall]) -> dict[int, list[JevToolCall]]:
@@ -174,13 +153,8 @@ def _history_entries(
         ]
         text = m.text
         if m.role == "tool":
-            # TS parity (state.ts:151-170): result-carrier rows are SKIPPED
-            # (TS: empty shells, dropped by the blank+no-calls rule below).
-            # Paired bodies live only in _result_note — no per-row note, no
-            # length leak into state. Unpaired rows carry no candidate info
-            # at all, so they skip the same way.
             text = ""
-        if not text.strip() and not tool_calls:
+        if not text.strip() and (not tool_calls):
             continue
         entry: dict[str, Any] = {"i": m.index, "role": m.role, "text": text}
         if tool_calls:
@@ -190,12 +164,8 @@ def _history_entries(
 
 
 def goal_from_messages(messages: Sequence[JevInternalMessage]) -> str:
-    # TS parity (state.ts:174-185): last three NON-EMPTY user prompts,
-    # excluding result carriers. OpenAI adaptation: carriers have their OWN
-    # role ("tool"), so the filter is role+non-blank — no separate toolResults
-    # check needed. A user row only ever excludes here when it is blank.
     texts = [m.text for m in messages if m.role == "user" and m.text.strip()]
-    return "\n".join(truncate(t, 500) for t in texts[-3:])
+    return "\n".join((truncate(t, 500) for t in texts[-3:]))
 
 
 def _entry_tokens(entry: dict[str, Any]) -> int:
@@ -257,40 +227,35 @@ class _StateFitter:
     def done(self, stage: str) -> dict[str, Any]:
         return {"state": self._state_of(self.history), "tokens": self.tokens, "stage": stage}
 
-    def _abridge_texts(self) -> dict[str, Any] | None:
+    def _rewrite_entries(self, kind: str) -> dict[str, Any] | None:
+        original_len = {m.index: len(m.text) for m in self._messages} if kind == "collapse" else {}
+        by_message = _calls_by_index(self._calls) if kind == "compact" else {}
+        stages = ("texts abridged", "old messages collapsed", "old calls compacted")
+        value: str | list[str]
         for index in self._order():
             entry = self.history[index]
-            if len(entry.get("text", "")) <= TEXT_HEAD + TEXT_TAIL + 40:
-                continue
-            abridged = abridge(str(entry.get("text", "")), TEXT_HEAD, TEXT_TAIL)
-            self._shrink(index, lambda e, a=abridged: e.update(text=a))
+            if kind == "abridge":
+                if len(entry.get("text", "")) <= TEXT_HEAD + TEXT_TAIL + 40:
+                    continue
+                value = abridge(str(entry.get("text", "")), TEXT_HEAD, TEXT_TAIL)
+            elif kind == "collapse":
+                if self._pinned(entry) or not entry.get("text"):
+                    continue
+                n = original_len.get(int(entry.get("i", -1)), len(str(entry.get("text", ""))))
+                value = f"[… {n} chars omitted …]"
+            else:
+                own = by_message.get(int(entry.get("i", -1))) or []
+                if self._pinned(entry) or not own:
+                    continue
+                value = [_compact_call(c) for c in own]
+            self._shrink(
+                index,
+                lambda e, v=value, k=kind: (
+                    e.update(text=v) if k != "compact" else e.update(tool_calls=v)
+                ),
+            )
             if self._fits():
-                return self.done("texts abridged")
-        return None
-
-    def _collapse_texts(self) -> dict[str, Any] | None:
-        original_len = {m.index: len(m.text) for m in self._messages}
-        for index in self._order():
-            entry = self.history[index]
-            if self._pinned(entry) or not entry.get("text"):
-                continue
-            n = original_len.get(int(entry.get("i", -1)), len(str(entry.get("text", ""))))
-            self._shrink(index, lambda e, note=f"[… {n} chars omitted …]": e.update(text=note))
-            if self._fits():
-                return self.done("old messages collapsed")
-        return None
-
-    def _compact_calls(self) -> dict[str, Any] | None:
-        by_message = _calls_by_index(self._calls)
-        for index in self._order():
-            entry = self.history[index]
-            own = by_message.get(int(entry.get("i", -1))) or []
-            if self._pinned(entry) or not own:
-                continue
-            compacted = [_compact_call(c) for c in own]
-            self._shrink(index, lambda e, c=compacted: e.update(tool_calls=c))
-            if self._fits():
-                return self.done("old calls compacted")
+                return self.done(stages[("abridge", "collapse", "compact").index(kind)])
         return None
 
     def _drop_text_only(self) -> tuple[dict[str, Any] | None, set[int]]:
@@ -303,10 +268,11 @@ class _StateFitter:
             self.tokens -= self.per_entry[index]
             if self._fits():
                 kept = [e for i, e in enumerate(self.history) if i not in left]
-                return self.done("old messages left out") | {"state": self._state_of(kept)}, left
-        return None, left
+                return (self.done("old messages left out") | {"state": self._state_of(kept)}, left)
+        return (None, left)
 
     def _merged(self, skip: set[int]) -> dict[str, Any] | None:
+
         def foldable(e: dict[str, Any]) -> bool:
             tcs = e.get("tool_calls")
             return (
@@ -314,7 +280,7 @@ class _StateFitter:
                 and e.get("text") == ""
                 and isinstance(tcs, list)
                 and bool(tcs)
-                and all(isinstance(x, str) for x in tcs)
+                and all((isinstance(x, str) for x in tcs))
             )
 
         merged: list[dict[str, Any]] = []
@@ -324,7 +290,7 @@ class _StateFitter:
                 prev is not None
                 and foldable(prev)
                 and foldable(entry)
-                and prev.get("role") == entry.get("role")
+                and (prev.get("role") == entry.get("role"))
             ):
                 prev_tcs = prev.get("tool_calls")
                 entry_tcs = entry.get("tool_calls")
@@ -345,8 +311,8 @@ class _StateFitter:
             self._rebuild(limit)
             if self._fits():
                 return self.done(f"inputs<={limit}")
-        for stage in (self._abridge_texts, self._collapse_texts, self._compact_calls):
-            if (result := stage()) is not None:
+        for kind in ("abridge", "collapse", "compact"):
+            if (result := self._rewrite_entries(kind)) is not None:
                 return result
         result, left = self._drop_text_only()
         if result is not None:
@@ -374,10 +340,7 @@ def truncated_result_text(text: str, is_error: bool, head_chars: int) -> str:
     if len(text) <= head_chars + 120:
         return text
     head = f"{text[:head_chars]}\n" if head_chars > 0 else ""
-    return (
-        f"{head}[{TRUNCATION_TAG} truncated {len(text) - head_chars} chars of this tool result"
-        f"{' (error)' if is_error else ''}; re-run the tool if needed]"
-    )
+    return f"{head}[{TRUNCATION_TAG} truncated {len(text) - head_chars} chars of this tool result{(' (error)' if is_error else '')}; re-run the tool if needed]"
 
 
 def _drop_tool_call(msg: dict[str, Any], actions: dict[str, str]) -> dict[str, Any] | None:
@@ -391,7 +354,7 @@ def _drop_tool_call(msg: dict[str, Any], actions: dict[str, str]) -> dict[str, A
         if not (
             isinstance(tc, dict)
             and isinstance(tc.get("id"), str)
-            and actions.get(tc["id"]) == "drop_call"
+            and (actions.get(tc["id"]) == "drop_call")
         )
     ]
     if len(kept) == len(tcs):
@@ -400,20 +363,13 @@ def _drop_tool_call(msg: dict[str, Any], actions: dict[str, str]) -> dict[str, A
         return {**msg, "tool_calls": kept}
     rest = {k: v for k, v in msg.items() if k != "tool_calls"}
     content = rest.get("content")
-    # Payload-empty assistant turn (only dropped calls): drop the row — mirrors
-    # host pass 2, which prunes it anyway. Non-string content (multimodal parts,
-    # refusal/audio envelopes) is payload too — only a blank/missing text
-    # channel means the row is truly empty.
     if isinstance(content, str):
         return rest if content.strip() else None
     return rest if content else None
 
 
 def _tool_row(
-    msg: dict[str, Any],
-    actions: dict[str, str],
-    error_by_call: dict[str, bool],
-    head_chars: int,
+    msg: dict[str, Any], actions: dict[str, str], error_by_call: dict[str, bool], head_chars: int
 ) -> dict[str, Any] | None:
     """One tool row after apply: None when its call was dropped."""
     cid = msg.get("tool_call_id")
@@ -421,8 +377,6 @@ def _tool_row(
     if action == "drop_call":
         return None
     if action == "drop_result" and isinstance(msg.get("content"), str):
-        # TS parity (compact.ts:173-177,192-199): the truncation marker
-        # carries "(error)" when the original result was an error.
         is_error = bool(error_by_call.get(cid)) if isinstance(cid, str) else False
         new_text = truncated_result_text(msg["content"], is_error, head_chars)
         return msg if new_text == msg["content"] else {**msg, "content": new_text}
@@ -453,8 +407,6 @@ def apply_decisions_openai(
             raise JevError(f"duplicate jev decision id: {d.id}")
         seen_decisions.add(d.id)
         call = by_short_id.get(d.id)
-        # Unknown decision ids are ignored (defensive: a decision for a call
-        # that is not a candidate carries no address to apply to).
         if call is None or d.action == "keep":
             continue
         if call.tool_call_id in actions:

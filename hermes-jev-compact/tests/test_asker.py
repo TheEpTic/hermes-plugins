@@ -91,61 +91,59 @@ def test_asker_uses_transport_and_refuses_without_key():
         JevAsker("http://x:8765/v1", "k", "m", transport=failing).ask({}, {})
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "file:///etc/passwd",
-        "gopher://x:70/1",
-        "ftp://x/f",
-        "http://jev.internal:8765/v1/systemone",  # DNS names must use https
-        "http://8.8.8.8:8765/v1/systemone",  # cleartext to public ip
-        "http://169.254.169.254/latest/meta-data/",  # cloud metadata endpoint
-        "http://0.0.0.0:8765/v1/systemone",  # unspecified
-        "http://2130706433:8765/v1/systemone",  # decimal-encoded loopback
-        "http://0177.0.0.1:8765/v1/systemone",  # octal-encoded loopback
-        "http://0x7f000001:8765/v1/systemone",  # hex-encoded loopback
-        "http://127.1:8765/v1/systemone",  # short-form loopback
-        "http://127.0.0.1.:8765/v1/systemone",  # trailing-dot loopback
-        "http://[::ffff:127.0.0.1]:8765/v1/systemone",  # v4-mapped loopback
-        "http://[ff02::1]:8765/v1/systemone",  # multicast
-        "http://[2001:db8::1]:8765/v1/systemone",  # public v6 (docs range)
-        "https://user:pass@api.typesafe.ai/v1/systemone",  # embedded creds
-        "http://@127.0.0.1:8765/v1/systemone",  # empty userinfo still refused
-        "http://[::1/x",  # malformed IPv6 literal
-    ],
-)
-def test_default_transport_refuses_ssrf_and_cleartext(url: str):
-    with patch("hermes_jev_compact.asker.urllib.request.build_opener") as mk_opener:
-        with pytest.raises(JevError, match="refusing|invalid jev url"):
-            _default_transport(url, b"{}", {}, 5.0)
-    mk_opener.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://127.0.0.1:8765/v1/systemone",
-        "http://localhost:8765/v1/systemone",
-        "http://127.0.0.2:8765/v1/systemone",  # full 127/8 loopback range
-        "http://192.168.0.25:8765/v1/systemone",  # RFC1918 LAN (conduit2)
-        "http://10.99.0.1:8765/v1/systemone",  # RFC1918 10/8
-        "http://172.16.5.4:8765/v1/systemone",  # RFC1918 172.16/12
-        "http://100.103.204.82:8765/v1/systemone",  # Tailscale CGNAT
-        "http://[::1]:8765/v1/systemone",  # IPv6 loopback
-        "http://[fc00::1]:8765/v1/systemone",  # IPv6 ULA
-        "http://[fe80::1]:8765/v1/systemone",  # IPv6 link-local
-        "https://api.typesafe.ai/v1/systemone",
-        "https://api.typesafe.ai/v1/systemone?key=secret",  # query w/o userinfo: allowed
-    ],
-)
-def test_default_transport_allows_loopback_http_and_any_https(url: str):
+@pytest.fixture
+def mocked_opener():
     with patch("hermes_jev_compact.asker.urllib.request.build_opener") as mk_opener:
         resp = mk_opener.return_value.open.return_value.__enter__.return_value
         resp.status = 200
         resp.read.return_value = b"{}"
+        yield mk_opener
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed"),
+    [
+        ("file:///etc/passwd", False),
+        ("gopher://x:70/1", False),
+        ("ftp://x/f", False),
+        ("http://jev.internal:8765/v1/systemone", False),  # DNS names must use https
+        ("http://8.8.8.8:8765/v1/systemone", False),  # cleartext to public ip
+        ("http://169.254.169.254/latest/meta-data/", False),  # cloud metadata endpoint
+        ("http://0.0.0.0:8765/v1/systemone", False),  # unspecified
+        ("http://2130706433:8765/v1/systemone", False),  # decimal-encoded loopback
+        ("http://0177.0.0.1:8765/v1/systemone", False),  # octal-encoded loopback
+        ("http://0x7f000001:8765/v1/systemone", False),  # hex-encoded loopback
+        ("http://127.1:8765/v1/systemone", False),  # short-form loopback
+        ("http://127.0.0.1.:8765/v1/systemone", False),  # trailing-dot loopback
+        ("http://[::ffff:127.0.0.1]:8765/v1/systemone", False),  # v4-mapped loopback
+        ("http://[ff02::1]:8765/v1/systemone", False),  # multicast
+        ("http://[2001:db8::1]:8765/v1/systemone", False),  # public v6 (docs range)
+        ("https://user:pass@api.typesafe.ai/v1/systemone", False),  # embedded creds
+        ("http://@127.0.0.1:8765/v1/systemone", False),  # empty userinfo still refused
+        ("http://[::1/x", False),  # malformed IPv6 literal
+        ("http://127.0.0.1:8765/v1/systemone", True),
+        ("http://localhost:8765/v1/systemone", True),
+        ("http://127.0.0.2:8765/v1/systemone", True),  # full 127/8 loopback range
+        ("http://192.168.0.25:8765/v1/systemone", True),  # RFC1918 LAN (conduit2)
+        ("http://10.99.0.1:8765/v1/systemone", True),  # RFC1918 10/8
+        ("http://172.16.5.4:8765/v1/systemone", True),  # RFC1918 172.16/12
+        ("http://100.103.204.82:8765/v1/systemone", True),  # Tailscale CGNAT
+        ("http://[::1]:8765/v1/systemone", True),  # IPv6 loopback
+        ("http://[fc00::1]:8765/v1/systemone", True),  # IPv6 ULA
+        ("http://[fe80::1]:8765/v1/systemone", True),  # IPv6 link-local
+        ("https://api.typesafe.ai/v1/systemone", True),
+        ("https://api.typesafe.ai/v1/systemone?key=secret", True),  # query w/o userinfo: allowed
+    ],
+)
+def test_default_transport_url_policy(mocked_opener, url: str, allowed: bool):
+    if allowed:
         status, _ = _default_transport(url, b"{}", {}, 5.0)
-    assert status == 200
-    mk_opener.return_value.open.assert_called_once()
+        assert status == 200
+        mocked_opener.return_value.open.assert_called_once()
+    else:
+        with pytest.raises(JevError, match="refusing|invalid jev url"):
+            _default_transport(url, b"{}", {}, 5.0)
+        mocked_opener.assert_not_called()
 
 
 def test_default_transport_refuses_redirect():
