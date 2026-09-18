@@ -1,9 +1,17 @@
-"""sfw output parsing + output/error sanitation."""
+"""sfw output parsing, sanitation, and subprocess execution."""
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import logging
+import os
 import re
+import signal
+import subprocess
+from typing import Any
+
+from .models import SFWResult
 
 _MAX_LIST_ENTRIES = 50
 
@@ -11,9 +19,6 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _BLOCKED_KEYWORDS = frozenset({"blocked", "🚫", "🔴"})
 _INSTALLED_KEYWORDS = frozenset({"installed", "🟢", "added"})
 _ALL_KEYWORDS = _BLOCKED_KEYWORDS | _INSTALLED_KEYWORDS
-# Free-text prose commonly wraps sfw keywords ("blocked by firewall",
-# "added 5 packages"). The token directly after a keyword is only treated as a
-# package name when it is not a count or a prose filler word.
 _NON_PACKAGE_TOKENS = frozenset(
     {
         "a",
@@ -51,14 +56,12 @@ _ERRNO_MESSAGES: dict[int, str] = {
 
 
 def sanitize_output(text: str, max_len: int = 10_000) -> str:
-    """Truncate long output and add a note about total size."""
     if len(text) <= max_len:
         return text
     return text[:max_len] + f"\n... [output truncated, total {len(text)} chars]"
 
 
 def sanitize_oserror(exc: OSError) -> str:
-    """Map common errno values to generic messages."""
     errnum = getattr(exc, "errno", None)
     if errnum is not None and errnum in _ERRNO_MESSAGES:
         return _ERRNO_MESSAGES[errnum]
@@ -74,7 +77,6 @@ def truncate_list(items: list[str], limit: int = _MAX_LIST_ENTRIES) -> list[str]
 
 
 def strip_ansi(text: str) -> str:
-    """Remove ANSI escape sequences from text."""
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
@@ -95,20 +97,6 @@ def _package_after_keyword(parts: list[str], i: int) -> str | None:
 
 
 def parse_output(output: str) -> tuple[list[str], list[str]]:
-    """Parse sfw output for blocked and installed packages.
-
-    Uses exact word-boundary matching to avoid false positives from
-    substrings like 'blocked' inside package names.
-
-    Handles formats like:
-        🔴 blocked malicious-pkg
-        blocked: evil-trojan
-        🟢 installed express
-        added 5 packages
-
-    Returns:
-        Tuple of (blocked_packages, installed_packages).
-    """
     blocked: list[str] = []
     installed: list[str] = []
 
@@ -133,3 +121,84 @@ def parse_output(output: str) -> tuple[list[str], list[str]]:
             break
 
     return truncate_list(blocked), truncate_list(installed)
+
+
+logger = logging.getLogger(__name__)
+
+
+def _kill_group(pgid: int, sig: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, sig)
+
+
+def _timeout_result(command: str, timeout: int) -> SFWResult:
+    return SFWResult(
+        success=False,
+        command=command,
+        stdout="",
+        stderr=f"Command timed out after {timeout}s",
+        exit_code=-1,
+    )
+
+
+def _reap_after_timeout(proc: subprocess.Popen[bytes]) -> None:
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+    else:
+        # Leader exited during the grace period; make sure no detached
+        # children of the group are left behind.
+        _kill_group(proc.pid, signal.SIGKILL)
+
+
+def run_sfw(
+    args: list[str],
+    command: str,
+    timeout: int,
+    workdir: str | None,
+    popen: Any = None,
+) -> SFWResult:
+    """Run one sfw argv through Popen with a bounded timeout."""
+    logger.debug("sfw run: %s", " ".join(args))
+    spawn = popen or subprocess.Popen
+    try:
+        proc = spawn(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=workdir,
+            start_new_session=True,
+        )
+        try:
+            stdout_bytes, stderr_bytes = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill entire process group (sfw + child package manager
+            # processes). start_new_session=True means the child is its own
+            # group leader, so its pid is the process-group id.
+            _kill_group(proc.pid, signal.SIGTERM)
+            _reap_after_timeout(proc)
+            return _timeout_result(command, timeout)
+    except OSError as exc:
+        return SFWResult(
+            success=False,
+            command=command,
+            stdout="",
+            stderr=sanitize_oserror(exc),
+            exit_code=-1,
+        )
+
+    stdout = sanitize_output(stdout_bytes.decode("utf-8", errors="replace"))
+    stderr = sanitize_output(stderr_bytes.decode("utf-8", errors="replace"))
+    blocked, installed = parse_output(stdout + stderr)
+    return SFWResult(
+        success=proc.returncode == 0,
+        command=command,
+        stdout=stdout,
+        stderr=stderr,
+        exit_code=proc.returncode,
+        blocked=blocked,
+        installed=installed,
+    )

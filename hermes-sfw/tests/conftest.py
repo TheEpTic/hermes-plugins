@@ -51,7 +51,7 @@ def manager(tmp_path: Path) -> SFWManager:
 @pytest.fixture
 def mock_popen():
     """Patch Popen so no real processes are launched."""
-    with patch("hermes_sfw.run.subprocess.Popen") as m:
+    with patch("hermes_sfw.output.subprocess.Popen") as m:
         proc = MagicMock()
         proc.communicate.return_value = (b"", b"")
         proc.returncode = 0

@@ -162,7 +162,7 @@ def test_non_string_workdir_rejected(manager: SFWManager) -> None:
 def test_approval_blocks_execution(manager: SFWManager, approval: dict) -> None:
     with (
         patch("hermes_sfw.handlers.sfw.check_approval", return_value=approval),
-        patch("hermes_sfw.run.subprocess.Popen") as popen,
+        patch("hermes_sfw.output.subprocess.Popen") as popen,
     ):
         result = _call(manager, {"action": "run", "command": "npm install left-pad"})
     assert result["success"] is False and approval["message"] in result["error"]

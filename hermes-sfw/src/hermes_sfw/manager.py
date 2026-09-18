@@ -18,6 +18,7 @@ from .diagnose import diagnose as _diagnose
 from .models import SFWBinaryInfo, SFWCacheFault, SFWConfig, SFWDiagnosis, SFWResult
 from .output import parse_output as _parse_output
 from .output import _MAX_LIST_ENTRIES
+from .output import run_sfw
 from .resolve import (
     cache_fault,
     classify_binary,
@@ -26,7 +27,6 @@ from .resolve import (
     known_candidates,
     resolve_shim_target,
 )
-from .run import run_sfw
 from .validate import (
     is_dependency_operation,
     validate_command,

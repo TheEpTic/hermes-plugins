@@ -190,7 +190,7 @@ class TestRunCommandAnnotation:
         proc = MagicMock()
         proc.communicate.return_value = (stdout, stderr)
         proc.returncode = code
-        with patch("hermes_sfw.run.subprocess.Popen", return_value=proc):
+        with patch("hermes_sfw.output.subprocess.Popen", return_value=proc):
             result = stale_layout.manager().run_command("cargo fetch")
         if expect:
             assert result.exit_code == 1 and "ln -sfn" in result.stderr
