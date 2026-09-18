@@ -70,15 +70,12 @@ def contains_package_manager_command(command: str) -> bool:
             continue
 
         name = Path(token).name
-        was_segment_start = segment_start
-        if was_segment_start:
+        if segment_start:
             matched, wrapper_mode = _segment_start_state(name)
             segment_start = False
         else:
             matched, wrapper_mode = _wrapped_command_state(name, wrapper_mode)
         if matched:
             return True
-        if was_segment_start:
-            continue
 
     return False
