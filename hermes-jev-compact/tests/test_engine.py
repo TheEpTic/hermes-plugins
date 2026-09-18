@@ -141,23 +141,61 @@ def test_jev_success_replaces_base_without_double_count(monkeypatch):
     assert _valid_openai_sequence(out)
 
 
-def test_jev_path_prunes_and_counts(monkeypatch):
-    eng = _engine(jev_min_result_chars=100)
-    messages = make_tool_transcript(n_calls=3, result_chars=9000)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
-    probs = {}
-    for i in range(1, 4):
-        probs[f"call_t{i}"] = 0.1
-        probs[f"result_t{i}"] = 0.1
-    with patch(
-        "hermes_jev_compact.engine.JevAsker",
-        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
-    ):
+@pytest.mark.parametrize(
+    "scenario, n_calls, min_chars, probs, invalid_output, low_reduction",
+    [
+        ("path", 3, 100, 0.1, False, False),
+        ("invalid-output", 2, 100, 0.1, True, False),
+        ("low-reduction", 3, 1, 0.9, False, True),
+        ("high-reduction", 3, 100, 0.1, False, False),
+    ],
+    ids=lambda row: row[0] if isinstance(row, tuple) else str(row),
+)
+def test_jev_pruning_scenarios(
+    monkeypatch,
+    scenario: str,
+    n_calls: int,
+    min_chars: int,
+    probs: float,
+    invalid_output: bool,
+    low_reduction: bool,
+):
+    eng = _engine(jev_min_result_chars=min_chars)
+    messages = make_tool_transcript(n_calls=n_calls, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    if low_reduction:
+        messages.insert(1, {"role": "user", "content": "pad " * 20000})
+    probability = {
+        f"{kind}_t{i}": probs for i in range(1, n_calls + 1) for kind in ("call", "result")
+    }
+    if low_reduction:
+        probability["result_t1"] = 0.1
+    patches = [
+        patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probability)(*a, **k),
+        )
+    ]
+    if invalid_output:
+        patches.append(
+            patch("hermes_jev_compact.engine._valid_openai_sequence", return_value=False)
+        )
+    with patches[0], patches[1] if invalid_output else contextlib.nullcontext():
         out, count = eng._prune_old_tool_results(messages, 1, None, 200)
-    assert count == 3
-    assert out is not messages
-    assert eng.jev_calls >= 1
-    assert _valid_openai_sequence(out)
+    if invalid_output or low_reduction:
+        expected, expected_count = ContextCompressor._prune_old_tool_results(
+            eng, messages, 1, None, 200
+        )
+        assert (out, count) == (expected, expected_count)
+        assert eng.jev_fallbacks == 1
+        assert eng.jev_calls == 0
+    else:
+        assert count == 3
+        assert eng.jev_fallbacks == 0
+        assert eng.jev_calls >= 1
+        assert _valid_openai_sequence(out)
+        if scenario == "path":
+            assert out is not messages
 
 
 def test_no_candidates_falls_back_to_super():
@@ -437,69 +475,3 @@ def test_duplicate_assistant_ids_never_scored(monkeypatch):
     expected, expected_count = ContextCompressor._prune_old_tool_results(eng, messages, 1, None, 1)
     assert (out, count) == (expected, expected_count)
     assert (eng.jev_calls, eng.jev_pruned_units) == (0, 0)
-
-
-def test_invalid_jev_output_falls_back(monkeypatch):
-    eng = _engine(jev_min_result_chars=100)
-    messages = make_tool_transcript(n_calls=2, result_chars=9000)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    probs = {}
-    for i in range(1, 3):
-        probs[f"call_t{i}"] = 0.1
-        probs[f"result_t{i}"] = 0.1
-    with (
-        patch(
-            "hermes_jev_compact.engine.JevAsker",
-            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
-        ),
-        patch("hermes_jev_compact.engine._valid_openai_sequence", return_value=False),
-    ):
-        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
-    expected, expected_count = ContextCompressor._prune_old_tool_results(
-        eng, messages, 1, None, 200
-    )
-    assert (out, count) == (expected, expected_count)
-    assert eng.jev_fallbacks == 1
-    assert eng.jev_calls == 0
-
-
-def test_low_reduction_falls_back_to_super(monkeypatch):
-    eng = _engine(jev_min_result_chars=1)
-    messages = make_tool_transcript(n_calls=3, result_chars=9000)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    messages.insert(1, {"role": "user", "content": "pad " * 20000})
-    probs = {}
-    for i in range(1, 4):
-        probs[f"call_t{i}"] = 0.9
-        probs[f"result_t{i}"] = 0.9
-    probs["result_t1"] = 0.1
-    with patch(
-        "hermes_jev_compact.engine.JevAsker",
-        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
-    ):
-        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
-    expected, expected_count = ContextCompressor._prune_old_tool_results(
-        eng, messages, 1, None, 200
-    )
-    assert (out, count) == (expected, expected_count)
-    assert eng.jev_fallbacks == 1
-    assert eng.jev_calls == 0
-
-
-def test_high_reduction_commits_jev_output(monkeypatch):
-    eng = _engine(jev_min_result_chars=100)
-    messages = make_tool_transcript(n_calls=3, result_chars=9000)
-    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    probs = {}
-    for i in range(1, 4):
-        probs[f"call_t{i}"] = 0.1
-        probs[f"result_t{i}"] = 0.1
-    with patch(
-        "hermes_jev_compact.engine.JevAsker",
-        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
-    ):
-        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
-    assert count == 3
-    assert eng.jev_fallbacks == 0
-    assert eng.jev_calls >= 1
-    assert _valid_openai_sequence(out)
