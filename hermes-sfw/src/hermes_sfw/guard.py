@@ -33,7 +33,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from .manager import contains_package_manager_command
+from .detect import contains_package_manager_command
 
 _MANAGERS = frozenset({"cargo", "npm", "npx", "pip", "pip3", "pnpm", "uv", "uvx", "yarn"})
 _TRANSPARENT = frozenset({"command", "env", "exec", "nice", "nohup", "setsid", "time", "timeout"})
@@ -192,16 +192,12 @@ def _payload_offset(token: _Token, text: str) -> int | None:
 def _unsafe_feature(tokens: list[_Token], text: str) -> str | None:
     """Return a block reason when the command uses structures we cannot rewrite."""
     for token in tokens:
-        if token.operator and token.value == "(" and False:
-            continue
         if token.operator:
             continue
-        if text[token.start : token.end].startswith("<<"):
+        if token.value.startswith("<<") or text[token.start : token.end].startswith("<<"):
             return "heredocs cannot be routed through sfw"
         if "$(" in token.value or "`" in token.value:
             return "command substitutions ($(...) / backticks) cannot be routed through sfw"
-        if token.value.startswith("<<"):
-            return "heredocs cannot be routed through sfw"
     return None
 
 
@@ -318,9 +314,8 @@ def _scan_segment(
             mode, wrapper, duration_seen, i = "wrapper", value, False, i + 1
             continue
         hidden = contains_package_manager_command(value)
-        blocks.extend(
-            ["package-manager invocation is hidden behind an unsupported wrapper"] if hidden else []
-        )
+        if hidden:
+            blocks.append("package-manager invocation is hidden behind an unsupported wrapper")
         mode, i = "args", i + 1
     return inserts, blocks
 
