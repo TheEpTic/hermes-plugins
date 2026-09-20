@@ -37,6 +37,15 @@
 - README no longer claims the deterministic demote passes run after a Jev
   pass — they don't (replacement, not augmentation); only the non-demotion
   hygiene passes do now.
+- Review findings (2 independent falsify-mode reviewers):
+  - Excerpts redacted with the host compaction rule before leaving the host.
+  - Post-Jev hygiene recomputes its boundary on the post-Jev list (a stale
+    pre-Jev boundary could reach into the protected tail after removals).
+  - Cancellation consulted after hygiene, before commit.
+  - New `jev_hygiene_units` counter: return count is
+    `jev_pruned_units + jev_hygiene_units`.
+  - Stale Unreleased notes below (25% rule, demote-after-Jev) struck through
+    as superseded — see the entries above.
 
 ## [0.1.3] - 2026-09-18
 
@@ -85,6 +94,8 @@
     whole-object JSON).
   - 25% minimum-reduction rule enforced in-engine (TS `reductionRatio`):
     low-value Jev passes fall back to the deterministic prune.
+    (SUPERSEDED — now the `min_reduction_ratio` knob, default 0.10; see the
+    current Unreleased section above.)
   - Duplicate tool-result ids skip scoring (was: last-row-wins collapse
     while pruning every row sharing the id).
   - Out-of-order pairs (result before its call) are never candidates; the
@@ -127,3 +138,6 @@
   questions, decisions, batching) with parity tests.
 - Deterministic demote still runs after a Jev pass
   (dedup/args/images/stubs).
+  (SUPERSEDED — only the NON-demotion passes (dedup, arg truncation, image
+  retire) run after a Jev pass; demote/pressure would munge Jev's keeps.
+  See the current Unreleased section above.)

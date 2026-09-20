@@ -211,3 +211,14 @@ def test_excerpt_defaults_to_empty_and_tolerates_edge_shapes():
     # A zero/exhausted budget yields no excerpt, never an exception.
     (call3,) = collect_candidates(messages, 99, 1, result_excerpt_chars=0)
     assert call3.result_excerpt == ""
+
+
+def test_excerpt_redacts_secrets_like_host_compaction():
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # compare against the host rule directly: same function, same flags.
+    raw = 'api_key="«redacted:sk-…»" token=ghp_abc123def456ghi789jkl012'
+    expected = redact.redact_sensitive_text(raw, force=True, redact_url_credentials=True)
+    assert expected != raw  # the fixture must actually exercise redaction
+    assert _redact_excerpt(raw) == expected

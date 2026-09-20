@@ -8,6 +8,26 @@ from typing import Any
 from .protocol import JevInternalMessage, JevToolCall
 from .shaping import truncate
 
+
+def _redact_excerpt(text: str) -> str:
+    """Redact an excerpt crossing the jev egress boundary.
+
+    Mirrors the host's compaction rule (context_compressor
+    _redact_compaction_text: force=True + URL credentials): summaries persist
+    and re-enter every later prompt, and jev excerpts likewise leave the
+    host — so redaction must not depend on the operator's redact_secrets
+    toggle. Import is lazy + guarded: without the host (bare unit env) the
+    excerpt passes through unredacted.
+    """
+    try:
+        from agent.redact import redact_sensitive_text
+
+        out = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+        return out if isinstance(out, str) else text
+    except Exception:
+        return text
+
+
 _ERROR_MARKERS = ("error", "failed", "failure", "traceback", "exception")
 
 # Host-canonical tool-call shape (chat_completion_helpers._assistant_tool_call_dict
@@ -193,7 +213,7 @@ def collect_candidates(
                 continue
             name, args = _tool_name_and_args(tool_calls, cid)
             excerpt_chars = max(0, int(result_excerpt_chars))
-            excerpt = truncate(text, excerpt_chars) if excerpt_chars else ""
+            excerpt = _redact_excerpt(truncate(text, excerpt_chars)) if excerpt_chars else ""
             calls.append(
                 JevToolCall(
                     id=f"t{len(calls) + 1}",

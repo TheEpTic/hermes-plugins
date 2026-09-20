@@ -133,6 +133,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_kept_units: int
     jev_truncate_units: int
     jev_drop_units: int
+    jev_hygiene_units: int
 
     def __init__(self, model: str, **kwargs: Any) -> None:
         base_params = set(inspect.signature(ContextCompressor.__init__).parameters) - {"self"}
@@ -145,6 +146,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         self.jev_kept_units = 0
         self.jev_truncate_units = 0
         self.jev_drop_units = 0
+        self.jev_hygiene_units = 0
         with contextlib.suppress(Exception):
             self.api_key = ""
 
@@ -195,6 +197,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             "jev_kept_units",
             "jev_truncate_units",
             "jev_drop_units",
+            "jev_hygiene_units",
         ):
             fresh.__dict__[counter] = int(getattr(self, counter, 0) or 0)
         fresh.__dict__["api_key"] = ""
@@ -267,12 +270,21 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             getattr(logger, level)(message, *args, **kwargs)
         return (None, 0)
 
-    def _nondemotion_hygiene(self, applied: list[dict[str, Any]], boundary: int) -> int:
+    def _nondemotion_hygiene(
+        self,
+        applied: list[dict[str, Any]],
+        protect_tail_count: int,
+        protect_tail_tokens: int | None,
+    ) -> int:
         """Host passes that must not be lost on the jev path — dedup (lossless),
         tool-call arg truncation (oversized args 400 providers), and image
         retire (anti-thrash). Explicitly NOT the demote/pressure passes: those
         would munge jev's keeps. Each host call is guarded: on host drift the
         helper logs and jev's output still commits. Returns hygiene prune count.
+
+        The arg-truncation boundary is recomputed on the POST-jev list: jev
+        removals shift rows left, so the pre-jev boundary would reach into the
+        protected tail.
         """
         extra = 0
         try:
@@ -281,6 +293,11 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 extra += _safe_int(dedupe(applied), 0)
         except Exception:
             logger.warning("jev post-hygiene dedupe unavailable; keeping jev output")
+        try:
+            boundary = self._prune_boundary(applied, protect_tail_count, protect_tail_tokens)
+        except Exception:
+            logger.warning("jev post-hygiene boundary unavailable; keeping jev output")
+            boundary = 0
         try:
             trunc_at = getattr(self, "_truncate_tool_call_args_at", None)
             if callable(trunc_at):
@@ -386,7 +403,9 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             )
         if self._cancelled():
             return self._fallback("jev prune cancelled before commit; built-in prune")
-        hygiene = self._nondemotion_hygiene(applied, boundary)
+        hygiene = self._nondemotion_hygiene(applied, protect_tail_count, protect_tail_tokens)
+        if self._cancelled():
+            return self._fallback("jev prune cancelled during hygiene; built-in prune")
         if not _valid_openai_sequence(applied):
             logger.warning("jev post-hygiene output failed validity; built-in prune")
             return self._fallback()
@@ -395,6 +414,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         self.jev_kept_units += kept_units
         self.jev_truncate_units += truncate_units
         self.jev_drop_units += drop_units
+        self.jev_hygiene_units += hygiene
+        # Return count = jev decisions + host hygiene rewrites (dedup/image
+        # retire). The split counters below stay jev-only; jev_hygiene_units
+        # carries the hygiene share so count == pruned + hygiene reconciles.
         total_units = pruned_units + hygiene
         if not self.quiet_mode:
             logger.info(

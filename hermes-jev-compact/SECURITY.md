@@ -4,11 +4,14 @@
 
 Jev requests carry the conversation history with tool result bodies replaced
 by short notes (`ok, N chars (omitted)`, or `ok, N chars, head: <first 500
-chars> (truncated)` when excerpts are enabled — the default); message text is
-abridged to fit the state budget, and call arguments are included (truncated
-per the fit stage). Set `result_excerpt_chars: 0` to send size-only notes
-(no result content leaves the host). Prompt the operator before enabling on
-sessions carrying secrets outside the trust boundary of the Jev endpoint.
+chars> (truncated)` when excerpts are enabled — the default); excerpts are
+redacted with the host's compaction rule (`redact_sensitive_text(force=True)`
+plus URL credentials) before leaving the host, exactly like summary input.
+Message text is abridged to fit the state budget, and call arguments are
+included (truncated per the fit stage). Set `result_excerpt_chars: 0` to
+send size-only notes (no result content leaves the host). Prompt the
+operator before enabling on sessions carrying secrets outside the trust
+boundary of the Jev endpoint.
 
 Any OpenAI-style `POST {base_url}{endpoint_path}` Decisions endpoint
 works; TypeSafe's own API (https://api.typesafe.ai/v1 + `/systemone`) is the

@@ -143,11 +143,13 @@ optionally `hermes plugins disable hermes-jev-compact`), then `/reset`.
 
 Per-agent counters live on the compressor: `jev_calls` (requests made),
 `jev_pruned_units` (units dropped/truncated), `jev_kept_units`,
-`jev_truncate_units`, `jev_drop_units` (the split), `jev_fallbacks` (times
-the built-in prune ran instead). A successful pass logs one `jev decision:`
-line per scored unit (tool, result size, error flag, both scores, action)
-plus its score/drop counts and fit stage; every fallback logs its reason,
-and the reduction-gate fallback includes its achieved ratio.
+`jev_truncate_units`, `jev_drop_units` (the jev-only split),
+`jev_hygiene_units` (host dedup/image rewrites on the jev path), `jev_fallbacks`
+(times the built-in prune ran instead). The returned prune count equals
+`jev_pruned_units + jev_hygiene_units`. A successful pass logs one
+`jev decision:` line per scored unit (tool, result size, error flag, both
+scores, action) plus its score/drop counts and fit stage; every fallback
+logs its reason, and the reduction-gate fallback includes its achieved ratio.
 
 ## development
 
