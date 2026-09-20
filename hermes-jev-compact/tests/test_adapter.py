@@ -1,5 +1,8 @@
 """Adapter tests: pairing, pins, exclusions (hermes openai format)."""
 
+import builtins
+import sys
+
 import pytest
 
 from hermes_jev_compact.adapter import _flatten_text, collect_candidates, is_pinned, to_internal
@@ -247,3 +250,32 @@ def test_excerpt_recapped_after_redaction_expansion(monkeypatch):
     (call,) = collect_candidates(messages, 99, 1, result_excerpt_chars=500)
     assert _utf16_units(call.result_excerpt) <= 500
     assert call.result_excerpt.endswith("…")
+
+
+def _block_host_import(monkeypatch, missing_name):
+    """Force `from agent.redact import ...` to fail as if the host (or one
+    of its deps) were missing, without touching the real install."""
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "agent.redact" or name.startswith("agent.redact."):
+            raise ModuleNotFoundError(f"No module named {missing_name!r}", name=missing_name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.delitem(sys.modules, "agent.redact", raising=False)
+
+
+def test_excerpt_passthrough_only_when_host_itself_missing(monkeypatch):
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    _block_host_import(monkeypatch, "agent.redact")
+    assert _redact_excerpt("raw SECRET") == "raw SECRET"
+
+
+def test_excerpt_fails_closed_on_broken_host_import(monkeypatch):
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # Host present but a transitive dep missing: broken host, not bare env.
+    _block_host_import(monkeypatch, "yaml")
+    assert _redact_excerpt("raw SECRET") == ""

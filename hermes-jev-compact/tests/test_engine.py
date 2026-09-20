@@ -786,10 +786,11 @@ def test_jev_hygiene_survives_missing_host_methods(monkeypatch):
 
 def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
     # Pre-jev boundary would cover rows that shift into the protected tail
-    # after removals; hygiene must recompute on the post-jev list so tail
-    # args are never truncated.
+    # after removals; hygiene must recompute on the post-jev list so rows
+    # that end up protected are never truncation-visited.
     eng = _engine(jev_min_result_chars=100)
     tail_args = json.dumps({"path": "tail.ts", "blob": "T" * 5000})
+    mid_args = json.dumps({"path": "mid.ts", "blob": "M" * 5000})
     messages = [
         {"role": "system", "content": "sys"},
         {"role": "user", "content": "go"},
@@ -807,6 +808,18 @@ def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
         {"role": "tool", "tool_call_id": "o1", "content": "O" * 9000},
         {
             "role": "assistant",
+            "content": "mid",
+            "tool_calls": [
+                {
+                    "id": "m1",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": mid_args},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "m1", "content": "MIDBODY short"},
+        {
+            "role": "assistant",
             "content": "tail call",
             "tool_calls": [
                 {
@@ -816,11 +829,15 @@ def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
                 }
             ],
         },
-        {"role": "tool", "tool_call_id": "t9", "content": "TAILBODY " + "Z" * 9000},
+        {"role": "tool", "tool_call_id": "t9", "content": "TAILBODY short"},
         {"role": "user", "content": "tail"},
     ]
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    # drop the old unit only; the tail pair sits at/after the boundary.
+    # Drop the old unit only. Protect-3: pre-jev boundary is 6 (9 rows - 3),
+    # post-jev the list shrinks to 8 rows so the recomputed boundary is 5:
+    # the pass visits rows 0..4 — mid args (row 3) truncated, tail call
+    # (row 5) untouched. A stale pre-jev boundary (6) would also visit row 5
+    # and truncate the protected tail args.
     probs = {"call_t1": 0.1, "result_t1": 0.1}
     trunc_seen: list[int] = []
     orig_trunc = ContextCompressor._truncate_tool_call_args_at
@@ -834,31 +851,40 @@ def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
             "hermes_jev_compact.engine.JevAsker",
             side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
         ),
-        patch.object(ContextCompressor, "_truncate_tool_call_args_at", spy_trunc),
+        patch.object(eng, "_truncate_tool_call_args_at", spy_trunc),
     ):
-        out, _ = eng._prune_old_tool_results(messages, 2, None, 200)
+        out, _ = eng._prune_old_tool_results(messages, 3, None, 200)
     assert eng.jev_fallbacks == 0
-    # the stale pre-jev boundary was 5 (7 rows - 2 tail); post-jev the list
-    # is smaller, so a stale boundary would run the arg pass over more rows
-    # than the recomputed one — the spy proves the pass stayed in bounds.
-    post_boundary = eng._prune_boundary(out, 2, None)
-    assert all(i < post_boundary for i in trunc_seen), (trunc_seen, post_boundary)
-    stale_boundary = len(messages) - 2
+    post_boundary = eng._prune_boundary(out, 3, None)
+    stale_boundary = len(messages) - 3
     assert post_boundary < stale_boundary, (post_boundary, stale_boundary)
+    # Instance-level spy (the engine resolves the helper via getattr on
+    # self): exact row set. Non-empty (rows 0..4 exist) and capped at the
+    # RECOMPUTED boundary — a stale boundary would also visit the tail call.
+    assert trunc_seen, "arg pass must run for a non-vacuous check"
+    assert sorted(trunc_seen) == list(range(post_boundary)), (trunc_seen, post_boundary)
     tail_row = next(m for m in out if isinstance(m, dict) and m.get("tool_call_id") == "t9")
     assert tail_row is not None
-    # Tail args survived byte-identical: hygiene never touched tail rows.
-    tail_call = next(
-        m
-        for m in out
-        if isinstance(m, dict)
-        and m.get("role") == "assistant"
-        and any(tc.get("id") == "t9" for tc in (m.get("tool_calls") or []) if isinstance(tc, dict))
-    )
-    args = next(
-        tc["function"]["arguments"] for tc in tail_call["tool_calls"] if tc.get("id") == "t9"
-    )
-    assert args == tail_args
+
+    def _args_of(call_id: str) -> str:
+        call = next(
+            m
+            for m in out
+            if isinstance(m, dict)
+            and m.get("role") == "assistant"
+            and any(
+                tc.get("id") == call_id
+                for tc in (m.get("tool_calls") or [])
+                if isinstance(tc, dict)
+            )
+        )
+        return next(
+            tc["function"]["arguments"] for tc in call["tool_calls"] if tc.get("id") == call_id
+        )
+
+    # Mid args (pre-boundary) truncated, tail args (protected) byte-identical.
+    assert _args_of("m1") != mid_args
+    assert _args_of("t9") == tail_args
     assert "T" * 100 in json.dumps(out)
 
 

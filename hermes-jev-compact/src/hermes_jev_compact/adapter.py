@@ -18,15 +18,22 @@ def _redact_excerpt(text: str) -> str:
     host — so redaction must not depend on the operator's redact_secrets
     toggle.
 
-    Failure modes: no host importable (bare unit env) passes through
-    unredacted — documented, tests-only. A redactor RUNTIME failure returns
-    "" (excerpt dropped, size-only note) — the egress boundary never fails
+    Failure modes: host not installed at all (bare unit env) passes through
+    unredacted — documented, tests-only. Anything else — a broken host
+    import, a redactor runtime failure, a non-string return — drops the
+    excerpt ("", i.e. the size-only note). The egress boundary never fails
     open with raw text.
     """
     try:
         from agent.redact import redact_sensitive_text
+    except ModuleNotFoundError as exc:
+        # Only the host itself missing means "bare env". A missing
+        # TRANSITIVE dep (or anything else) is a broken host → closed.
+        if exc.name in ("agent", "agent.redact"):
+            return text  # bare unit env without the host: documented passthrough
+        return ""
     except Exception:
-        return text  # bare unit env without the host: documented passthrough
+        return ""
     try:
         out = redact_sensitive_text(text, force=True, redact_url_credentials=True)
     except Exception:
