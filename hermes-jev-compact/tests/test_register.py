@@ -125,6 +125,15 @@ def test_register_honors_excerpt_chars_setting():
     assert ctx3.engine.jev_result_excerpt_chars == 500
 
 
+def test_register_honors_reduction_ratio_setting():
+    ctx = FakeCtx({"min_reduction_ratio": 0.4})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_min_reduction_ratio == 0.4
+    garbage = FakeCtx({"min_reduction_ratio": "junk"})
+    hermes_jev_compact.register(garbage)
+    assert garbage.engine.jev_min_reduction_ratio == 0.10
+
+
 def test_register_reregisters_after_host_slot_cleared():
     # Regression for the plugin-reload gap: the host calls register() again after
     # unload() clears its context-engine slot. A module-global latch that survives

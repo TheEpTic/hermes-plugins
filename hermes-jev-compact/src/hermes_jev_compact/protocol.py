@@ -22,6 +22,11 @@ class JevOptions:
     # Deliberate drift from TS: excerpts are hermes-only, so the budget knob
     # has no TS counterpart. 0 disables excerpts (TS-shaped notes).
     result_excerpt_chars: int = 500
+    # Deliberate drift from TS reductionRatio 0.25: there the gate decides
+    # summary-vs-nothing. Here the summary always runs, so the gate only
+    # picks the phase-1 author (jev vs deterministic) — a lower bar lets
+    # selective-but-small jev passes commit instead of being discarded.
+    min_reduction_ratio: float = 0.10
     max_state_tokens: int = 25000
     max_request_tokens: int = 30000
     truncate_head_chars: int = 300

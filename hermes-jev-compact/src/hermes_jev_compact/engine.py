@@ -70,6 +70,7 @@ _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_truncate_head_chars", "truncate_head_chars", 300),
     ("jev_request_timeout_s", "request_timeout_s", 30.0),
     ("jev_min_result_chars", "min_result_chars", 2000),
+    ("jev_min_reduction_ratio", "min_reduction_ratio", 0.10),
 )
 _JEV_DEFAULTS = {attr: default for attr, _, default in _JEV_KNOBS}
 
@@ -125,6 +126,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_truncate_head_chars: int
     jev_request_timeout_s: float
     jev_min_result_chars: int
+    jev_min_reduction_ratio: float
     jev_calls: int
     jev_pruned_units: int
     jev_fallbacks: int
@@ -215,6 +217,9 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             keep_threshold=min(1.0, max(0.0, threshold)),
             error_keep_threshold=min(1.0, max(0.0, error_threshold)),
             result_excerpt_chars=max(0, _safe_int(self.jev_result_excerpt_chars, 500)),
+            min_reduction_ratio=min(
+                1.0, max(0.0, _finite_float(self.jev_min_reduction_ratio, 0.10))
+            ),
             max_state_tokens=max(1, _safe_int(self.jev_max_state_tokens, 25000)),
             max_request_tokens=max(1, _safe_int(self.jev_max_request_tokens, 30000)),
             truncate_head_chars=max(0, _safe_int(self.jev_truncate_head_chars, 300)),
@@ -261,6 +266,41 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         if message is not None:
             getattr(logger, level)(message, *args, **kwargs)
         return (None, 0)
+
+    def _nondemotion_hygiene(
+        self, applied: list[dict[str, Any]], boundary: int
+    ) -> int:
+        """Host passes that must not be lost on the jev path — dedup (lossless),
+        tool-call arg truncation (oversized args 400 providers), and image
+        retire (anti-thrash). Explicitly NOT the demote/pressure passes: those
+        would munge jev's keeps. Each host call is guarded: on host drift the
+        helper logs and jev's output still commits. Returns hygiene prune count.
+        """
+        extra = 0
+        try:
+            dedupe = getattr(self, "_dedupe_tool_results", None)
+            if callable(dedupe):
+                extra += _safe_int(dedupe(applied), 0)
+        except Exception:
+            logger.warning("jev post-hygiene dedupe unavailable; keeping jev output")
+        try:
+            trunc_at = getattr(self, "_truncate_tool_call_args_at", None)
+            if callable(trunc_at):
+                for i in range(max(0, boundary)):
+                    try:
+                        trunc_at(applied, i)
+                    except Exception:
+                        logger.warning("jev post-hygiene arg truncation failed at row %d", i)
+                        break
+        except Exception:
+            logger.warning("jev post-hygiene arg pass unavailable; keeping jev output")
+        try:
+            from agent.context_compressor import _retire_stale_tool_result_images
+
+            extra += _safe_int(_retire_stale_tool_result_images(applied), 0)
+        except Exception:
+            logger.warning("jev post-hygiene image retire unavailable; keeping jev output")
+        return extra
 
     def _jev_prune(
         self,
@@ -339,17 +379,25 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
         chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
         ratio = (chars_before - chars_after) / chars_before if chars_before > 0 else 0.0
-        if ratio < 0.25:
+        gate = options.min_reduction_ratio
+        if ratio < gate:
             return self._fallback(
-                "jev reduction under 25%% (got %.1f%%); built-in prune", ratio * 100.0
+                "jev reduction under %.0f%% (got %.1f%%); built-in prune",
+                gate * 100.0,
+                ratio * 100.0,
             )
         if self._cancelled():
             return self._fallback("jev prune cancelled before commit; built-in prune")
+        hygiene = self._nondemotion_hygiene(applied, boundary)
+        if not _valid_openai_sequence(applied):
+            logger.warning("jev post-hygiene output failed validity; built-in prune")
+            return self._fallback()
         self.jev_calls += len(batches)
         self.jev_pruned_units += pruned_units
         self.jev_kept_units += kept_units
         self.jev_truncate_units += truncate_units
         self.jev_drop_units += drop_units
+        total_units = pruned_units + hygiene
         if not self.quiet_mode:
             logger.info(
                 "jev prune: %d call(s) scored in %d request(s), %d dropped/truncated (%s)",
@@ -358,7 +406,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 pruned_units,
                 fitted["stage"],
             )
-        return (applied, pruned_units)
+        return (applied, total_units)
 
     def prune_tool_results_only(
         self, messages: list[dict[str, Any]], current_tokens: int | None = None
