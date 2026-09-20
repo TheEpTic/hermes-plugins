@@ -1,5 +1,43 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Result head excerpts in the Jev state: each candidate's note now carries
+  the first 500 chars of its result (`ok, N chars, head: ... (truncated)`)
+  so Jev scores content, not size alone. New `result_excerpt_chars` setting
+  (default 500; 0 restores size-only notes). Trust-boundary note in
+  SECURITY.md.
+- Error-aware keep: `error_keep_threshold` (default 0.25) gives error
+  results their own lower keep bar — tracebacks survive unless Jev is
+  confident they are stale.
+- Reduction-gate knob: `min_reduction_ratio` (default 0.10, was a hardcoded
+  0.25). The hermes summary always runs, so the gate only picks the phase-1
+  author — selective-but-small Jev passes now commit instead of falling back.
+- Per-decision telemetry: one `jev decision:` log line per scored unit
+  (tool, result size, error flag, both scores, action) plus split counters
+  `jev_kept_units` / `jev_truncate_units` / `jev_drop_units`; the gate
+  fallback logs its achieved ratio.
+- Non-demotion host hygiene after a Jev pass: dedup, tool-call arg
+  truncation, and image retire now run on Jev output (each guarded — host
+  drift keeps Jev output, never fails the prune).
+
+### Changed
+
+- Candidate floor `min_result_chars` default 8000 → 2000: short-but-critical
+  results (test failures, errors) now reach Jev instead of bypassing it.
+- Prompt reword (deliberate TS divergence): the state context no longer
+  claims tools can "always" be re-run, and the keep question asks for
+  likely-future-need instead of irreproducibility. Hermes re-runs cost
+  time/API spend and may have side effects.
+
+### Fixed
+
+- README no longer claims the deterministic demote passes run after a Jev
+  pass — they don't (replacement, not augmentation); only the non-demotion
+  hygiene passes do now.
+
 ## [0.1.3] - 2026-09-18
 
 ### Added

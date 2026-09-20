@@ -122,8 +122,9 @@ context:
 With `hermes-jev-compact` enabled and a System One key configured, the next
 compression scores stale tool results with Jev instead of truncating by age.
 Watch for the `jev prune:` line in the logs (calls scored, units
-dropped/truncated, fit stage); if Jev is unreachable the built-in prune runs
-instead and the fallback is logged.
+dropped/truncated, fit stage) plus one `jev decision:` line per scored unit
+(tool, result size, error flag, both scores, action); if Jev is unreachable
+the built-in prune runs instead and the fallback is logged.
 
 ## quick troubleshooting
 
