@@ -820,13 +820,13 @@ def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
         {"role": "user", "content": "tail"},
     ]
     monkeypatch.setenv("TYPESAFE_API_KEY", "k")
-    # Drop the old unit only; the tail pair sits at/after the boundary.
+    # drop the old unit only; the tail pair sits at/after the boundary.
     probs = {"call_t1": 0.1, "result_t1": 0.1}
-    seen: list[int] = []
+    trunc_seen: list[int] = []
     orig_trunc = ContextCompressor._truncate_tool_call_args_at
 
     def spy_trunc(result: Any, idx: int) -> Any:
-        seen.append(idx)
+        trunc_seen.append(idx)
         return orig_trunc(result, idx)
 
     with (
@@ -838,6 +838,13 @@ def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
     ):
         out, _ = eng._prune_old_tool_results(messages, 2, None, 200)
     assert eng.jev_fallbacks == 0
+    # the stale pre-jev boundary was 5 (7 rows - 2 tail); post-jev the list
+    # is smaller, so a stale boundary would run the arg pass over more rows
+    # than the recomputed one — the spy proves the pass stayed in bounds.
+    post_boundary = eng._prune_boundary(out, 2, None)
+    assert all(i < post_boundary for i in trunc_seen), (trunc_seen, post_boundary)
+    stale_boundary = len(messages) - 2
+    assert post_boundary < stale_boundary, (post_boundary, stale_boundary)
     tail_row = next(m for m in out if isinstance(m, dict) and m.get("tool_call_id") == "t9")
     assert tail_row is not None
     # Tail args survived byte-identical: hygiene never touched tail rows.

@@ -44,8 +44,8 @@
   - Cancellation consulted after hygiene, before commit.
   - New `jev_hygiene_units` counter: return count is
     `jev_pruned_units + jev_hygiene_units`.
-  - Stale Unreleased notes below (25% rule, demote-after-Jev) struck through
-    as superseded — see the entries above.
+  - Stale Unreleased notes below (25% rule, demote-after-Jev) marked as
+    superseded history — see the entries above.
 
 ## [0.1.3] - 2026-09-18
 
@@ -92,10 +92,10 @@
     was under-counted ~2x vs the TS reference.
   - TS `_compact_call` port: `key=value` per entry with raw strings (was
     whole-object JSON).
-  - 25% minimum-reduction rule enforced in-engine (TS `reductionRatio`):
-    low-value Jev passes fall back to the deterministic prune.
-    (SUPERSEDED — now the `min_reduction_ratio` knob, default 0.10; see the
-    current Unreleased section above.)
+  - ~~25% minimum-reduction rule enforced in-engine (TS `reductionRatio`):
+    low-value Jev passes fall back to the deterministic prune.~~
+    SUPERSEDED — now the `min_reduction_ratio` knob, default 0.10; see the
+    current Unreleased section above.
   - Duplicate tool-result ids skip scoring (was: last-row-wins collapse
     while pruning every row sharing the id).
   - Out-of-order pairs (result before its call) are never candidates; the
@@ -136,8 +136,8 @@
   failure mode (transport, validation, timeout, cancel, missing key).
 - Port of fast-jev-compaction state shaping (estimator, fit stages,
   questions, decisions, batching) with parity tests.
-- Deterministic demote still runs after a Jev pass
-  (dedup/args/images/stubs).
-  (SUPERSEDED — only the NON-demotion passes (dedup, arg truncation, image
+- ~~Deterministic demote still runs after a Jev pass
+  (dedup/args/images/stubs).~~
+  SUPERSEDED — only the NON-demotion passes (dedup, arg truncation, image
   retire) run after a Jev pass; demote/pressure would munge Jev's keeps.
-  See the current Unreleased section above.)
+  See the current Unreleased section above.

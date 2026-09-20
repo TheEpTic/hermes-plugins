@@ -16,16 +16,22 @@ def _redact_excerpt(text: str) -> str:
     _redact_compaction_text: force=True + URL credentials): summaries persist
     and re-enter every later prompt, and jev excerpts likewise leave the
     host — so redaction must not depend on the operator's redact_secrets
-    toggle. Import is lazy + guarded: without the host (bare unit env) the
-    excerpt passes through unredacted.
+    toggle.
+
+    Failure modes: no host importable (bare unit env) passes through
+    unredacted — documented, tests-only. A redactor RUNTIME failure returns
+    "" (excerpt dropped, size-only note) — the egress boundary never fails
+    open with raw text.
     """
     try:
         from agent.redact import redact_sensitive_text
-
-        out = redact_sensitive_text(text, force=True, redact_url_credentials=True)
-        return out if isinstance(out, str) else text
     except Exception:
-        return text
+        return text  # bare unit env without the host: documented passthrough
+    try:
+        out = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    except Exception:
+        return ""
+    return out if isinstance(out, str) else ""
 
 
 _ERROR_MARKERS = ("error", "failed", "failure", "traceback", "exception")
@@ -213,7 +219,15 @@ def collect_candidates(
                 continue
             name, args = _tool_name_and_args(tool_calls, cid)
             excerpt_chars = max(0, int(result_excerpt_chars))
-            excerpt = _redact_excerpt(truncate(text, excerpt_chars)) if excerpt_chars else ""
+            # Truncate → redact → re-truncate: redaction replacements can be
+            # longer than the secret they replace, so the post-redaction text
+            # is re-capped to keep the excerpt (and the state budget built on
+            # it) honest.
+            excerpt = (
+                truncate(_redact_excerpt(truncate(text, excerpt_chars)), excerpt_chars)
+                if excerpt_chars
+                else ""
+            )
             calls.append(
                 JevToolCall(
                     id=f"t{len(calls) + 1}",

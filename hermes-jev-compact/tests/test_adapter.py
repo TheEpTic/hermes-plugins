@@ -222,3 +222,28 @@ def test_excerpt_redacts_secrets_like_host_compaction():
     expected = redact.redact_sensitive_text(raw, force=True, redact_url_credentials=True)
     assert expected != raw  # the fixture must actually exercise redaction
     assert _redact_excerpt(raw) == expected
+
+
+def test_excerpt_redactor_failure_drops_excerpt(monkeypatch):
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # Egress boundary fails closed: a redactor runtime error yields no
+    # excerpt (size-only note), never the raw text.
+    monkeypatch.setattr(
+        redact, "redact_sensitive_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    assert _redact_excerpt("secret stuff") == ""
+
+
+def test_excerpt_recapped_after_redaction_expansion(monkeypatch):
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.shaping import _utf16_units
+
+    # Redaction replacements can outgrow the secret: the excerpt is
+    # re-truncated so it never exceeds its budget.
+    monkeypatch.setattr(redact, "redact_sensitive_text", lambda text, **k: "X" * 10000)
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    (call,) = collect_candidates(messages, 99, 1, result_excerpt_chars=500)
+    assert _utf16_units(call.result_excerpt) <= 500
+    assert call.result_excerpt.endswith("…")
