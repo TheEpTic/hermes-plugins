@@ -360,7 +360,10 @@ def test_sequential_batches_cancel_between_asks(monkeypatch):
     boundary = eng._prune_boundary(messages, 0, None)
     cands = _cc(messages, boundary, 200)
     assert len(cands) == 4, f"fixture must yield 4 candidates, got {len(cands)}"
-    state_tokens = int(_fs(_ti(messages), cands, _Opts())["tokens"])
+    # Excerpt-free candidates: the batching math below is excerpt-agnostic,
+    # and the engine runs with excerpts disabled so both agree on the budget.
+    eng.jev_result_excerpt_chars = 0
+    state_tokens = int(_fs(_ti(messages), cands, _Opts(result_excerpt_chars=0))["tokens"])
     budget = state_tokens + 20 + 2 * 125 + 50
     assert len(_bc(cands, state_tokens, budget)) == 2, "fixture must yield 2 batches"
     eng.jev_max_request_tokens = budget
@@ -507,3 +510,431 @@ def test_duplicate_assistant_ids_never_scored(monkeypatch):
     expected, expected_count = ContextCompressor._prune_old_tool_results(eng, messages, 1, None, 1)
     assert (out, count) == (expected, expected_count)
     assert (eng.jev_calls, eng.jev_pruned_units) == (0, 0)
+
+
+def _mixed_probs(n_calls: int) -> Dict[str, float]:
+    # t1 keep (both high), t2 drop_result (call high, result low), t3+ drop_call (both low).
+    probs: Dict[str, float] = {}
+    for i in range(1, n_calls + 1):
+        if i == 1:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.9, 0.9
+        elif i == 2:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.9, 0.1
+        else:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.1, 0.1
+    return probs
+
+
+def test_jev_logs_per_decision_details(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=100, quiet_mode=False)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = _mixed_probs(3)
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    lines = [r.getMessage() for r in caplog.records if r.name == "hermes_jev_compact.engine"]
+    per_call = [line for line in lines if line.startswith("jev decision:")]
+    assert len(per_call) == 3
+    assert "read_file" in per_call[0] and "keep" in per_call[0]
+    assert "0.90" in per_call[0] and "9000" in per_call[0]
+    assert "drop_result" in per_call[1] and "drop_call" in per_call[2]
+    # No result content and no secret material in the log lines.
+    blob = "\n".join(per_call)
+    assert "x" * 20 not in blob
+    assert "TYPESAFE_API_KEY" not in blob and "test-key" not in blob
+
+
+def test_jev_per_decision_log_respects_quiet_mode(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=100, quiet_mode=True)
+    messages = make_tool_transcript(n_calls=2, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.1 for i in (1, 2) for kind in ("call", "result")}
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    assert "jev decision:" not in caplog.text
+
+
+def test_jev_counters_split_keep_truncate_drop(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = _mixed_probs(3)
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert count == 2
+    assert eng.jev_pruned_units == 2  # truncate + drop, kept unit excluded
+    assert eng.jev_kept_units == 1
+    assert eng.jev_truncate_units == 1
+    assert eng.jev_drop_units == 1
+    assert _valid_openai_sequence(out)
+
+
+def test_jev_gate_fallback_logs_achieved_ratio(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=1)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    messages.insert(1, {"role": "user", "content": "pad " * 20000})
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.9 for i in (1, 2, 3) for kind in ("call", "result")}
+    probs["result_t1"] = 0.1
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    gate = [r.getMessage() for r in caplog.records if "reduction under" in r.getMessage()]
+    assert len(gate) == 1
+    assert "10%" in gate[0]  # default gate is 10%, not the TS-ported 25%
+    assert "got " in gate[0] and "%" in gate[0].split("got ", 1)[1][:8]
+
+
+def test_reduction_gate_knob_bounds(monkeypatch):
+    # 0.0: any reduction commits jev output. 1.0: nothing ever commits.
+    template = make_tool_transcript(n_calls=3, result_chars=9000)
+    template.insert(1, {"role": "user", "content": "pad " * 20000})
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.9 for i in (1, 2, 3) for kind in ("call", "result")}
+    probs["result_t1"] = 0.1
+    import copy as _copy
+
+    for ratio, expect_jev in ((0.0, True), (1.0, False)):
+        eng = _engine(jev_min_result_chars=1, jev_min_reduction_ratio=ratio)
+        messages = _copy.deepcopy(template)
+        with patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+        ):
+            out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+        if expect_jev:
+            assert eng.jev_fallbacks == 0 and eng.jev_calls >= 1
+        else:
+            expected, expected_count = ContextCompressor._prune_old_tool_results(
+                eng, messages, 1, None, 200
+            )
+            assert (out, count) == (expected, expected_count)
+            assert eng.jev_fallbacks == 1
+
+
+def test_init_sets_tuning_defaults_and_deepcopy_carries_them():
+    eng = _engine(jev_error_keep_threshold=0.1, jev_min_result_chars=1234)
+    assert eng.jev_error_keep_threshold == 0.1
+    assert eng.jev_min_result_chars == 1234
+    clone = copy.deepcopy(eng)
+    assert clone.jev_error_keep_threshold == 0.1
+    assert clone.jev_min_result_chars == 1234
+    assert _engine().jev_error_keep_threshold == 0.25
+    assert _engine().jev_min_result_chars == 2000
+    assert _engine().jev_min_reduction_ratio == 0.10
+    clone2 = copy.deepcopy(_engine(jev_min_reduction_ratio=0.4))
+    assert clone2.jev_min_reduction_ratio == 0.4
+
+
+def test_jev_keeps_error_unit_where_plain_unit_drops(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "fix it"},
+        {
+            "role": "assistant",
+            "content": "run a",
+            "tool_calls": [
+                {
+                    "id": "e1",
+                    "type": "function",
+                    "function": {"name": "run_tests", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "e1",
+            "content": "Traceback FAILED: assertion error " + "E" * 9000,
+        },
+        {
+            "role": "assistant",
+            "content": "run b",
+            "tool_calls": [
+                {
+                    "id": "n1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "n1", "content": "ok listing " + "L" * 9000},
+        {"role": "user", "content": "tail"},
+    ]
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {"call_t1": 0.3, "result_t1": 0.3, "call_t2": 0.3, "result_t2": 0.3}
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert count == 1
+    rows = [m for m in out if isinstance(m, dict)]
+    assert any(
+        m.get("tool_call_id") == "e1" and "Traceback" in str(m.get("content", "")) for m in rows
+    )
+    assert not any(m.get("tool_call_id") == "n1" for m in rows)
+    assert eng.jev_kept_units == 1 and eng.jev_drop_units == 1
+
+
+def _hygiene_transcript() -> list[dict[str, Any]]:
+    # Two identical 9000-char results (dedup target) + one oversized-arg call
+    # (arg-truncate target) + one keep-worthy unit jev must not lose.
+    dup_body = "D" * 9000
+    big_args = json.dumps({"path": "f.ts", "blob": "B" * 5000})
+    return [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "a",
+            "tool_calls": [
+                {
+                    "id": "d1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "d1", "content": dup_body},
+        {
+            "role": "assistant",
+            "content": "b",
+            "tool_calls": [
+                {
+                    "id": "d2",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": big_args},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "d2", "content": dup_body},
+        {
+            "role": "assistant",
+            "content": "c",
+            "tool_calls": [
+                {
+                    "id": "k1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "k1", "content": "KEEPME " + "K" * 9000},
+        {"role": "user", "content": "tail"},
+    ]
+
+
+def test_jev_success_runs_nondemotion_hygiene(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = _hygiene_transcript()
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    # Drop the duplicate pair's calls, keep the KEEPME unit verbatim.
+    probs = {
+        "call_t1": 0.1,
+        "result_t1": 0.1,
+        "call_t2": 0.1,
+        "result_t2": 0.1,
+        "call_t3": 0.9,
+        "result_t3": 0.9,
+    }
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert eng.jev_fallbacks == 0
+    blob = json.dumps(out)
+    assert "KEEPME" in blob  # jev's keep survived (no demote pass ran over it)
+    assert "B" * 100 not in blob  # oversized args truncated by host hygiene
+    assert count >= 2  # the two jev drops, plus any hygiene dedup
+
+
+def test_jev_hygiene_survives_missing_host_methods(monkeypatch):
+    # Host drift: the hygiene helpers vanish — jev output still commits.
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=2, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.1 for i in (1, 2) for kind in ("call", "result")}
+    with (
+        patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+        ),
+        patch.object(eng, "_dedupe_tool_results", side_effect=AttributeError("gone")),
+        patch.object(eng, "_truncate_tool_call_args_at", side_effect=AttributeError("gone")),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert eng.jev_fallbacks == 0
+    assert count == 2
+    assert _valid_openai_sequence(out)
+
+
+def test_hygiene_recomputes_boundary_after_jev_removals(monkeypatch):
+    # Pre-jev boundary would cover rows that shift into the protected tail
+    # after removals; hygiene must recompute on the post-jev list so rows
+    # that end up protected are never truncation-visited.
+    eng = _engine(jev_min_result_chars=100)
+    tail_args = json.dumps({"path": "tail.ts", "blob": "T" * 5000})
+    mid_args = json.dumps({"path": "mid.ts", "blob": "M" * 5000})
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "go"},
+        {
+            "role": "assistant",
+            "content": "old",
+            "tool_calls": [
+                {
+                    "id": "o1",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "o1", "content": "O" * 9000},
+        {
+            "role": "assistant",
+            "content": "mid",
+            "tool_calls": [
+                {
+                    "id": "m1",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": mid_args},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "m1", "content": "MIDBODY short"},
+        {
+            "role": "assistant",
+            "content": "tail call",
+            "tool_calls": [
+                {
+                    "id": "t9",
+                    "type": "function",
+                    "function": {"name": "t", "arguments": tail_args},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "t9", "content": "TAILBODY short"},
+        {"role": "user", "content": "tail"},
+    ]
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    # Drop the old unit only. Protect-3: pre-jev boundary is 6 (9 rows - 3),
+    # post-jev the list shrinks to 8 rows so the recomputed boundary is 5:
+    # the pass visits rows 0..4 — mid args (row 3) truncated, tail call
+    # (row 5) untouched. A stale pre-jev boundary (6) would also visit row 5
+    # and truncate the protected tail args.
+    probs = {"call_t1": 0.1, "result_t1": 0.1}
+    trunc_seen: list[int] = []
+    orig_trunc = ContextCompressor._truncate_tool_call_args_at
+
+    def spy_trunc(result: Any, idx: int) -> Any:
+        trunc_seen.append(idx)
+        return orig_trunc(result, idx)
+
+    with (
+        patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+        ),
+        patch.object(eng, "_truncate_tool_call_args_at", spy_trunc),
+    ):
+        out, _ = eng._prune_old_tool_results(messages, 3, None, 200)
+    assert eng.jev_fallbacks == 0
+    post_boundary = eng._prune_boundary(out, 3, None)
+    stale_boundary = len(messages) - 3
+    assert post_boundary < stale_boundary, (post_boundary, stale_boundary)
+    # Instance-level spy (the engine resolves the helper via getattr on
+    # self): exact row set. Non-empty (rows 0..4 exist) and capped at the
+    # RECOMPUTED boundary — a stale boundary would also visit the tail call.
+    assert trunc_seen, "arg pass must run for a non-vacuous check"
+    assert sorted(trunc_seen) == list(range(post_boundary)), (trunc_seen, post_boundary)
+    tail_row = next(m for m in out if isinstance(m, dict) and m.get("tool_call_id") == "t9")
+    assert tail_row is not None
+
+    def _args_of(call_id: str) -> str:
+        call = next(
+            m
+            for m in out
+            if isinstance(m, dict)
+            and m.get("role") == "assistant"
+            and any(
+                tc.get("id") == call_id
+                for tc in (m.get("tool_calls") or [])
+                if isinstance(tc, dict)
+            )
+        )
+        return next(
+            tc["function"]["arguments"] for tc in call["tool_calls"] if tc.get("id") == call_id
+        )
+
+    # Mid args (pre-boundary) truncated, tail args (protected) byte-identical.
+    assert _args_of("m1") != mid_args
+    assert _args_of("t9") == tail_args
+    assert "T" * 100 in json.dumps(out)
+
+
+def test_cancel_during_hygiene_falls_back_without_commit(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=2, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.1 for i in (1, 2) for kind in ("call", "result")}
+    state = {"cancel": False}
+    eng._compression_cancelled_check = lambda: state["cancel"]
+    orig_hygiene = JevContextCompressor._nondemotion_hygiene
+
+    def flipping_hygiene(self: Any, *a: Any, **k: Any) -> int:
+        out = orig_hygiene(self, *a, **k)
+        state["cancel"] = True
+        return out
+
+    with (
+        patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+        ),
+        patch.object(JevContextCompressor, "_nondemotion_hygiene", flipping_hygiene),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    expected, expected_count = ContextCompressor._prune_old_tool_results(
+        eng, messages, 1, None, 200
+    )
+    assert (out, count) == (expected, expected_count)
+    assert (eng.jev_calls, eng.jev_pruned_units, eng.jev_hygiene_units) == (0, 0, 0)
+    assert eng.jev_fallbacks == 1
+
+
+def test_return_count_reconciles_with_split_counters(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = _hygiene_transcript()
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {
+        "call_t1": 0.1,
+        "result_t1": 0.1,
+        "call_t2": 0.1,
+        "result_t2": 0.1,
+        "call_t3": 0.9,
+        "result_t3": 0.9,
+    }
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        _, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert eng.jev_fallbacks == 0
+    assert count == eng.jev_pruned_units + eng.jev_hygiene_units
+    assert eng.jev_pruned_units == eng.jev_truncate_units + eng.jev_drop_units

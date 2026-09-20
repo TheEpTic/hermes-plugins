@@ -63,11 +63,14 @@ _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_api_key_env", "api_key_env", "TYPESAFE_API_KEY"),
     ("jev_model", "jev_model", "jev-latest"),
     ("jev_keep_threshold", "keep_threshold", 0.5),
+    ("jev_error_keep_threshold", "error_keep_threshold", 0.25),
+    ("jev_result_excerpt_chars", "result_excerpt_chars", 500),
     ("jev_max_state_tokens", "max_state_tokens", 25000),
     ("jev_max_request_tokens", "max_request_tokens", 30000),
     ("jev_truncate_head_chars", "truncate_head_chars", 300),
     ("jev_request_timeout_s", "request_timeout_s", 30.0),
-    ("jev_min_result_chars", "min_result_chars", 8000),
+    ("jev_min_result_chars", "min_result_chars", 2000),
+    ("jev_min_reduction_ratio", "min_reduction_ratio", 0.10),
 )
 _JEV_DEFAULTS = {attr: default for attr, _, default in _JEV_KNOBS}
 
@@ -116,14 +119,21 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_api_key_env: str
     jev_model: str
     jev_keep_threshold: float
+    jev_error_keep_threshold: float
+    jev_result_excerpt_chars: int
     jev_max_state_tokens: int
     jev_max_request_tokens: int
     jev_truncate_head_chars: int
     jev_request_timeout_s: float
     jev_min_result_chars: int
+    jev_min_reduction_ratio: float
     jev_calls: int
     jev_pruned_units: int
     jev_fallbacks: int
+    jev_kept_units: int
+    jev_truncate_units: int
+    jev_drop_units: int
+    jev_hygiene_units: int
 
     def __init__(self, model: str, **kwargs: Any) -> None:
         base_params = set(inspect.signature(ContextCompressor.__init__).parameters) - {"self"}
@@ -133,6 +143,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         self.jev_calls = 0
         self.jev_pruned_units = 0
         self.jev_fallbacks = 0
+        self.jev_kept_units = 0
+        self.jev_truncate_units = 0
+        self.jev_drop_units = 0
+        self.jev_hygiene_units = 0
         with contextlib.suppress(Exception):
             self.api_key = ""
 
@@ -176,7 +190,15 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 fresh.__dict__[attr] = copy.deepcopy(getattr(self, attr, default), memo)
             except Exception:
                 fresh.__dict__[attr] = default
-        for counter in ("jev_calls", "jev_pruned_units", "jev_fallbacks"):
+        for counter in (
+            "jev_calls",
+            "jev_pruned_units",
+            "jev_fallbacks",
+            "jev_kept_units",
+            "jev_truncate_units",
+            "jev_drop_units",
+            "jev_hygiene_units",
+        ):
             fresh.__dict__[counter] = int(getattr(self, counter, 0) or 0)
         fresh.__dict__["api_key"] = ""
         return fresh
@@ -193,13 +215,19 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
 
     def _jev_options(self) -> JevOptions:
         threshold = _finite_float(self.jev_keep_threshold, 0.5)
+        error_threshold = _finite_float(getattr(self, "jev_error_keep_threshold", 0.25), 0.25)
         return JevOptions(
             keep_threshold=min(1.0, max(0.0, threshold)),
+            error_keep_threshold=min(1.0, max(0.0, error_threshold)),
+            result_excerpt_chars=max(0, _safe_int(self.jev_result_excerpt_chars, 500)),
+            min_reduction_ratio=min(
+                1.0, max(0.0, _finite_float(self.jev_min_reduction_ratio, 0.10))
+            ),
             max_state_tokens=max(1, _safe_int(self.jev_max_state_tokens, 25000)),
             max_request_tokens=max(1, _safe_int(self.jev_max_request_tokens, 30000)),
             truncate_head_chars=max(0, _safe_int(self.jev_truncate_head_chars, 300)),
             request_timeout_s=max(1.0, _finite_float(self.jev_request_timeout_s, 30.0)),
-            min_result_chars=max(0, _safe_int(self.jev_min_result_chars, 8000)),
+            min_result_chars=max(0, _safe_int(self.jev_min_result_chars, 2000)),
         )
 
     def _ask_batches(
@@ -221,7 +249,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             answer = answers.get(call.id)
             if answer is None:
                 raise JevError(f"missing jev answers for {call.id}")
-            decisions.append(decide_call(call, answer, options.keep_threshold))
+            decisions.append(
+                decide_call(
+                    call,
+                    answer,
+                    options.keep_threshold,
+                    options.error_keep_threshold,
+                )
+            )
         return decisions
 
     def _fallback(
@@ -235,6 +270,53 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             getattr(logger, level)(message, *args, **kwargs)
         return (None, 0)
 
+    def _nondemotion_hygiene(
+        self,
+        applied: list[dict[str, Any]],
+        protect_tail_count: int,
+        protect_tail_tokens: int | None,
+    ) -> int:
+        """Host passes that must not be lost on the jev path — dedup (lossless),
+        tool-call arg truncation (oversized args 400 providers), and image
+        retire (anti-thrash). Explicitly NOT the demote/pressure passes: those
+        would munge jev's keeps. Each host call is guarded: on host drift the
+        helper logs and jev's output still commits. Returns hygiene prune count.
+
+        The arg-truncation boundary is recomputed on the POST-jev list: jev
+        removals shift rows left, so the pre-jev boundary would reach into the
+        protected tail.
+        """
+        extra = 0
+        try:
+            dedupe = getattr(self, "_dedupe_tool_results", None)
+            if callable(dedupe):
+                extra += _safe_int(dedupe(applied), 0)
+        except Exception:
+            logger.warning("jev post-hygiene dedupe unavailable; keeping jev output")
+        try:
+            boundary = self._prune_boundary(applied, protect_tail_count, protect_tail_tokens)
+        except Exception:
+            logger.warning("jev post-hygiene boundary unavailable; keeping jev output")
+            boundary = 0
+        try:
+            trunc_at = getattr(self, "_truncate_tool_call_args_at", None)
+            if callable(trunc_at):
+                for i in range(max(0, boundary)):
+                    try:
+                        trunc_at(applied, i)
+                    except Exception:
+                        logger.warning("jev post-hygiene arg truncation failed at row %d", i)
+                        break
+        except Exception:
+            logger.warning("jev post-hygiene arg pass unavailable; keeping jev output")
+        try:
+            from agent.context_compressor import _retire_stale_tool_result_images
+
+            extra += _safe_int(_retire_stale_tool_result_images(applied), 0)
+        except Exception:
+            logger.warning("jev post-hygiene image retire unavailable; keeping jev output")
+        return extra
+
     def _jev_prune(
         self,
         messages: list[dict[str, Any]],
@@ -247,7 +329,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         options = self._jev_options()
         boundary = self._prune_boundary(messages, protect_tail_count, protect_tail_tokens)
         candidates = collect_candidates(
-            messages, boundary, max(min_prune_chars, options.min_result_chars)
+            messages,
+            boundary,
+            max(min_prune_chars, options.min_result_chars),
+            result_excerpt_chars=options.result_excerpt_chars,
         )
         if not candidates or self._cancelled():
             return self._fallback()
@@ -284,18 +369,56 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         except JevError as exc:
             return self._fallback("jev output ambiguous (%s); built-in prune", exc, level="warning")
         pruned_units = sum((1 for d in decisions if d.action != "keep"))
+        kept_units = sum((1 for d in decisions if d.action == "keep"))
+        truncate_units = sum((1 for d in decisions if d.action == "drop_result"))
+        drop_units = sum((1 for d in decisions if d.action == "drop_call"))
+        if not self.quiet_mode:
+            by_id = {c.id: c for c in candidates}
+            for d in decisions:
+                call = by_id.get(d.id)
+                logger.info(
+                    "jev decision: %s %s result=%dch error=%s keep_call=%.2f "
+                    "keep_result=%.2f action=%s",
+                    d.id,
+                    d.tool,
+                    call.result_chars if call is not None else -1,
+                    "yes" if call is not None and call.is_error else "no",
+                    d.keep_call,
+                    d.keep_result,
+                    d.action,
+                )
         if pruned_units == 0 or applied == messages or (not _valid_openai_sequence(applied)):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
             return self._fallback()
         chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
         chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
-        if chars_before > 0 and (chars_before - chars_after) / chars_before < 0.25:
-            return self._fallback("jev reduction under 25%%; built-in prune")
+        ratio = (chars_before - chars_after) / chars_before if chars_before > 0 else 0.0
+        gate = options.min_reduction_ratio
+        if ratio < gate:
+            return self._fallback(
+                "jev reduction under %.0f%% (got %.1f%%); built-in prune",
+                gate * 100.0,
+                ratio * 100.0,
+            )
         if self._cancelled():
             return self._fallback("jev prune cancelled before commit; built-in prune")
+        hygiene = self._nondemotion_hygiene(applied, protect_tail_count, protect_tail_tokens)
+        if self._cancelled():
+            return self._fallback("jev prune cancelled during hygiene; built-in prune")
+        if not _valid_openai_sequence(applied):
+            logger.warning("jev post-hygiene output failed validity; built-in prune")
+            return self._fallback()
         self.jev_calls += len(batches)
         self.jev_pruned_units += pruned_units
+        self.jev_kept_units += kept_units
+        self.jev_truncate_units += truncate_units
+        self.jev_drop_units += drop_units
+        self.jev_hygiene_units += hygiene
+        # Return count = jev decisions + host hygiene rewrites (dedup/image
+        # retire). The split counters below stay jev-only; jev_hygiene_units
+        # carries the hygiene share so count == pruned + hygiene reconciles.
+        total_units = pruned_units + hygiene
         if not self.quiet_mode:
             logger.info(
                 "jev prune: %d call(s) scored in %d request(s), %d dropped/truncated (%s)",
@@ -304,7 +427,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 pruned_units,
                 fitted["stage"],
             )
-        return (applied, pruned_units)
+        return (applied, total_units)
 
     def prune_tool_results_only(
         self, messages: list[dict[str, Any]], current_tokens: int | None = None

@@ -25,6 +25,7 @@ from hermes_jev_compact.pruner import (
     batch_calls,
     decide_call,
     fit_state,
+    questions_for,
     truncated_result_text,
 )
 from hermes_jev_compact.shaping import estimate_tokens
@@ -52,6 +53,35 @@ def test_state_sends_history_with_results_omitted():
     assert first_call["result"] == f"ok, {9000} chars (omitted)"
 
 
+def test_result_note_carries_excerpt_when_present():
+    # Deliberate drift from TS buildHistoryEntries: TS only records
+    # "ok, N chars (omitted)". Hermes adds the truncated head so jev scores
+    # content, not just size — an empty excerpt keeps the TS shape exactly.
+    from hermes_jev_compact.pruner import _result_note
+
+    _, calls = _calls()
+    assert _result_note(calls[0]) == f"ok, {9000} chars (omitted)"
+    with_excerpt = replace(calls[0], result_excerpt="Traceback: boom")
+    note = _result_note(with_excerpt)
+    assert note.startswith(f"ok, {9000} chars, head: Traceback: boom")
+    assert note.endswith("(truncated)")
+    errored = replace(calls[0], is_error=True, result_excerpt="FAILED x")
+    assert _result_note(errored).startswith("error, ")
+
+
+def test_excerpt_participates_honestly_in_token_budget():
+    _, calls = _calls()
+    slim = fit_state(to_internal(_calls()[0]), calls, OPTS, goal="g")
+    rich = fit_state(
+        to_internal(_calls()[0]),
+        [replace(c, result_excerpt="E" * 400) for c in calls],
+        OPTS,
+        goal="g",
+    )
+    assert int(rich["tokens"]) > int(slim["tokens"])
+    assert "E" * 50 in json.dumps(rich["state"])
+
+
 def test_goal_defaults_to_latest_user_prompts():
     messages, _ = _calls()
     fitted = fit_state(to_internal(messages), [], OPTS)
@@ -65,9 +95,12 @@ def test_truncates_inputs_before_text():
     big_args = {"path": "x.ts", "content": "x" * 5000}
     messages[2]["tool_calls"][0]["function"]["arguments"] = json.dumps(big_args)
     calls = collect_candidates(messages, 99, 1)
-    fitted = fit_state(to_internal(messages), calls, JevOptions(max_state_tokens=300), goal="g")
+    # Budget 320: +20 over the TS-ported 300 for the longer reworded context
+    # (125 vs 108 estimated tokens); the test pins ladder ORDER (inputs
+    # before texts), not the absolute budget.
+    fitted = fit_state(to_internal(messages), calls, JevOptions(max_state_tokens=320), goal="g")
     assert fitted["stage"] == "inputs<=60"
-    assert fitted["tokens"] <= 300
+    assert fitted["tokens"] <= 320
     assert fitted["state"]["history"][0]["text"].startswith("fix the failing")
 
 
@@ -137,6 +170,49 @@ def test_decide_call_pinned_short_circuits_like_ts():
     _, calls = _calls(n=1)
     decision = decide_call(replace(calls[0], pinned=True), JevCallAnswer(0.0, 0.0), 0.5)
     assert (decision.action, decision.reason) == ("keep", "pinned")
+
+
+def test_decide_call_error_threshold_keeps_errors_on_a_lower_bar():
+    # Deliberate drift from TS decide.ts: hermes sessions re-run tools at
+    # real cost (time, API spend, side effects, flaky output), so error
+    # results keep unless jev is confident they are stale. Non-errors keep
+    # the plain threshold.
+    _, calls = _calls(n=1)
+    error = replace(calls[0], is_error=True)
+    plain = replace(calls[0], is_error=False)
+    answer = JevCallAnswer(0.3, 0.3)
+    assert decide_call(error, answer, 0.5, error_keep_threshold=0.25).action == "keep"
+    assert decide_call(plain, answer, 0.5, error_keep_threshold=0.25).action == "drop_call"
+    assert (
+        decide_call(error, JevCallAnswer(0.3, 0.1), 0.5, error_keep_threshold=0.25).action
+        == "drop_result"
+    )
+    pinned = replace(error, pinned=True)
+    assert decide_call(pinned, JevCallAnswer(0.0, 0.0), 0.5, 0.25).reason == "pinned"
+
+
+def test_decide_call_defaults_to_plain_threshold_for_errors():
+    # Omitted error threshold = TS behavior: one bar for every unit.
+    _, calls = _calls(n=1)
+    error = replace(calls[0], is_error=True)
+    assert decide_call(error, JevCallAnswer(0.3, 0.3), 0.5).action == "drop_call"
+
+
+def test_state_context_does_not_promise_free_reruns():
+    from hermes_jev_compact.shaping import STATE_CONTEXT
+
+    assert "always re-run" not in STATE_CONTEXT
+
+
+def test_result_question_does_not_require_irreproducibility():
+    _, calls = _calls(n=1)
+    text = questions_for(calls[0])[f"result_{calls[0].id}"]["instructions"]
+    assert "re-running the tool would not do" not in text
+    assert str(calls[0].result_chars) in text  # size context retained
+
+
+def test_default_candidate_floor_is_2000_chars():
+    assert JevOptions().min_result_chars == 2000
 
 
 def test_abridge_and_collapse_stages_like_ts():

@@ -1,5 +1,8 @@
 """Adapter tests: pairing, pins, exclusions (hermes openai format)."""
 
+import builtins
+import sys
+
 import pytest
 
 from hermes_jev_compact.adapter import _flatten_text, collect_candidates, is_pinned, to_internal
@@ -184,3 +187,95 @@ def test_flattens_multimodal_parts_like_host(content, expected):
     # Host parity (context_compressor _part_text): text parts join, image/file
     # parts contribute nothing, and the row keeps its text for state.
     assert _flatten_text(content) == expected
+
+
+def test_candidates_carry_truncated_result_excerpts():
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    messages[3]["content"] = "HEADMARKER " + "x" * 9000
+    calls = collect_candidates(messages, 99, 1, result_excerpt_chars=500)
+    assert len(calls) == 1
+    excerpt = calls[0].result_excerpt
+    assert excerpt.startswith("HEADMARKER")
+    assert len(excerpt) <= 500
+    assert "…" in excerpt  # truncated head, not the full body
+
+
+def test_excerpt_defaults_to_empty_and_tolerates_edge_shapes():
+    messages = make_tool_transcript(n_calls=1, result_chars=100)
+    (call,) = collect_candidates(messages, 99, 1)
+    assert call.result_excerpt == ""
+    unicode = make_tool_transcript(n_calls=1, result_chars=100)
+    unicode[3]["content"] = "🔥" * 10000  # astral chars: UTF-16 width 2 each
+    (call2,) = collect_candidates(unicode, 99, 1, result_excerpt_chars=500)
+    from hermes_jev_compact.shaping import _utf16_units
+
+    assert _utf16_units(call2.result_excerpt) <= 500
+    assert call2.result_excerpt.endswith("…")
+    # A zero/exhausted budget yields no excerpt, never an exception.
+    (call3,) = collect_candidates(messages, 99, 1, result_excerpt_chars=0)
+    assert call3.result_excerpt == ""
+
+
+def test_excerpt_redacts_secrets_like_host_compaction():
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # compare against the host rule directly: same function, same flags.
+    raw = 'api_key="«redacted:sk-…»" token=ghp_abc123def456ghi789jkl012'
+    expected = redact.redact_sensitive_text(raw, force=True, redact_url_credentials=True)
+    assert expected != raw  # the fixture must actually exercise redaction
+    assert _redact_excerpt(raw) == expected
+
+
+def test_excerpt_redactor_failure_drops_excerpt(monkeypatch):
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # Egress boundary fails closed: a redactor runtime error yields no
+    # excerpt (size-only note), never the raw text.
+    monkeypatch.setattr(
+        redact, "redact_sensitive_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    assert _redact_excerpt("secret stuff") == ""
+
+
+def test_excerpt_recapped_after_redaction_expansion(monkeypatch):
+    redact = pytest.importorskip("agent.redact")
+    from hermes_jev_compact.shaping import _utf16_units
+
+    # Redaction replacements can outgrow the secret: the excerpt is
+    # re-truncated so it never exceeds its budget.
+    monkeypatch.setattr(redact, "redact_sensitive_text", lambda text, **k: "X" * 10000)
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    (call,) = collect_candidates(messages, 99, 1, result_excerpt_chars=500)
+    assert _utf16_units(call.result_excerpt) <= 500
+    assert call.result_excerpt.endswith("…")
+
+
+def _block_host_import(monkeypatch, missing_name):
+    """Force `from agent.redact import ...` to fail as if the host (or one
+    of its deps) were missing, without touching the real install."""
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "agent.redact" or name.startswith("agent.redact."):
+            raise ModuleNotFoundError(f"No module named {missing_name!r}", name=missing_name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.delitem(sys.modules, "agent.redact", raising=False)
+
+
+def test_excerpt_passthrough_only_when_host_itself_missing(monkeypatch):
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    _block_host_import(monkeypatch, "agent.redact")
+    assert _redact_excerpt("raw SECRET") == "raw SECRET"
+
+
+def test_excerpt_fails_closed_on_broken_host_import(monkeypatch):
+    from hermes_jev_compact.adapter import _redact_excerpt
+
+    # Host present but a transitive dep missing: broken host, not bare env.
+    _block_host_import(monkeypatch, "yaml")
+    assert _redact_excerpt("raw SECRET") == ""

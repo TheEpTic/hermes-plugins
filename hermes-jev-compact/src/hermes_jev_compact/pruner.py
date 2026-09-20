@@ -36,7 +36,13 @@ def _input_text(input: dict[str, Any], limit: int) -> str:
 
 
 def _result_note(call: JevToolCall) -> str:
-    return f"{('error' if call.is_error else 'ok')}, {call.result_chars} chars (omitted)"
+    status = "error" if call.is_error else "ok"
+    # Deliberate drift from TS buildHistoryEntries: the truncated head rides
+    # along so jev scores content, not size alone. An empty excerpt keeps the
+    # TS shape exactly ("ok, N chars (omitted)").
+    if not call.result_excerpt:
+        return f"{status}, {call.result_chars} chars (omitted)"
+    return f"{status}, {call.result_chars} chars, head: {call.result_excerpt} (truncated)"
 
 
 _WS_RUN = re.compile("\\s+")
@@ -60,7 +66,12 @@ def questions_for(call: JevToolCall) -> dict[str, dict[str, str]]:
         },
         f"result_{call.id}": {
             "type": "noul",
-            "instructions": f"The full output of tool call {call.id} ({call.tool}, {call.result_chars} chars) should stay in the history verbatim: the assistant still needs its contents and re-running the tool would not do",
+            # Deliberate drift from TS buildQuestions: TS requires
+            # "re-running the tool would not do". Hermes sessions re-run at
+            # real cost (time, API spend, side effects, flaky output), so the
+            # question asks for likely-future-need instead of
+            # irreproducibility.
+            "instructions": f"The full output of tool call {call.id} ({call.tool}, {call.result_chars} chars) should stay in the history verbatim: the assistant is likely to need its exact contents again and dropping them would lose information",
         },
     }
 
@@ -111,7 +122,17 @@ def _question_tokens(call: JevToolCall) -> int:
     return tokens
 
 
-def decide_call(call: JevToolCall, answer: JevCallAnswer, keep_threshold: float) -> JevCallDecision:
+def decide_call(
+    call: JevToolCall,
+    answer: JevCallAnswer,
+    keep_threshold: float,
+    error_keep_threshold: float | None = None,
+) -> JevCallDecision:
+    # Deliberate drift from TS decide.ts: errors keep on a lower bar
+    # (default None = plain TS single-threshold behavior).
+    bar = keep_threshold
+    if call.is_error and error_keep_threshold is not None:
+        bar = error_keep_threshold
     base = {
         "id": call.id,
         "tool": call.tool,
@@ -120,9 +141,9 @@ def decide_call(call: JevToolCall, answer: JevCallAnswer, keep_threshold: float)
     }  # type: dict[str, Any]
     if call.pinned:
         return JevCallDecision(action="keep", reason="pinned", **base)
-    if answer.keep_result >= keep_threshold:
+    if answer.keep_result >= bar:
         action, reason = ("keep", "kept")
-    elif answer.keep_call >= keep_threshold:
+    elif answer.keep_call >= bar:
         action, reason = ("drop_result", "result_dropped")
     else:
         action, reason = ("drop_call", "call_dropped")

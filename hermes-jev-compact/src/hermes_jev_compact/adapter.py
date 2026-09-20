@@ -6,6 +6,40 @@ import json
 from typing import Any
 
 from .protocol import JevInternalMessage, JevToolCall
+from .shaping import truncate
+
+
+def _redact_excerpt(text: str) -> str:
+    """Redact an excerpt crossing the jev egress boundary.
+
+    Mirrors the host's compaction rule (context_compressor
+    _redact_compaction_text: force=True + URL credentials): summaries persist
+    and re-enter every later prompt, and jev excerpts likewise leave the
+    host — so redaction must not depend on the operator's redact_secrets
+    toggle.
+
+    Failure modes: host not installed at all (bare unit env) passes through
+    unredacted — documented, tests-only. Anything else — a broken host
+    import, a redactor runtime failure, a non-string return — drops the
+    excerpt ("", i.e. the size-only note). The egress boundary never fails
+    open with raw text.
+    """
+    try:
+        from agent.redact import redact_sensitive_text
+    except ModuleNotFoundError as exc:
+        # Only the host itself missing means "bare env". A missing
+        # TRANSITIVE dep (or anything else) is a broken host → closed.
+        if exc.name in ("agent", "agent.redact"):
+            return text  # bare unit env without the host: documented passthrough
+        return ""
+    except Exception:
+        return ""
+    try:
+        out = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    except Exception:
+        return ""
+    return out if isinstance(out, str) else ""
+
 
 _ERROR_MARKERS = ("error", "failed", "failure", "traceback", "exception")
 
@@ -131,6 +165,7 @@ def collect_candidates(
     prune_boundary: int,
     min_result_chars: int,
     preserve_recent: int = 0,
+    result_excerpt_chars: int = 0,
 ) -> list[JevToolCall]:
     """Pair assistant tool_calls with their tool results before the prune boundary.
 
@@ -144,6 +179,10 @@ def collect_candidates(
     Survivors carry the TS pinned bit (state.ts:86-88) so decide_call can
     short-circuit; all boundary-excluded rows are pinned-equivalent by
     construction.
+
+    ``result_excerpt_chars`` caps the truncated result head stored on each
+    candidate (UTF-16 units, TS parity). 0 (default) keeps the TS-shaped
+    size-only note.
     """
     prune_boundary = max(0, min(int(prune_boundary), len(messages)))
     min_result_chars = max(0, int(min_result_chars))
@@ -186,6 +225,16 @@ def collect_candidates(
             if len(text) < min_result_chars:
                 continue
             name, args = _tool_name_and_args(tool_calls, cid)
+            excerpt_chars = max(0, int(result_excerpt_chars))
+            # Truncate → redact → re-truncate: redaction replacements can be
+            # longer than the secret they replace, so the post-redaction text
+            # is re-capped to keep the excerpt (and the state budget built on
+            # it) honest.
+            excerpt = (
+                truncate(_redact_excerpt(truncate(text, excerpt_chars)), excerpt_chars)
+                if excerpt_chars
+                else ""
+            )
             calls.append(
                 JevToolCall(
                     id=f"t{len(calls) + 1}",
@@ -198,6 +247,7 @@ def collect_candidates(
                     is_error=_looks_error(text),
                     pinned=is_pinned(call_idx, total, preserve_recent)
                     or is_pinned(result_idx, total, preserve_recent),
+                    result_excerpt=excerpt,
                 )
             )
     return calls

@@ -83,11 +83,55 @@ def test_register_honors_endpoint_path_setting():
 
 
 def test_register_rejects_garbage_settings():
-    ctx = FakeCtx({"keep_threshold": "junk", "max_state_tokens": "junk", "jev_model": ""})
+    ctx = FakeCtx(
+        {
+            "keep_threshold": "junk",
+            "max_state_tokens": "junk",
+            "jev_model": "",
+            "error_keep_threshold": "junk",
+        }
+    )
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.5
     assert ctx.engine.jev_max_state_tokens == 25000
     assert ctx.engine.jev_model == "jev-latest"
+    assert ctx.engine.jev_error_keep_threshold == 0.25
+
+
+def test_register_honors_error_threshold_and_floor_settings():
+    ctx = FakeCtx({"error_keep_threshold": 0.3, "min_result_chars": 500})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_error_keep_threshold == 0.3
+    assert ctx.engine.jev_min_result_chars == 500
+
+
+def test_register_defaults_floor_and_error_threshold():
+    ctx = FakeCtx()
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_min_result_chars == 2000
+    assert ctx.engine.jev_error_keep_threshold == 0.25
+
+
+def test_register_honors_excerpt_chars_setting():
+    ctx = FakeCtx({"result_excerpt_chars": 100})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_result_excerpt_chars == 100
+    ctx2 = FakeCtx({"result_excerpt_chars": "junk"})
+    hermes_jev_compact.register(ctx2)
+    assert ctx2.engine.jev_result_excerpt_chars == 500
+    assert FakeCtx().settings.get("result_excerpt_chars", 500) == 500
+    ctx3 = FakeCtx()
+    hermes_jev_compact.register(ctx3)
+    assert ctx3.engine.jev_result_excerpt_chars == 500
+
+
+def test_register_honors_reduction_ratio_setting():
+    ctx = FakeCtx({"min_reduction_ratio": 0.4})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_min_reduction_ratio == 0.4
+    garbage = FakeCtx({"min_reduction_ratio": "junk"})
+    hermes_jev_compact.register(garbage)
+    assert garbage.engine.jev_min_reduction_ratio == 0.10
 
 
 def test_register_reregisters_after_host_slot_cleared():

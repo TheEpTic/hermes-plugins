@@ -15,11 +15,23 @@ class JevOptions:
     """Resolved, validated tunables."""
 
     keep_threshold: float = 0.5
+    # Deliberate drift from TS (single keepThreshold): error results get
+    # their own lower bar — a stale-looking traceback is usually the unit
+    # the next turn debugs from. None/omitted falls back to keep_threshold.
+    error_keep_threshold: float | None = None
+    # Deliberate drift from TS: excerpts are hermes-only, so the budget knob
+    # has no TS counterpart. 0 disables excerpts (TS-shaped notes).
+    result_excerpt_chars: int = 500
+    # Deliberate drift from TS reductionRatio 0.25: there the gate decides
+    # summary-vs-nothing. Here the summary always runs, so the gate only
+    # picks the phase-1 author (jev vs deterministic) — a lower bar lets
+    # selective-but-small jev passes commit instead of being discarded.
+    min_reduction_ratio: float = 0.10
     max_state_tokens: int = 25000
     max_request_tokens: int = 30000
     truncate_head_chars: int = 300
     request_timeout_s: float = 30.0
-    min_result_chars: int = 8000
+    min_result_chars: int = 2000
 
 
 @dataclass(frozen=True)
@@ -35,6 +47,9 @@ class JevToolCall:
     result_chars: int
     is_error: bool
     pinned: bool = False  # TS parity: pinned calls are never candidates
+    # Deliberate drift from TS: truncated HEAD of the result text so the
+    # state note carries content signal, not just size. "" keeps TS shape.
+    result_excerpt: str = ""
 
 
 @dataclass(frozen=True)
