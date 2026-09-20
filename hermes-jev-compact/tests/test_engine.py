@@ -360,7 +360,10 @@ def test_sequential_batches_cancel_between_asks(monkeypatch):
     boundary = eng._prune_boundary(messages, 0, None)
     cands = _cc(messages, boundary, 200)
     assert len(cands) == 4, f"fixture must yield 4 candidates, got {len(cands)}"
-    state_tokens = int(_fs(_ti(messages), cands, _Opts())["tokens"])
+    # Excerpt-free candidates: the batching math below is excerpt-agnostic,
+    # and the engine runs with excerpts disabled so both agree on the budget.
+    eng.jev_result_excerpt_chars = 0
+    state_tokens = int(_fs(_ti(messages), cands, _Opts(result_excerpt_chars=0))["tokens"])
     budget = state_tokens + 20 + 2 * 125 + 50
     assert len(_bc(cands, state_tokens, budget)) == 2, "fixture must yield 2 batches"
     eng.jev_max_request_tokens = budget

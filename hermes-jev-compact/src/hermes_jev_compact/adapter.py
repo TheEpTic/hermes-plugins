@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from .protocol import JevInternalMessage, JevToolCall
+from .shaping import truncate
 
 _ERROR_MARKERS = ("error", "failed", "failure", "traceback", "exception")
 
@@ -131,6 +132,7 @@ def collect_candidates(
     prune_boundary: int,
     min_result_chars: int,
     preserve_recent: int = 0,
+    result_excerpt_chars: int = 0,
 ) -> list[JevToolCall]:
     """Pair assistant tool_calls with their tool results before the prune boundary.
 
@@ -144,6 +146,10 @@ def collect_candidates(
     Survivors carry the TS pinned bit (state.ts:86-88) so decide_call can
     short-circuit; all boundary-excluded rows are pinned-equivalent by
     construction.
+
+    ``result_excerpt_chars`` caps the truncated result head stored on each
+    candidate (UTF-16 units, TS parity). 0 (default) keeps the TS-shaped
+    size-only note.
     """
     prune_boundary = max(0, min(int(prune_boundary), len(messages)))
     min_result_chars = max(0, int(min_result_chars))
@@ -186,6 +192,8 @@ def collect_candidates(
             if len(text) < min_result_chars:
                 continue
             name, args = _tool_name_and_args(tool_calls, cid)
+            excerpt_chars = max(0, int(result_excerpt_chars))
+            excerpt = truncate(text, excerpt_chars) if excerpt_chars else ""
             calls.append(
                 JevToolCall(
                     id=f"t{len(calls) + 1}",
@@ -198,6 +206,7 @@ def collect_candidates(
                     is_error=_looks_error(text),
                     pinned=is_pinned(call_idx, total, preserve_recent)
                     or is_pinned(result_idx, total, preserve_recent),
+                    result_excerpt=excerpt,
                 )
             )
     return calls

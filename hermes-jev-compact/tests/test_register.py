@@ -112,6 +112,19 @@ def test_register_defaults_floor_and_error_threshold():
     assert ctx.engine.jev_error_keep_threshold == 0.25
 
 
+def test_register_honors_excerpt_chars_setting():
+    ctx = FakeCtx({"result_excerpt_chars": 100})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_result_excerpt_chars == 100
+    ctx2 = FakeCtx({"result_excerpt_chars": "junk"})
+    hermes_jev_compact.register(ctx2)
+    assert ctx2.engine.jev_result_excerpt_chars == 500
+    assert FakeCtx().settings.get("result_excerpt_chars", 500) == 500
+    ctx3 = FakeCtx()
+    hermes_jev_compact.register(ctx3)
+    assert ctx3.engine.jev_result_excerpt_chars == 500
+
+
 def test_register_reregisters_after_host_slot_cleared():
     # Regression for the plugin-reload gap: the host calls register() again after
     # unload() clears its context-engine slot. A module-global latch that survives

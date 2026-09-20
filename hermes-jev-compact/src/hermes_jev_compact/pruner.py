@@ -36,7 +36,13 @@ def _input_text(input: dict[str, Any], limit: int) -> str:
 
 
 def _result_note(call: JevToolCall) -> str:
-    return f"{('error' if call.is_error else 'ok')}, {call.result_chars} chars (omitted)"
+    status = "error" if call.is_error else "ok"
+    # Deliberate drift from TS buildHistoryEntries: the truncated head rides
+    # along so jev scores content, not size alone. An empty excerpt keeps the
+    # TS shape exactly ("ok, N chars (omitted)").
+    if not call.result_excerpt:
+        return f"{status}, {call.result_chars} chars (omitted)"
+    return f"{status}, {call.result_chars} chars, head: {call.result_excerpt} (truncated)"
 
 
 _WS_RUN = re.compile("\\s+")

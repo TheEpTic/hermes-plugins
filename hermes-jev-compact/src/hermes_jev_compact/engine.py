@@ -64,6 +64,7 @@ _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_model", "jev_model", "jev-latest"),
     ("jev_keep_threshold", "keep_threshold", 0.5),
     ("jev_error_keep_threshold", "error_keep_threshold", 0.25),
+    ("jev_result_excerpt_chars", "result_excerpt_chars", 500),
     ("jev_max_state_tokens", "max_state_tokens", 25000),
     ("jev_max_request_tokens", "max_request_tokens", 30000),
     ("jev_truncate_head_chars", "truncate_head_chars", 300),
@@ -118,6 +119,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_model: str
     jev_keep_threshold: float
     jev_error_keep_threshold: float
+    jev_result_excerpt_chars: int
     jev_max_state_tokens: int
     jev_max_request_tokens: int
     jev_truncate_head_chars: int
@@ -212,6 +214,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         return JevOptions(
             keep_threshold=min(1.0, max(0.0, threshold)),
             error_keep_threshold=min(1.0, max(0.0, error_threshold)),
+            result_excerpt_chars=max(0, _safe_int(self.jev_result_excerpt_chars, 500)),
             max_state_tokens=max(1, _safe_int(self.jev_max_state_tokens, 25000)),
             max_request_tokens=max(1, _safe_int(self.jev_max_request_tokens, 30000)),
             truncate_head_chars=max(0, _safe_int(self.jev_truncate_head_chars, 300)),
@@ -271,7 +274,10 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         options = self._jev_options()
         boundary = self._prune_boundary(messages, protect_tail_count, protect_tail_tokens)
         candidates = collect_candidates(
-            messages, boundary, max(min_prune_chars, options.min_result_chars)
+            messages,
+            boundary,
+            max(min_prune_chars, options.min_result_chars),
+            result_excerpt_chars=options.result_excerpt_chars,
         )
         if not candidates or self._cancelled():
             return self._fallback()

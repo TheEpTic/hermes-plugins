@@ -184,3 +184,30 @@ def test_flattens_multimodal_parts_like_host(content, expected):
     # Host parity (context_compressor _part_text): text parts join, image/file
     # parts contribute nothing, and the row keeps its text for state.
     assert _flatten_text(content) == expected
+
+
+def test_candidates_carry_truncated_result_excerpts():
+    messages = make_tool_transcript(n_calls=1, result_chars=9000)
+    messages[3]["content"] = "HEADMARKER " + "x" * 9000
+    calls = collect_candidates(messages, 99, 1, result_excerpt_chars=500)
+    assert len(calls) == 1
+    excerpt = calls[0].result_excerpt
+    assert excerpt.startswith("HEADMARKER")
+    assert len(excerpt) <= 500
+    assert "…" in excerpt  # truncated head, not the full body
+
+
+def test_excerpt_defaults_to_empty_and_tolerates_edge_shapes():
+    messages = make_tool_transcript(n_calls=1, result_chars=100)
+    (call,) = collect_candidates(messages, 99, 1)
+    assert call.result_excerpt == ""
+    unicode = make_tool_transcript(n_calls=1, result_chars=100)
+    unicode[3]["content"] = "🔥" * 10000  # astral chars: UTF-16 width 2 each
+    (call2,) = collect_candidates(unicode, 99, 1, result_excerpt_chars=500)
+    from hermes_jev_compact.shaping import _utf16_units
+
+    assert _utf16_units(call2.result_excerpt) <= 500
+    assert call2.result_excerpt.endswith("…")
+    # A zero/exhausted budget yields no excerpt, never an exception.
+    (call3,) = collect_candidates(messages, 99, 1, result_excerpt_chars=0)
+    assert call3.result_excerpt == ""

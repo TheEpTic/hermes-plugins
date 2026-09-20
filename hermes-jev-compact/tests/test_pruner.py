@@ -53,6 +53,35 @@ def test_state_sends_history_with_results_omitted():
     assert first_call["result"] == f"ok, {9000} chars (omitted)"
 
 
+def test_result_note_carries_excerpt_when_present():
+    # Deliberate drift from TS buildHistoryEntries: TS only records
+    # "ok, N chars (omitted)". Hermes adds the truncated head so jev scores
+    # content, not just size — an empty excerpt keeps the TS shape exactly.
+    from hermes_jev_compact.pruner import _result_note
+
+    _, calls = _calls()
+    assert _result_note(calls[0]) == f"ok, {9000} chars (omitted)"
+    with_excerpt = replace(calls[0], result_excerpt="Traceback: boom")
+    note = _result_note(with_excerpt)
+    assert note.startswith(f"ok, {9000} chars, head: Traceback: boom")
+    assert note.endswith("(truncated)")
+    errored = replace(calls[0], is_error=True, result_excerpt="FAILED x")
+    assert _result_note(errored).startswith("error, ")
+
+
+def test_excerpt_participates_honestly_in_token_budget():
+    _, calls = _calls()
+    slim = fit_state(to_internal(_calls()[0]), calls, OPTS, goal="g")
+    rich = fit_state(
+        to_internal(_calls()[0]),
+        [replace(c, result_excerpt="E" * 400) for c in calls],
+        OPTS,
+        goal="g",
+    )
+    assert int(rich["tokens"]) > int(slim["tokens"])
+    assert "E" * 50 in json.dumps(rich["state"])
+
+
 def test_goal_defaults_to_latest_user_prompts():
     messages, _ = _calls()
     fitted = fit_state(to_internal(messages), [], OPTS)
