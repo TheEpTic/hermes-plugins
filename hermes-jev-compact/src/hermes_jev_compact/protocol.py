@@ -15,11 +15,15 @@ class JevOptions:
     """Resolved, validated tunables."""
 
     keep_threshold: float = 0.5
+    # Deliberate drift from TS (single keepThreshold): error results get
+    # their own lower bar — a stale-looking traceback is usually the unit
+    # the next turn debugs from. None/omitted falls back to keep_threshold.
+    error_keep_threshold: float | None = None
     max_state_tokens: int = 25000
     max_request_tokens: int = 30000
     truncate_head_chars: int = 300
     request_timeout_s: float = 30.0
-    min_result_chars: int = 8000
+    min_result_chars: int = 2000
 
 
 @dataclass(frozen=True)

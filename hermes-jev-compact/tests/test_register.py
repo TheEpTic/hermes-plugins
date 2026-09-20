@@ -83,11 +83,33 @@ def test_register_honors_endpoint_path_setting():
 
 
 def test_register_rejects_garbage_settings():
-    ctx = FakeCtx({"keep_threshold": "junk", "max_state_tokens": "junk", "jev_model": ""})
+    ctx = FakeCtx(
+        {
+            "keep_threshold": "junk",
+            "max_state_tokens": "junk",
+            "jev_model": "",
+            "error_keep_threshold": "junk",
+        }
+    )
     hermes_jev_compact.register(ctx)
     assert ctx.engine.jev_keep_threshold == 0.5
     assert ctx.engine.jev_max_state_tokens == 25000
     assert ctx.engine.jev_model == "jev-latest"
+    assert ctx.engine.jev_error_keep_threshold == 0.25
+
+
+def test_register_honors_error_threshold_and_floor_settings():
+    ctx = FakeCtx({"error_keep_threshold": 0.3, "min_result_chars": 500})
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_error_keep_threshold == 0.3
+    assert ctx.engine.jev_min_result_chars == 500
+
+
+def test_register_defaults_floor_and_error_threshold():
+    ctx = FakeCtx()
+    hermes_jev_compact.register(ctx)
+    assert ctx.engine.jev_min_result_chars == 2000
+    assert ctx.engine.jev_error_keep_threshold == 0.25
 
 
 def test_register_reregisters_after_host_slot_cleared():

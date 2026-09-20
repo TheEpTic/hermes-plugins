@@ -594,3 +594,65 @@ def test_jev_gate_fallback_logs_achieved_ratio(monkeypatch, caplog):
     assert len(gate) == 1
     assert "25%" in gate[0]
     assert "got " in gate[0] and "%" in gate[0].split("got ", 1)[1][:8]
+
+
+def test_init_sets_tuning_defaults_and_deepcopy_carries_them():
+    eng = _engine(jev_error_keep_threshold=0.1, jev_min_result_chars=1234)
+    assert eng.jev_error_keep_threshold == 0.1
+    assert eng.jev_min_result_chars == 1234
+    clone = copy.deepcopy(eng)
+    assert clone.jev_error_keep_threshold == 0.1
+    assert clone.jev_min_result_chars == 1234
+    assert _engine().jev_error_keep_threshold == 0.25
+    assert _engine().jev_min_result_chars == 2000
+
+
+def test_jev_keeps_error_unit_where_plain_unit_drops(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "fix it"},
+        {
+            "role": "assistant",
+            "content": "run a",
+            "tool_calls": [
+                {
+                    "id": "e1",
+                    "type": "function",
+                    "function": {"name": "run_tests", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "e1",
+            "content": "Traceback FAILED: assertion error " + "E" * 9000,
+        },
+        {
+            "role": "assistant",
+            "content": "run b",
+            "tool_calls": [
+                {
+                    "id": "n1",
+                    "type": "function",
+                    "function": {"name": "list_files", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "n1", "content": "ok listing " + "L" * 9000},
+        {"role": "user", "content": "tail"},
+    ]
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {"call_t1": 0.3, "result_t1": 0.3, "call_t2": 0.3, "result_t2": 0.3}
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert count == 1
+    rows = [m for m in out if isinstance(m, dict)]
+    assert any(
+        m.get("tool_call_id") == "e1" and "Traceback" in str(m.get("content", "")) for m in rows
+    )
+    assert not any(m.get("tool_call_id") == "n1" for m in rows)
+    assert eng.jev_kept_units == 1 and eng.jev_drop_units == 1

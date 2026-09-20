@@ -63,11 +63,12 @@ _JEV_KNOBS: tuple[tuple[str, str, Any], ...] = (
     ("jev_api_key_env", "api_key_env", "TYPESAFE_API_KEY"),
     ("jev_model", "jev_model", "jev-latest"),
     ("jev_keep_threshold", "keep_threshold", 0.5),
+    ("jev_error_keep_threshold", "error_keep_threshold", 0.25),
     ("jev_max_state_tokens", "max_state_tokens", 25000),
     ("jev_max_request_tokens", "max_request_tokens", 30000),
     ("jev_truncate_head_chars", "truncate_head_chars", 300),
     ("jev_request_timeout_s", "request_timeout_s", 30.0),
-    ("jev_min_result_chars", "min_result_chars", 8000),
+    ("jev_min_result_chars", "min_result_chars", 2000),
 )
 _JEV_DEFAULTS = {attr: default for attr, _, default in _JEV_KNOBS}
 
@@ -116,6 +117,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_api_key_env: str
     jev_model: str
     jev_keep_threshold: float
+    jev_error_keep_threshold: float
     jev_max_state_tokens: int
     jev_max_request_tokens: int
     jev_truncate_head_chars: int
@@ -206,13 +208,15 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
 
     def _jev_options(self) -> JevOptions:
         threshold = _finite_float(self.jev_keep_threshold, 0.5)
+        error_threshold = _finite_float(getattr(self, "jev_error_keep_threshold", 0.25), 0.25)
         return JevOptions(
             keep_threshold=min(1.0, max(0.0, threshold)),
+            error_keep_threshold=min(1.0, max(0.0, error_threshold)),
             max_state_tokens=max(1, _safe_int(self.jev_max_state_tokens, 25000)),
             max_request_tokens=max(1, _safe_int(self.jev_max_request_tokens, 30000)),
             truncate_head_chars=max(0, _safe_int(self.jev_truncate_head_chars, 300)),
             request_timeout_s=max(1.0, _finite_float(self.jev_request_timeout_s, 30.0)),
-            min_result_chars=max(0, _safe_int(self.jev_min_result_chars, 8000)),
+            min_result_chars=max(0, _safe_int(self.jev_min_result_chars, 2000)),
         )
 
     def _ask_batches(
@@ -234,7 +238,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             answer = answers.get(call.id)
             if answer is None:
                 raise JevError(f"missing jev answers for {call.id}")
-            decisions.append(decide_call(call, answer, options.keep_threshold))
+            decisions.append(
+                decide_call(
+                    call,
+                    answer,
+                    options.keep_threshold,
+                    options.error_keep_threshold,
+                )
+            )
         return decisions
 
     def _fallback(

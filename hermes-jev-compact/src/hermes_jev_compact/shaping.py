@@ -10,8 +10,9 @@ STATE_CONTEXT = (
     "A coding assistant conversation is being compacted to free context. `history` is the whole "
     "conversation so far, oldest first; tool outputs are replaced by a short `result` note and long "
     "texts may be abridged. Each question asks whether one tool call, or the full output of that call, "
-    "still needs to stay in the history verbatim. Whatever is not kept is deleted permanently, but the "
-    "assistant can always re-run a tool or re-read a file."
+    "still needs to stay in the history verbatim. Whatever is not kept is deleted permanently; "
+    "re-running a tool costs time and may have side effects or give different results, so prefer "
+    "keeping outputs the assistant will likely need again."
 )
 
 INPUT_CHARS: Sequence[int] = (1000, 200, 60)
