@@ -267,9 +267,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             getattr(logger, level)(message, *args, **kwargs)
         return (None, 0)
 
-    def _nondemotion_hygiene(
-        self, applied: list[dict[str, Any]], boundary: int
-    ) -> int:
+    def _nondemotion_hygiene(self, applied: list[dict[str, Any]], boundary: int) -> int:
         """Host passes that must not be lost on the jev path — dedup (lossless),
         tool-call arg truncation (oversized args 400 providers), and image
         retire (anti-thrash). Explicitly NOT the demote/pressure passes: those
