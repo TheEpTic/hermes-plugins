@@ -124,6 +124,9 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     jev_calls: int
     jev_pruned_units: int
     jev_fallbacks: int
+    jev_kept_units: int
+    jev_truncate_units: int
+    jev_drop_units: int
 
     def __init__(self, model: str, **kwargs: Any) -> None:
         base_params = set(inspect.signature(ContextCompressor.__init__).parameters) - {"self"}
@@ -133,6 +136,9 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         self.jev_calls = 0
         self.jev_pruned_units = 0
         self.jev_fallbacks = 0
+        self.jev_kept_units = 0
+        self.jev_truncate_units = 0
+        self.jev_drop_units = 0
         with contextlib.suppress(Exception):
             self.api_key = ""
 
@@ -176,7 +182,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 fresh.__dict__[attr] = copy.deepcopy(getattr(self, attr, default), memo)
             except Exception:
                 fresh.__dict__[attr] = default
-        for counter in ("jev_calls", "jev_pruned_units", "jev_fallbacks"):
+        for counter in (
+            "jev_calls",
+            "jev_pruned_units",
+            "jev_fallbacks",
+            "jev_kept_units",
+            "jev_truncate_units",
+            "jev_drop_units",
+        ):
             fresh.__dict__[counter] = int(getattr(self, counter, 0) or 0)
         fresh.__dict__["api_key"] = ""
         return fresh
@@ -284,18 +297,42 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         except JevError as exc:
             return self._fallback("jev output ambiguous (%s); built-in prune", exc, level="warning")
         pruned_units = sum((1 for d in decisions if d.action != "keep"))
+        kept_units = sum((1 for d in decisions if d.action == "keep"))
+        truncate_units = sum((1 for d in decisions if d.action == "drop_result"))
+        drop_units = sum((1 for d in decisions if d.action == "drop_call"))
+        if not self.quiet_mode:
+            by_id = {c.id: c for c in candidates}
+            for d in decisions:
+                call = by_id.get(d.id)
+                logger.info(
+                    "jev decision: %s %s result=%dch error=%s keep_call=%.2f "
+                    "keep_result=%.2f action=%s",
+                    d.id,
+                    d.tool,
+                    call.result_chars if call is not None else -1,
+                    "yes" if call is not None and call.is_error else "no",
+                    d.keep_call,
+                    d.keep_result,
+                    d.action,
+                )
         if pruned_units == 0 or applied == messages or (not _valid_openai_sequence(applied)):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
             return self._fallback()
         chars_before = sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
         chars_after = sum(len(str(m.get("content", ""))) for m in applied if isinstance(m, dict))
-        if chars_before > 0 and (chars_before - chars_after) / chars_before < 0.25:
-            return self._fallback("jev reduction under 25%%; built-in prune")
+        ratio = (chars_before - chars_after) / chars_before if chars_before > 0 else 0.0
+        if ratio < 0.25:
+            return self._fallback(
+                "jev reduction under 25%% (got %.1f%%); built-in prune", ratio * 100.0
+            )
         if self._cancelled():
             return self._fallback("jev prune cancelled before commit; built-in prune")
         self.jev_calls += len(batches)
         self.jev_pruned_units += pruned_units
+        self.jev_kept_units += kept_units
+        self.jev_truncate_units += truncate_units
+        self.jev_drop_units += drop_units
         if not self.quiet_mode:
             logger.info(
                 "jev prune: %d call(s) scored in %d request(s), %d dropped/truncated (%s)",

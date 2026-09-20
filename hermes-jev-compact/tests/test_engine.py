@@ -507,3 +507,90 @@ def test_duplicate_assistant_ids_never_scored(monkeypatch):
     expected, expected_count = ContextCompressor._prune_old_tool_results(eng, messages, 1, None, 1)
     assert (out, count) == (expected, expected_count)
     assert (eng.jev_calls, eng.jev_pruned_units) == (0, 0)
+
+
+def _mixed_probs(n_calls: int) -> Dict[str, float]:
+    # t1 keep (both high), t2 drop_result (call high, result low), t3+ drop_call (both low).
+    probs: Dict[str, float] = {}
+    for i in range(1, n_calls + 1):
+        if i == 1:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.9, 0.9
+        elif i == 2:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.9, 0.1
+        else:
+            probs[f"call_t{i}"], probs[f"result_t{i}"] = 0.1, 0.1
+    return probs
+
+
+def test_jev_logs_per_decision_details(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=100, quiet_mode=False)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = _mixed_probs(3)
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    lines = [r.getMessage() for r in caplog.records if r.name == "hermes_jev_compact.engine"]
+    per_call = [line for line in lines if line.startswith("jev decision:")]
+    assert len(per_call) == 3
+    assert "read_file" in per_call[0] and "keep" in per_call[0]
+    assert "0.90" in per_call[0] and "9000" in per_call[0]
+    assert "drop_result" in per_call[1] and "drop_call" in per_call[2]
+    # No result content and no secret material in the log lines.
+    blob = "\n".join(per_call)
+    assert "x" * 20 not in blob
+    assert "TYPESAFE_API_KEY" not in blob and "test-key" not in blob
+
+
+def test_jev_per_decision_log_respects_quiet_mode(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=100, quiet_mode=True)
+    messages = make_tool_transcript(n_calls=2, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.1 for i in (1, 2) for kind in ("call", "result")}
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    assert "jev decision:" not in caplog.text
+
+
+def test_jev_counters_split_keep_truncate_drop(monkeypatch):
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = _mixed_probs(3)
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        out, count = eng._prune_old_tool_results(messages, 1, None, 200)
+    assert count == 2
+    assert eng.jev_pruned_units == 2  # truncate + drop, kept unit excluded
+    assert eng.jev_kept_units == 1
+    assert eng.jev_truncate_units == 1
+    assert eng.jev_drop_units == 1
+    assert _valid_openai_sequence(out)
+
+
+def test_jev_gate_fallback_logs_achieved_ratio(monkeypatch, caplog):
+    eng = _engine(jev_min_result_chars=1)
+    messages = make_tool_transcript(n_calls=3, result_chars=9000)
+    messages.insert(1, {"role": "user", "content": "pad " * 20000})
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.9 for i in (1, 2, 3) for kind in ("call", "result")}
+    probs["result_t1"] = 0.1
+    with patch(
+        "hermes_jev_compact.engine.JevAsker",
+        side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+    ):
+        with caplog.at_level("INFO", logger="hermes_jev_compact.engine"):
+            eng._prune_old_tool_results(messages, 1, None, 200)
+    gate = [r.getMessage() for r in caplog.records if "reduction under" in r.getMessage()]
+    assert len(gate) == 1
+    assert "25%" in gate[0]
+    assert "got " in gate[0] and "%" in gate[0].split("got ", 1)[1][:8]
