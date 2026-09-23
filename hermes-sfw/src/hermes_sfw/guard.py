@@ -47,11 +47,14 @@ from pathlib import Path
 
 # Command names routed through sfw (sfw-free proxies any command).
 _MANAGER = re.compile(r"(?:cargo|npm|npx|pnpm|pnpx|uv|uvx|yarn|pip(?:\d+(?:\.\d+)*)?)")
-# Cheap pre-filter: a manager name (or ``-m pip``) somewhere in the text.
+# Cheap pre-filter: a manager name somewhere in the text, standalone or glued
+# to a python short-flag cluster (``-mpip``, ``-Impip``).
 _HINT = re.compile(
-    r"(?<![\w.-])(?:cargo|npm|npx|pnpm|pnpx|uvx?|yarn|pip(?:\d+(?:\.\d+)*)?)(?![\w-])"
+    r"(?:(?<![\w.-])|(?<=\s-[A-Za-z]m)|(?<=\s-m)|(?<=\s-[A-Za-z]{2}m))"
+    r"(?:cargo|npm|npx|pnpm|pnpx|uvx?|yarn|pip(?:\d+(?:\.\d+)*)?)(?![\w-])"
 )
 _PYTHON = re.compile(r"python\d*(?:\.\d+)?")
+_PYTHON_VALUE_FLAGS = frozenset("WXmc")  # CPython short options that take a value
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
 _OPERATORS = ";|&(){}!"
 _KEYWORDS = frozenset(
@@ -390,8 +393,11 @@ class _Scanner:
         if _is_manager(name):
             self.route(word)
             return None
-        if _PYTHON.fullmatch(Path(name).name) and self.python_pip(rest):
+        if _PYTHON.fullmatch(Path(name).name) and self.python_installs(rest):
             self.route(word)
+            return None
+        if name == "alias" and any(_has_hint(word.value) for word in rest):
+            self.block("an alias naming a package manager cannot be routed through sfw")
             return None
         if name == "command" and rest and rest[0].value in {"-v", "-V"}:
             return None
@@ -413,13 +419,31 @@ class _Scanner:
             self.block("package manager may be named by a dynamic command word ($VAR/$(...))")
 
     @staticmethod
-    def python_pip(rest: list[_Token]) -> bool:
-        """``python [-I -u ...] -m pip`` (options before ``-m`` allowed)."""
+    def python_installs(rest: list[_Token]) -> bool:
+        """True for ``python [opts] -m pip`` and ``python -c CODE`` naming a manager.
+
+        Mirrors CPython's option parsing: short flags cluster (``-Im pip``,
+        ``-mpip``), ``-W``/``-X`` consume a value, and the first non-option
+        argument is the script, after which nothing is an interpreter option.
+        """
         values = [word.value for word in rest]
-        index = values.index("-m") if "-m" in values else -1
-        options_only = all(value.startswith("-") for value in values[: max(index, 0)])
-        module = values[index + 1] if 0 <= index < len(values) - 1 else ""
-        return index >= 0 and options_only and _MANAGER.fullmatch(module) is not None
+        i = 0
+        while i < len(values):
+            value = values[i]
+            if value == "--" or not value.startswith("-") or value == "-":
+                return False
+            for at, flag in enumerate(value[1:], start=2):
+                if flag not in _PYTHON_VALUE_FLAGS:
+                    continue
+                argument = value[at:] or (values[i + 1] if i + 1 < len(values) else "")
+                if flag == "m":
+                    return _MANAGER.fullmatch(argument) is not None
+                if flag == "c":
+                    return _has_hint(argument)
+                i += 0 if value[at:] else 1
+                break
+            i += 1
+        return False
 
     def opaque(self, rest: list[_Token]) -> None:
         hidden = any(_has_hint(word.value) for word in rest)

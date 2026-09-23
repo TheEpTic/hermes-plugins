@@ -64,6 +64,13 @@ ROUTED = [
     "true && pip install x || false",
     "! pip install x",
     "a=(1 2); pip install x",
+    "python3 -mpip install x",
+    "python -Impip install x",
+    "python -W ignore -m pip install x",
+    "python3 -X dev -m pip install x",
+    'python -c \'import runpy; runpy.run_module("pip", run_name="__main__")\' install x',
+    "source /dev/null && pip install x",
+    "python3 -c 'import pip'",
 ]
 
 BLOCKED = [
@@ -85,6 +92,10 @@ BLOCKED = [
     "cat <<EOF\nnpm test\nEOF",
     "for p in npm pip; do $p install; done",
     'npm install "unterminated',
+    "shopt -s expand_aliases; alias p=pip; p install x",
+    "alias p='pip install'; p x",
+    "echo 'pip install x' | sh",
+    "sh <<'EOF'\npip install x\nEOF",
 ]
 
 PASSED = [
@@ -102,9 +113,15 @@ PASSED = [
     "echo hi # uses npm",
     "find . -name npm",
     "cat node_modules/.bin/npm",
-    "python3 -c 'import pip'",
     "echo $(date) > out",
     "bash script.sh",
+    "python3 -m pytest -q",
+    "python3 -mpytest",
+    "python3 -m pip_audit",
+    "python3 script.py -m pip",
+    "python3 -c 'print(1)'",
+    "source .venv/bin/activate && pytest -q",
+    "alias ll='ls -la'",
 ]
 
 
