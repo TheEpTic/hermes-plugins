@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.11] - Unreleased
+
+### Security
+- Audit redaction now covers prefixed credential variables (`PGPASSWORD=`, `MYSQL_PWD=`, `AWS_SECRET_ACCESS_KEY=`), `curl -u user:pass` / `--user`, `sshpass -p`, `mysql -pSECRET`, and `user:pass@` in any URL scheme (`postgresql://`, `redis://`, ...). Previously these were logged in clear text. Redaction remains pattern-based; README/SECURITY document the positional-secret limit.
+- Host validation rejects `host:alias` / `host:port` forms: a host containing `:` must now be an IPv6 literal. Bracketed IPv6 is normalised to the bare form OpenSSH expects.
+
+### Fixed
+- Transfers no longer blanket-block every path containing `.hermes`: inside a Hermes home (`~/.hermes`, `profiles/<name>/`, `$HERMES_HOME`) the non-secret working trees `cache/` (incl. the agent's `cache/scratch` TMPDIR), `images/`, `audio_cache/`, and `browser_screenshots/` are allowed; everything else there stays blocked. The test suite now passes when run under a Hermes-managed TMPDIR.
+- `register()` no longer latches after the first call. A host force-reload of an entry-point (pip) install previously re-imported nothing and skipped registration, so every `ssh_*` tool and `/ssh` vanished; re-registration now reuses the live manager and its sessions.
+- Plugin manifest version matches the package (was stuck at 0.4.9); a test pins them together.
+
+### Changed
+- README architecture tree reflects the real module layout (`audit`, `exec`, `helpers`, `registry`, `sessions`, `validate`; no `utils.py`).
+- Dev dependencies: mypy 2.3.1, pytest 9.1.1; runtime `cryptography==50.0.1`. Dropped dead `tests.*` mypy override and paramiko/asyncssh warning filters (neither library is a dependency).
+
 ## [0.4.10] - 2026-09-18
 
 ### Changed

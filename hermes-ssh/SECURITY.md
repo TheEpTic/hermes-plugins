@@ -39,7 +39,8 @@ Persistent SSH connections are stored as Unix sockets in `~/.hermes/ssh-tools/so
 - **Machine field validation** — names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`; hosts, users, ports, aliases, tags, and key paths are also validated before persistence. Slashes, spaces, glob characters, and other unsafe characters are rejected where they can affect local paths or SSH argument parsing.
 - **Transfer path validation** — remote paths must be absolute or home-relative, glob/control characters and traversal segments are rejected, and local paths are resolved before policy checks.
 - **Transfer staging** — uploads and downloads use generated temporary paths before final rename; failed transfers clean their temporary paths where possible.
-- **Credential and symlink protection** — common credential directories/files and symlinked transfer trees are rejected before data movement.
+- **Credential and symlink protection** — common credential directories/files and symlinked transfer trees are rejected before data movement. A Hermes home is blocked as a whole except its non-secret working trees (`cache/`, `images/`, `audio_cache/`, `browser_screenshots/`), so the agent can move files it created without exposing `.env`, `auth.json`, `config.yaml`, session state, or profile data.
+- **Audit redaction** — inline credentials in common forms are redacted before a command is logged; redaction is best-effort and pattern-based, so choose `audit_log_mode=metadata` or `off` where commands may carry positional secrets.
 - **Restricted file permissions** — data directory (0o700), audit log (0o600), output files (0o600).
 - **Atomic JSON writes** — writes go through a temp file + `os.replace()` with `fsync` to prevent corruption on crash.
 - **Glob injection prevention** — output file cleanup uses `iterdir()` + prefix matching instead of `Path.glob()` with user-controlled input.

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import replace
 
 from .helpers import coerce_int
 from .models import Machine
 
-_HOST_RE = re.compile(r"[A-Za-z0-9_.:-]{1,253}")
+# DNS-style name (underscores tolerated for ssh_config-style aliases).
+_HOSTNAME_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?")
 _USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
 
@@ -29,7 +31,16 @@ def validate_host(host: object) -> str | None:
     """Return an error message if an SSH host string is unsafe."""
     if not isinstance(host, str) or not host:
         return "Host must be a non-empty string"
-    if host.startswith("-") or "@" in host or not _HOST_RE.fullmatch(host):
+    if ":" in host:
+        # Only an IPv6 literal may contain ':' — "host:alias" or "host:22"
+        # would reach OpenSSH as a malformed name. Brackets are optional.
+        literal = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            ipaddress.IPv6Address(literal)
+        except ValueError:
+            return "Host with ':' must be an IPv6 address; set the port separately"
+        return None
+    if host.startswith("-") or "@" in host or not _HOSTNAME_RE.fullmatch(host):
         return "Host must be a hostname/IP with no spaces, @ signs, slashes, or shell characters"
     return None
 
@@ -72,6 +83,8 @@ def validate_machine(machine: Machine) -> Machine:
         raise ValueError("Tags must be a list of strings up to 64 chars")
     if not isinstance(machine.description, str):
         raise ValueError("Description must be a string")
-    if port != machine.port or aliases is not machine.aliases or tags is not machine.tags:
-        machine = replace(machine, port=port, aliases=aliases, tags=tags)
+    host = machine.host.strip("[]") if ":" in machine.host else machine.host
+    changed = port != machine.port or host != machine.host
+    if changed or aliases is not machine.aliases or tags is not machine.tags:
+        machine = replace(machine, host=host, port=port, aliases=aliases, tags=tags)
     return machine

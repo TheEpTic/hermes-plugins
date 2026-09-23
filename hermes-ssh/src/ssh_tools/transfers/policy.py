@@ -18,7 +18,15 @@ from .models import LocalSource, TransferValidationError
 MAX_TIMEOUT = 3600
 MAX_SCAN_ENTRIES = 100_000
 _GLOB_RE = re.compile(r"[*?\[\]{}]")
-_SENSITIVE_PARTS = frozenset({".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure", ".hermes"})
+_SENSITIVE_PARTS = frozenset({".ssh", ".gnupg", ".aws", ".kube", ".docker", ".azure"})
+# Hermes home holds credentials (.env, auth.json, config.yaml and its backups,
+# pairing, mcp-tokens, vault, session databases), so it is denied as a whole
+# except for these non-secret working trees, which hold files the agent
+# creates itself (``cache/scratch`` is the agent's TMPDIR). Applies to the
+# home itself and to each ``profiles/<name>/`` home. Individual credential
+# names inside an allowed tree (``cache/bws_cache.json``) stay denied.
+_HERMES_HOME_NAME = ".hermes"
+_HERMES_OPEN_TREES = frozenset({"audio_cache", "browser_screenshots", "cache", "images"})
 _SENSITIVE_NAMES = frozenset(
     {
         ".netrc",
@@ -93,9 +101,43 @@ _CREDENTIAL_DIRS = frozenset({"mcp-tokens", "pairing"})
 _GH_CONFIG = frozenset({"gh", "gcloud"})
 
 
+def _hermes_home_denied(folded: tuple[str, ...]) -> bool:
+    """True when the path is inside any Hermes home but outside its open trees.
+
+    Every ``.hermes`` segment is checked, so a nested home (a project's
+    ``.hermes/`` under the scratch tree) is protected too.
+    """
+    for index, part in enumerate(folded):
+        if part != _HERMES_HOME_NAME:
+            continue
+        rest = folded[index + 1 :]
+        rest = rest[2:] if len(rest) >= 2 and rest[0] == "profiles" else rest
+        if not rest or rest[0] not in _HERMES_OPEN_TREES:
+            return True
+    return False
+
+
+def _hermes_home_parts(path: Path) -> tuple[str, ...] | None:
+    """``path`` re-rooted at a ``.hermes`` segment when it lies in $HERMES_HOME.
+
+    A Hermes home configured under another name is held to the same rule as
+    ``~/.hermes``.
+    """
+    configured = os.environ.get("HERMES_HOME", "").strip()
+    if not configured:
+        return None
+    try:
+        home = Path(configured).expanduser().resolve()
+        relative = path.resolve().relative_to(home)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return (_HERMES_HOME_NAME, *relative.parts)
+
+
 def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
     folded = tuple(part.casefold() for part in parts)
-    credential_dir = set(folded).intersection(_SENSITIVE_PARTS | _CREDENTIAL_DIRS)
+    named_dir = bool(set(folded).intersection(_SENSITIVE_PARTS | _CREDENTIAL_DIRS))
+    credential_dir = named_dir or _hermes_home_denied(folded)
     config_dir = any(
         part == ".config" and folded[index + 1] in _GH_CONFIG
         for index, part in enumerate(folded[:-1])
@@ -109,7 +151,9 @@ def _sensitive_reason(parts: tuple[str, ...], name: str) -> str | None:
 
 
 def local_sensitive_reason(path: Path) -> str | None:
-    return _sensitive_reason(path.parts, path.name)
+    reason = _sensitive_reason(path.parts, path.name)
+    hermes_parts = None if reason else _hermes_home_parts(path)
+    return _sensitive_reason(hermes_parts, path.name) if hermes_parts else reason
 
 
 def _etc_system_credential(parts: tuple[str, ...]) -> bool:
