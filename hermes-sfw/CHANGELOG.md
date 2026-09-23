@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.16] - Unreleased
+## [0.2.16] - 2026-09-23
 
 ### Security
 - **Terminal guard bypasses closed.** Package-manager commands ran raw, without sfw, behind `NAME=value` assignments (`FOO=1 pip install x`, `env FOO=1 pip ...`), `eval`, `stdbuf`/`ionice`/`exec -a`, quoted or split names (`'pip'`, `"pip"`, `p''ip`), versioned `pip3.13`, `python -I -m pip` and every other CPython option form (`-mpip`, `-Impip`, `-W ignore -m pip`), `python -c` code naming a manager, a `#` comment hiding a quote, and payloads mixing quotes. Every one is now routed or blocked; an execution test under real bash proves each routed form reaches the manager only through sfw.
