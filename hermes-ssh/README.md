@@ -101,7 +101,7 @@ Transfer behaviour is intentionally conservative:
 - Directories require `recursive=true`.
 - Existing directories are never merged or replaced.
 - Uploads and downloads stage through generated temporary paths before final rename.
-- Local and remote credential paths are blocked.
+- Local and remote credential paths are blocked. Inside a Hermes home (`~/.hermes`, each `profiles/<name>/`, and `$HERMES_HOME`) everything is blocked except the non-secret working trees `cache/` (including the agent's `cache/scratch/` TMPDIR), `images/`, `audio_cache/`, and `browser_screenshots/`.
 - Symbolic links, special files, traversal segments, wildcard remote paths, and recursive trees containing links are rejected.
 - Upload and download paths are explicit destinations, not shell expressions.
 
@@ -117,7 +117,7 @@ ssh_machines action=test name=web1
 ssh_machines action=inspect name=web1
 ```
 
-Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 characters). Slashes, spaces, and glob characters are rejected.
+Machine names must be alphanumeric with dots, hyphens, or underscores (1-64 characters). Slashes, spaces, and glob characters are rejected. Hosts are a hostname or IP address; a host containing `:` must be an IPv6 literal (brackets optional), so set the port with `port=` rather than `host:port`.
 
 **Registry guard (check-before-create).** Adding a machine whose `host` and `user` already exist under a *different* name does not fail, but the response carries a non-blocking `warning` plus a `hint` naming the existing registration, so agents reuse it instead of creating throwaway aliases:
 
@@ -181,20 +181,26 @@ Settings live in `src/ssh_tools/config.py` as an `SSHConfig` dataclass:
 
 ```text
 src/ssh_tools/
-├── __init__.py          # plugin registration and Hermes hooks
+├── __init__.py          # plugin registration (tools + /ssh command)
 ├── approval.py          # Hermes dangerous-command approval bridge
+├── audit.py             # command audit log + credential redaction
 ├── config.py            # SSHConfig
-├── manager.py           # machine, command, and session state
+├── exec.py              # OpenSSH argv construction and command execution
+├── helpers.py           # handler response and parameter helpers
+├── manager.py           # SSHManager facade: registry, sessions, audit, idle checker
 ├── models.py            # Machine and Session dataclasses
+├── registry.py          # machine registry operations
 ├── schemas.py           # LLM-facing tool schemas
-├── storage.py           # encrypted machine registry
+├── sessions.py          # background session tracking
+├── storage.py           # encrypted machine store
+├── validate.py          # machine name/host/user/key/port validation
 ├── transfers/           # SFTP policy, transport, staging, and audit
 │   ├── __init__.py      # validated transfer entry point
 │   ├── models.py        # transfer request and result models
 │   ├── policy.py        # local and remote path safety
 │   ├── service.py       # transfer orchestration and finalisation
 │   └── transport.py     # OpenSSH SFTP argv and batch construction
-├── utils.py             # handler response helpers
+├── plugin.yaml          # Hermes plugin manifest
 ├── py.typed             # PEP 561 marker
 └── handlers/
     ├── terminal.py      # ssh_terminal
@@ -224,7 +230,7 @@ Defaults and limitations worth knowing:
 
 - `StrictHostKeyChecking=yes` is the default. Add a verified host key to OpenSSH `known_hosts` before registering a machine. `accept-new` remains available only for an explicit compatibility override.
 - Machine credentials are encrypted at rest under `~/.hermes/ssh-tools/`.
-- Audit logs redact common inline command credentials by default. Metadata mode stores hashes and lengths instead of transfer paths.
+- Audit logs redact common inline command credentials by default (`*PASSWORD=`/`*_TOKEN=`-style assignments, `--password`-style flags, `user:pass@` URLs, `curl -u user:pass`, `sshpass -p`, `mysql -p…`, and authorization headers). Redaction is pattern-based: positional secrets such as `htpasswd -b file user SECRET` are not recognised. Use `audit_log_mode=metadata` (hashes and lengths only) when commands may carry credentials.
 - Commands and transfers run with the registered remote user's permissions.
 - Transfer path blocks reduce accidental credential movement but are not a sandbox for untrusted prompts.
 - Use dedicated non-root accounts and expose Hermes only to trusted operators.

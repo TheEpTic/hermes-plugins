@@ -16,16 +16,26 @@ from .helpers import append_jsonl
 logger = logging.getLogger(__name__)
 
 _AUDIT_MODES = frozenset({"redacted", "metadata", "off"})
+# A credential-bearing name: the keyword may be glued to a prefix
+# (PGPASSWORD, MYSQL_PWD, AWS_SECRET_ACCESS_KEY, DB_PASSWORD).
 _SENSITIVE_NAME = (
-    r"(?:[a-z0-9]+[_-])*"
-    r"(?:password|passwd|token|api[_-]?key|secret|authorization)"
+    r"[a-z0-9_-]*"
+    r"(?:password|passwd|passphrase|pwd|token|api[_-]?key|secret|authorization"
+    r"|private[_-]?key|access[_-]?key|credentials?)"
     r"(?:[_-][a-z0-9]+)*"
 )
 _SECRET_VALUE = r"""(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;&|]+)"""
+# ``user:secret`` pairs passed to -u/--user (curl, wget, httpie) and
+# password flags whose value follows the flag (sshpass -p, mysql -pSECRET).
+_USERPASS_FLAG = r"(?:-u|--user|--proxy-user|--http-user|--auth)"
 _AUDIT_PATTERNS = (
-    (re.compile(rf"(?i)\b({_SENSITIVE_NAME})(\s*=\s*)({_SECRET_VALUE})"), 3),
+    (re.compile(rf"(?i)(?<![\w-])({_SENSITIVE_NAME})(\s*=\s*)({_SECRET_VALUE})"), 3),
     (re.compile(rf"(?i)(--{_SENSITIVE_NAME}(?:=|\s+))({_SECRET_VALUE})"), 2),
-    (re.compile(r"(?i)(https?://[^:/\s]+:)([^@\s]+)(@)"), 2),
+    # userinfo runs to the LAST "@" before the host: passwords may contain "@"
+    (re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^:/@\s'\"]*:)([^\s'\"/]*)(@[^@/\s'\"]*)"), 2),
+    (re.compile(rf"(?<![\w-])({_USERPASS_FLAG}(?:=|\s+)['\"]?[^:\s'\"]+:)([^\s'\"]+)"), 2),
+    (re.compile(r"(\bsshpass\s+-p\s*)(" + _SECRET_VALUE + ")"), 2),
+    (re.compile(r"(\b(?:mysql|mysqldump|mariadb|mysqladmin)\b[^;&|]*?\s-p)([^\s;&|]+)"), 2),
     (
         re.compile(
             r"(?i)([\"']?(?:[a-z0-9]+[-_])*(?:authorization|api[-_]?key|token|secret)\s*:\s*)"

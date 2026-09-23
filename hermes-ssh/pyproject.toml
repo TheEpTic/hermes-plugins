@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-ssh"
-version = "0.4.10"
+version = "0.4.11"
 description = "SSH remote execution plugin for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["cryptography==50.0.0"]
+dependencies = ["cryptography==50.0.1"]
 authors = [
     { name = "TheEpTic", email = "nexus@eptic.me" },
 ]
@@ -36,8 +36,8 @@ Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-ssh/CHA
 [project.optional-dependencies]
 dev = [
     "black==26.5.1",
-    "mypy==2.3.0",
-    "pytest==9.0.3",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -58,10 +58,6 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["tests.*"]
-disallow_untyped_defs = false
-
-[[tool.mypy.overrides]]
 module = ["tools.*"]
 ignore_missing_imports = true
 
@@ -73,8 +69,6 @@ addopts = "-v --tb=short --strict-markers"
 pythonpath = ["src"]
 
 filterwarnings = [
-    "ignore::DeprecationWarning:paramiko.*",
-    "ignore::DeprecationWarning:asyncssh.*",
     "ignore::DeprecationWarning:_distutils_hack.*",
     "default::DeprecationWarning",
 ]

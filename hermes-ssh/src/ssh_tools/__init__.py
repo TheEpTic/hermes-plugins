@@ -76,7 +76,9 @@ _TOOLS = (
     ),
 )
 
-# Module-level manager — initialized in register()
+# Module-level manager — created by the first register(). It owns live SSH
+# sessions and the idle-checker thread, so a host unload + re-register reuses
+# it (sessions survive a plugin reload) instead of orphaning them.
 _manager: SSHManager | None = None
 
 
@@ -90,10 +92,10 @@ def _get_manager() -> SSHManager:
 def register(ctx: Any) -> None:
     """Register SSH tools with Hermes."""
     global _manager
-    if _manager is not None:
-        logger.debug("hermes-ssh: already registered, skipping")
-        return
-    _manager = SSHManager()
+    if _manager is None:
+        _manager = SSHManager()
+    else:
+        logger.debug("hermes-ssh: re-registering with the existing manager")
 
     for name, schema, handler_factory, description in _TOOLS:
         ctx.register_tool(

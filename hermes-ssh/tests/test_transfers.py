@@ -11,7 +11,13 @@ from unittest.mock import patch
 import pytest
 
 from ssh_tools.transfers import TransferRequest, TransferService, execute_transfer
-from ssh_tools.transfers.policy import prepare_upload_source, remote_path, remote_sensitive_reason
+from ssh_tools.transfers.policy import (
+    local_sensitive_reason,
+    prepare_download_destination,
+    prepare_upload_source,
+    remote_path,
+    remote_sensitive_reason,
+)
 from ssh_tools.transfers.transport import sftp_args, sftp_batch
 
 
@@ -375,3 +381,64 @@ def test_metadata_audit_omits_paths(tmp_path: Path) -> None:
     entry = json.loads((tmp_path / "command_log.jsonl").read_text())
     assert "source" not in entry and "destination" not in entry
     assert entry["source_sha256"] and entry["destination_sha256"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "~/.hermes",
+        "~/.hermes/.env",
+        "~/.hermes/auth.json",
+        "~/.hermes/config.yaml",
+        "~/.hermes/config.yaml.bak-1",
+        "~/.hermes/state.db",
+        "~/.hermes/sessions/s1.json",
+        "~/.hermes/pairing/x",
+        "~/.hermes/mcp-tokens/x",
+        "~/.hermes/skills/.hub/x",
+        "~/.hermes/profiles/work/.env",
+        "~/.hermes/profiles/work/memories/MEMORY.md",
+        "~/.hermes/cache/bws_cache.json",
+        "~/.hermes/cache/scratch/.env",
+        "~/.hermes/cache/scratch/proj/.hermes/config.yaml",
+    ],
+)
+def test_hermes_home_credentials_denied(path: str) -> None:
+    assert remote_sensitive_reason(path) is not None
+    assert local_sensitive_reason(Path(path.replace("~", "/home/u", 1))) is not None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "~/.hermes/cache/scratch/report.md",
+        "~/.hermes/cache/scratch/build/out.tar.gz",
+        "~/.hermes/images/chart.png",
+        "~/.hermes/audio_cache/tts.mp3",
+        "~/.hermes/browser_screenshots/page.png",
+        "~/.hermes/profiles/work/cache/scratch/x.txt",
+    ],
+)
+def test_hermes_working_trees_allowed(path: str) -> None:
+    assert remote_sensitive_reason(path) is None
+    assert local_sensitive_reason(Path(path.replace("~", "/home/u", 1))) is None
+
+
+def test_custom_hermes_home_is_held_to_the_same_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "agent-home"
+    (home / "cache" / "scratch").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert local_sensitive_reason(home / "state.db") == "credential directory"
+    assert local_sensitive_reason(home / "cache" / "scratch" / "out.txt") is None
+
+
+def test_upload_from_hermes_scratch_is_allowed(tmp_path: Path) -> None:
+    scratch = tmp_path / ".hermes" / "cache" / "scratch"
+    scratch.mkdir(parents=True)
+    report = scratch / "report.md"
+    report.write_text("ok", encoding="utf-8")
+    assert prepare_upload_source(str(report), False).path == report.resolve()
+    with pytest.raises(ValueError, match="credential"):
+        prepare_download_destination(str(tmp_path / ".hermes" / "config.yaml"))
