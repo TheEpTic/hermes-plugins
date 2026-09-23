@@ -72,6 +72,9 @@ def test_bracketed_ipv6_is_normalised_for_ssh_and_bracketed_for_sftp() -> None:
         "tool --api-key hunter2",
         "git clone https://tok:hunter2@github.com/x",
         "git clone https://user:p@hunter2@example.com/repo",
+        "redis://:hunter2@host:6379/0",
+        "redis://:p@hunter2@host:6379/0",
+        "postgresql://u:p@hunter2@host/db",
         "curl 'https://user:hunter2@example.com/x'",
     ],
 )
