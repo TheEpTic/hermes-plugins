@@ -13,7 +13,7 @@ jobs:
     name: validate release tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: validate package version
         shell: bash
         run: |
@@ -25,6 +25,11 @@ jobs:
             echo "tag version $version does not match hermes-sfw version $package_version" >&2
             exit 1
           }
+          manifest_version=$(python -c "import pathlib,re,sys; t=next(pathlib.Path(sys.argv[1], 'src').rglob('plugin.yaml')).read_text(); print(re.search(r'^version:\s*[\x22\x27]?([^\x22\x27\s]+)', t, re.M).group(1))" "hermes-sfw")
+          test "$version" = "$manifest_version" || {
+            echo "tag version $version does not match hermes-sfw plugin.yaml version $manifest_version" >&2
+            exit 1
+          }
 
   build:
     name: build hermes-sfw
@@ -34,13 +39,13 @@ jobs:
       run:
         working-directory: hermes-sfw
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
       - name: build distributions
         run: uv build --out-dir dist
       - name: verify distributions
         run: uvx twine check dist/*
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: hermes-sfw-dist
           path: hermes-sfw/dist/
@@ -54,7 +59,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: hermes-sfw-dist
           path: dist
