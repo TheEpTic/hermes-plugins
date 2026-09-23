@@ -40,7 +40,7 @@ jobs:
         working-directory: hermes-sfw
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: build distributions
         run: uv build --out-dir dist
       - name: verify distributions
