@@ -37,8 +37,11 @@ Then set `context.engine: jev` and `/reset`. `compressor` bypasses plugins;
 ## behavior
 
 Overrides only `_prune_old_tool_results` on the built-in compressor (the hot
-proactive path bypasses Jev — deterministic/no-LLM contract kept). Candidates
-are paired call+result units before the prune boundary; Jev scores two `noul`
-questions per unit against the fitted transcript; output must pass structural
-validity AND shrink ≥25% or the built-in prune runs instead. Counters
+proactive path `prune_tool_results_only` always takes the built-in prune —
+deterministic/no-LLM contract kept). Candidates are paired call+result units
+before the prune boundary; Jev scores two `noul` questions per unit against
+the fitted transcript; output must introduce no structural damage (the gate
+judges only Jev's own edits, so pre-existing transcript irregularities never
+void a pass) AND shrink ≥10% (`min_reduction_ratio`) or the built-in prune
+runs instead. Counters
 `jev_calls` / `jev_pruned_units` / `jev_fallbacks` on the compressor.

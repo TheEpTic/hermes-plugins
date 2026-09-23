@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.2.1] - Unreleased
+
+### Fixed
+
+- Validity gate scoped to Jev's own edits (#30). The gate validated the whole
+  output, so real transcripts that were already irregular (bookkeeping roles
+  such as `session_meta`, rewind replays reusing one `tool_call_id`, orphaned
+  replay results) failed it on pristine input and every scored pass fell back
+  to the built-in prune. The gate now rejects only violations Jev introduced:
+  surviving rows keep their order and identity, irregular rows (unknown
+  roles, duplicate or orphaned ids) are never touched, and every Jev-owned
+  call/result pair is either kept intact or removed together.
+- Adjacent assistant rows created by removals are merged. Dropping a
+  call/result pair between two assistant turns left consecutive assistant
+  rows, which strict-alternation providers reject. Only adjacency Jev created
+  is folded (content joined with a newline, tool calls concatenated,
+  `reasoning_content` carried, `api_content` and the persisted marker
+  dropped); pre-existing adjacency is left to the host repair, and Codex
+  interim rows / incomplete finishes are never merged.
+- Proactive tool-result pruning no longer calls Jev. The host's
+  `prune_tool_results_only` dispatches through `_prune_old_tool_results`,
+  which is Jev's network seam, so enabling `proactive_prune_tokens` sent
+  scoring requests on the per-turn path documented as deterministic and
+  network-free. The proactive path now always takes the built-in prune.
+
+### Tests
+
+- Dev dependencies: mypy 2.3.1, pytest 9.1.1. Dropped the unused
+  `tests.*` mypy override (mypy only checks `src`).
+- Real-transcript fixtures (irregular rows, replayed ids, created
+  adjacency) and a proactive no-network test; each fails when its fix is
+  reverted.
+- CI job `jev-host-contract` runs the suite against current
+  `NousResearch/hermes-agent` main and fails if any test is skipped. The
+  matrix job skips the 48 host-dependent tests because the host is not
+  installed there.
+
 ## [0.2.0] - 2026-09-20
 
 ### Added
@@ -44,8 +81,8 @@
   - Cancellation consulted after hygiene, before commit.
   - New `jev_hygiene_units` counter: return count is
     `jev_pruned_units + jev_hygiene_units`.
-  - Stale Unreleased notes below (25% rule, demote-after-Jev) marked as
-    superseded history — see the entries above.
+  - Superseded 0.1.0 notes (25% rule, demote-after-Jev) marked as
+    history — see the entries above.
 
 ## [0.1.3] - 2026-09-18
 
@@ -83,9 +120,23 @@
   Public IPs, DNS names, link-local 169.254/16 (cloud metadata), and
   unspecified addresses still require HTTPS.
 
-## [Unreleased]
+## [0.1.0] - 2026-09-18
 
-### Fixed
+### Added
+
+- Initial release: `JevContextCompressor(ContextCompressor)` engine `jev`.
+- Single-seam override of `_prune_old_tool_results`: Jev keep/drop scoring
+  via `/v1/systemone`, validity-checked, with built-in fallback on every
+  failure mode (transport, validation, timeout, cancel, missing key).
+- Port of fast-jev-compaction state shaping (estimator, fit stages,
+  questions, decisions, batching) with parity tests.
+- ~~Deterministic demote still runs after a Jev pass
+  (dedup/args/images/stubs).~~
+  SUPERSEDED — only the NON-demotion passes (dedup, arg truncation, image
+  retire) run after a Jev pass; demote/pressure would munge Jev's keeps.
+  See the 0.2.0 entry.
+
+### Fixed (pre-release bug hunt, shipped in 0.1.0)
 
 - Bug-hunt wave (5 review agents, all findings verified before fixing):
   - UTF-16-unit parity in the estimator/truncate/abridge — emoji-heavy text
@@ -95,7 +146,7 @@
   - ~~25% minimum-reduction rule enforced in-engine (TS `reductionRatio`):
     low-value Jev passes fall back to the deterministic prune.~~
     SUPERSEDED — now the `min_reduction_ratio` knob, default 0.10; see the
-    current Unreleased section above.
+    0.2.0 entry.
   - Duplicate tool-result ids skip scoring (was: last-row-wins collapse
     while pruning every row sharing the id).
   - Out-of-order pairs (result before its call) are never candidates; the
@@ -115,7 +166,7 @@
     clamped to [0,1]; question-token cache bounded (4096 entries, tuple
     keys); `register()` latches only after success.
 
-### Changed
+### Changed (pre-release, shipped in 0.1.0)
 
 - Generic System One endpoint: settings are now `base_url` / `api_key_env`
   (defaults `https://api.typesafe.ai/v1` / `TYPESAFE_API_KEY`) and `jev_model`
@@ -125,19 +176,3 @@
   migration).
 - Transport hardening: redirects refused, response bodies capped at 1 MiB,
   upstream error bodies no longer echoed into logs.
-
-## [0.1.0] - 2026-09-18
-
-### Added
-
-- Initial release: `JevContextCompressor(ContextCompressor)` engine `jev`.
-- Single-seam override of `_prune_old_tool_results`: Jev keep/drop scoring
-  via `/v1/systemone`, validity-checked, with built-in fallback on every
-  failure mode (transport, validation, timeout, cancel, missing key).
-- Port of fast-jev-compaction state shaping (estimator, fit stages,
-  questions, decisions, batching) with parity tests.
-- ~~Deterministic demote still runs after a Jev pass
-  (dedup/args/images/stubs).~~
-  SUPERSEDED — only the NON-demotion passes (dedup, arg truncation, image
-  retire) run after a Jev pass; demote/pressure would munge Jev's keeps.
-  See the current Unreleased section above.

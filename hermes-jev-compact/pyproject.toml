@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-jev-compact"
-version = "0.2.0"
+version = "0.2.1"
 description = "Jev-powered smart tool-prune context engine for Hermes Agent (any OpenAI-style System One endpoint)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,8 +35,8 @@ Changelog = "https://github.com/TheEpTic/hermes-plugins/blob/main/hermes-jev-com
 [project.optional-dependencies]
 dev = [
     "black==26.5.1",
-    "mypy==2.3.0",
-    "pytest==9.0.3",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,10 +59,6 @@ disallow_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["agent.*"]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = ["tests.*"]
-disallow_untyped_defs = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

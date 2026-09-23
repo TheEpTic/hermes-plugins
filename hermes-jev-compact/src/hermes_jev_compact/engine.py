@@ -175,7 +175,11 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             fresh.__init__(model, **base_kwargs)  # type: ignore[misc]
         except Exception:
             for key, value in self.__dict__.items():
-                if key.startswith("_compression_cancelled") or key in {"_session_db", "api_key"}:
+                if key.startswith("_compression_cancelled") or key in {
+                    "_session_db",
+                    "api_key",
+                    "_jev_bypass_depth",
+                }:
                     continue
                 try:
                     fresh.__dict__[key] = copy.deepcopy(value, memo)
@@ -387,7 +391,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                     d.keep_result,
                     d.action,
                 )
-        if pruned_units == 0 or applied == messages or (not _valid_openai_sequence(applied)):
+        if pruned_units == 0 or applied == messages or (not _commit_valid(messages, applied)):
             if applied != messages and pruned_units:
                 logger.warning("jev output failed validity; built-in prune")
             return self._fallback()
@@ -406,7 +410,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         hygiene = self._nondemotion_hygiene(applied, protect_tail_count, protect_tail_tokens)
         if self._cancelled():
             return self._fallback("jev prune cancelled during hygiene; built-in prune")
-        if not _valid_openai_sequence(applied):
+        if not _commit_valid(messages, applied):
             logger.warning("jev post-hygiene output failed validity; built-in prune")
             return self._fallback()
         self.jev_calls += len(batches)
@@ -432,8 +436,16 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
     def prune_tool_results_only(
         self, messages: list[dict[str, Any]], current_tokens: int | None = None
     ) -> tuple[list[dict[str, Any]], int]:
-        out, n = super().prune_tool_results_only(messages, current_tokens=current_tokens)
-        return (list(out), int(n))
+        # The host's proactive prune dispatches into self._prune_old_tool_results,
+        # which is the jev seam. Flag the call so that seam runs the base passes:
+        # this path is documented deterministic/no-LLM and runs on the hot
+        # post-tool path, so it must never read the key or touch the network.
+        self._jev_bypass_depth = getattr(self, "_jev_bypass_depth", 0) + 1
+        try:
+            out, n = super().prune_tool_results_only(messages, current_tokens=current_tokens)
+        finally:
+            self._jev_bypass_depth -= 1
+        return (out, int(n))
 
     def _prune_old_tool_results(
         self,
@@ -442,6 +454,11 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         protect_tail_tokens: int | None = None,
         min_prune_chars: int = 200,
     ) -> tuple[list[dict[str, Any]], int]:
+        if getattr(self, "_jev_bypass_depth", 0) > 0:
+            base_out, base_n = super()._prune_old_tool_results(
+                messages, protect_tail_count, protect_tail_tokens, min_prune_chars
+            )
+            return (list(base_out), int(base_n))
         try:
             applied, count = self._jev_prune(
                 messages, protect_tail_count, protect_tail_tokens, min_prune_chars
@@ -458,44 +475,85 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         return (list(out), int(n))
 
 
-def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
-    """Bidirectional structural check: every tool row has its call id present
-    AND every assistant tool call keeps its result row (no orphans either way).
-    Also rejects duplicate tool rows for one call id, malformed ids, malformed
-    assistant tool-call rows (host shape: id/type/function.name/arguments),
-    duplicate assistant call ids (ambiguous address — jev output must never
-    create them), out-of-order pairs (tool row before its call), and malformed
-    top-level rows (non-dict, missing/unknown role)."""
-    call_rows: dict[str, int] = {}
+_NO_ID = "\x00no-id"
+
+
+def _pair_index(
+    messages: list[Any],
+) -> tuple[dict[str, list[tuple[int, bool]]], dict[str, list[int]]]:
+    """call id -> [(row, well_formed)], result id -> [row]. Unaddressable
+    calls/results bucket under one sentinel key so their counts still pin."""
+    calls: dict[str, list[tuple[int, bool]]] = {}
+    results: dict[str, list[int]] = {}
     for index, msg in enumerate(messages):
         if not isinstance(msg, dict):
-            return False
+            continue
         role = msg.get("role")
-        if not isinstance(role, str) or role not in {"system", "user", "assistant", "tool"}:
-            return False
-        if role != "assistant":
-            continue
-        tcs = msg.get("tool_calls")
-        if tcs is None:
-            continue
-        if not isinstance(tcs, list):
-            return False
-        for tc in tcs:
-            if not is_well_formed_tool_call(tc):
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list):
+            for tc in msg["tool_calls"]:
+                cid = tc.get("id") if isinstance(tc, dict) else None
+                key = cid if isinstance(cid, str) and cid else _NO_ID
+                calls.setdefault(key, []).append((index, is_well_formed_tool_call(tc)))
+        elif role == "tool":
+            cid = msg.get("tool_call_id")
+            key = cid if isinstance(cid, str) and cid else _NO_ID
+            results.setdefault(key, []).append(index)
+    return calls, results
+
+
+def _adjacent_assistants(messages: list[Any]) -> int:
+    return sum(
+        1
+        for prev, cur in zip(messages, messages[1:])
+        if isinstance(prev, dict)
+        and isinstance(cur, dict)
+        and prev.get("role") == "assistant"
+        and cur.get("role") == "assistant"
+    )
+
+
+def _other_rows(messages: list[Any]) -> list[int]:
+    return [
+        id(m)
+        for m in messages
+        if not isinstance(m, dict) or m.get("role") not in {"assistant", "tool"}
+    ]
+
+
+def _commit_valid(before: list[Any], after: list[Any]) -> bool:
+    """True when ``after`` introduces no structural damage relative to ``before``.
+
+    Real transcripts arrive with irregularities jev never touches (bookkeeping
+    roles, rewind/retry replays sharing a call id, orphaned artifacts). Those
+    are skipped at candidate time and are the host repair's job, so judging
+    the whole output with the strict checker discarded every scored pass on
+    such input. This gate scopes the check to what jev (and the post-jev
+    hygiene) can change:
+
+    - rows other than assistant/tool keep identity and order (never removed,
+      never rewritten);
+    - no call or result id appears that the input did not have;
+    - a pair that was valid in the input is either gone entirely (drop_call)
+      or still valid: one well-formed call, one result, result after call;
+    - every irregular id keeps its exact call/result counts;
+    - no new adjacent assistant rows (strict role alternation).
+    """
+    if _other_rows(before) != _other_rows(after):
+        return False
+    b_calls, b_results = _pair_index(before)
+    a_calls, a_results = _pair_index(after)
+    if not (set(a_calls) | set(a_results)) <= (set(b_calls) | set(b_results)):
+        return False
+    for cid in set(b_calls) | set(b_results):
+        bc, br = b_calls.get(cid, []), b_results.get(cid, [])
+        ac, ar = a_calls.get(cid, []), a_results.get(cid, [])
+        was_pair = cid != _NO_ID and len(bc) == 1 and len(br) == 1 and bc[0][1] and br[0] > bc[0][0]
+        if not was_pair:
+            if len(ac) != len(bc) or len(ar) != len(br):
                 return False
-            if tc["id"] in call_rows:
-                return False
-            call_rows[tc["id"]] = index
-    seen_results: set[str] = set()
-    for index, msg in enumerate(messages):
-        if not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
-        cid = msg.get("tool_call_id")
-        if not isinstance(cid, str) or not cid or cid not in call_rows:
+        if not ac and not ar:
+            continue
+        if len(ac) != 1 or len(ar) != 1 or not ac[0][1] or ar[0] <= ac[0][0]:
             return False
-        if cid in seen_results:
-            return False
-        if index <= call_rows[cid]:
-            return False
-        seen_results.add(cid)
-    return set(call_rows) <= seen_results
+    return _adjacent_assistants(after) <= _adjacent_assistants(before)

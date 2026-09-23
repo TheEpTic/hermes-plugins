@@ -20,7 +20,7 @@ from tests.conftest import (
 
 pytestmark = needs_hermes
 from hermes_jev_compact.protocol import JevError
-from hermes_jev_compact.engine import _valid_openai_sequence
+from tests.conftest import _valid_openai_sequence  # noqa: E402
 import hermes_jev_compact.engine as eng_mod
 
 if not HERMES_IMPORTABLE:
@@ -178,9 +178,7 @@ def test_jev_pruning_scenarios(
         )
     ]
     if invalid_output:
-        patches.append(
-            patch("hermes_jev_compact.engine._valid_openai_sequence", return_value=False)
-        )
+        patches.append(patch("hermes_jev_compact.engine._commit_valid", return_value=False))
     with patches[0], patches[1] if invalid_output else contextlib.nullcontext():
         out, count = eng._prune_old_tool_results(messages, 1, None, 200)
     if invalid_output or low_reduction:
