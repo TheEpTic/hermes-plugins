@@ -1,5 +1,5 @@
 name: hermes-ssh
-version: 0.4.11
+version: 0.4.12
 description: "SSH remote operations — run commands and transfer files on registered machines. Requires OpenSSH clients (ssh and sftp)."
 author: TheEpTic
 kind: standalone
@@ -9,7 +9,7 @@ provides_tools:
   - ssh_machines
   - ssh_sessions
 python_dependencies:
-  - cryptography==50.0.1
+  - cryptography>=50.0.0,<51
 platforms:
   - linux
   - macos

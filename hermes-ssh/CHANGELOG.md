@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.4.12] - 2026-09-23
+
+### Fixed
+- Runtime dependency is now `cryptography>=50.0.0,<51` instead of an exact pin. 0.4.11 required `==50.0.1`, which conflicts with Hermes Agent's own `cryptography==50.0.0` pin and left installs with a broken `pip check`. The floor still excludes the vulnerable pre-50 releases.
+
 ## [0.4.11] - 2026-09-23
 
 ### Security
