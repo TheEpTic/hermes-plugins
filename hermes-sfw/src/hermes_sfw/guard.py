@@ -53,7 +53,8 @@ _HINT = re.compile(
     r"(?:(?<![\w.-])|(?<=\s-[A-Za-z]m)|(?<=\s-m)|(?<=\s-[A-Za-z]{2}m))"
     r"(?:cargo|npm|npx|pnpm|pnpx|uvx?|yarn|pip(?:\d+(?:\.\d+)*)?)(?![\w-])"
 )
-_PYTHON = re.compile(r"python\d*(?:\.\d+)?")
+# CPython, the Windows/Unix ``py`` launcher, and PyPy all take ``-m pip``.
+_PYTHON = re.compile(r"(?:python|pypy)\d*(?:\.\d+)?|py")
 _PYTHON_VALUE_FLAGS = frozenset("WXmc")  # CPython short options that take a value
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]*\])?\+?=")
 _OPERATORS = ";|&(){}!"

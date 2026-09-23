@@ -107,6 +107,8 @@ The model does not need to notice a block or issue a second tool call. A manager
 
 Forms the hook cannot rewrite faithfully are blocked before raw execution when they name a manager: opaque wrappers (`sudo`, `doas`, `xargs`, `eval`, `find -exec`, `taskset`, ...), aliases naming a manager, path-qualified managers, dynamic command words (`$PM install`), backtick or double-quoted `$(...)` substitutions, heredocs and here-strings, shells reading commands from stdin (`... | bash`), payloads that are not one plain quoted string, and malformed commands. Commands that never name a manager are untouched, so a `python - <<'EOF'` script or a backtick inside a quoted commit message runs normally.
 
+Direct enforcement covers the managers sfw supports (npm, yarn, pnpm, pip, uv, cargo and their runners); `pipx`, `poetry`, and `bun` are outside sfw's support and are not routed. `python -m ensurepip` installs pip from the wheel bundled with Python and does not touch a registry.
+
 The hook reads the command text only. A manager invoked from inside a file (`./install.sh`, `source setup.sh`, `cat install.sh | sh`, a Makefile target, an npm script) is not visible to it and runs unwrapped; blocking every script or `source` would also block `source .venv/bin/activate`.
 
 A routed command that fails because the sfw launcher cannot start its own engine is annotated with the local cause and its repair, so a blocked `cargo build` is not just sfw's one-line error — see [troubleshooting](#troubleshooting).
