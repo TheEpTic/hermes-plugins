@@ -8,12 +8,9 @@ bootstrap_failure_note, run_command. Logic lives in the focused modules.
 from __future__ import annotations
 
 import shlex
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
-from .guard import contains_package_manager_command
 from .diagnose import diagnose as _diagnose
 from .models import SFWBinaryInfo, SFWCacheFault, SFWConfig, SFWDiagnosis, SFWResult
 from .output import parse_output as _parse_output
@@ -25,12 +22,9 @@ from .resolve import (
     find_sfw,
     is_bootstrap_failure,
     known_candidates,
+    query_version,
 )
-from .validate import (
-    is_dependency_operation,
-    validate_command,
-    validate_workdir,
-)
+from .validate import validate_command, validate_workdir
 
 __all__ = [
     "SFWBinaryInfo",
@@ -39,12 +33,7 @@ __all__ = [
     "SFWDiagnosis",
     "SFWManager",
     "SFWResult",
-    "contains_package_manager_command",
-    "is_dependency_operation",
 ]
-
-# Re-exported for the terminal guard.
-_ = (contains_package_manager_command, is_dependency_operation)
 
 
 class SFWManager:
@@ -98,20 +87,8 @@ class SFWManager:
         if not sfw_path:
             return {"version": None, "binary": None, "binary_kind": None, "target": None}
         info = classify_binary(sfw_path)
-        try:
-            proc = subprocess.run(
-                [sfw_path, "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=10,
-            )
-            stdout = proc.stdout.decode("utf-8", errors="replace").strip()
-            stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-            version: str | None = stdout or stderr or None
-        except (subprocess.TimeoutExpired, OSError):
-            version = None
         return {
-            "version": version,
+            "version": query_version(sfw_path),
             "binary": info.binary,
             "binary_kind": info.binary_kind,
             "target": info.target,
@@ -119,7 +96,7 @@ class SFWManager:
 
     def diagnose(self) -> SFWDiagnosis:
         """Self-diagnose the sfw install: PATH, known locations, override."""
-        return _diagnose(self._config.sfw_bin, self._known_candidates(), self.get_version)
+        return _diagnose(self._config.sfw_bin, self._known_candidates(), query_version)
 
     def run_command(
         self,

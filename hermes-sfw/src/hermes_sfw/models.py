@@ -13,6 +13,14 @@ class SFWConfig:
     sfw_bin: str = "sfw"
     timeout: int = 300
 
+    def __post_init__(self) -> None:
+        bad_bin = not isinstance(self.sfw_bin, str) or not self.sfw_bin.strip()
+        if bad_bin:
+            raise ValueError("sfw_bin must be a non-empty string")
+        bad_timeout = isinstance(self.timeout, bool) or not isinstance(self.timeout, int)
+        if bad_timeout or self.timeout <= 0:
+            raise ValueError(f"timeout must be a positive integer (seconds), got {self.timeout!r}")
+
 
 @dataclass
 class SFWResult:

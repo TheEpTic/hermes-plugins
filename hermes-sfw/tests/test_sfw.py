@@ -237,10 +237,22 @@ def test_timeout_and_process_group_kill(tmp_path: Path) -> None:
     assert leftover.returncode != 0 or "sleep 100" not in leftover.stdout
 
 
-def test_oserror_on_directory_binary(tmp_path: Path) -> None:
-    sfw_bin = tmp_path / "sfw"
-    sfw_bin.mkdir()
-    result = _mgr(sfw_bin).run_command("npm install express")
+def test_directory_or_non_executable_override_is_not_installed(tmp_path: Path) -> None:
+    as_dir = tmp_path / "sfw"
+    as_dir.mkdir()
+    not_exec = tmp_path / "sfw-noexec"
+    not_exec.write_text("#!/bin/sh\n", encoding="utf-8")
+    for override in (as_dir, not_exec):
+        mgr = _mgr(override)
+        assert mgr.sfw_path is None and mgr.is_installed() is False
+        result = mgr.run_command("npm install express")
+        assert result.success is False and "not installed" in result.stderr
+
+
+def test_oserror_from_exec_is_sanitized(tmp_path: Path) -> None:
+    from hermes_sfw.output import run_sfw
+
+    result = run_sfw([str(tmp_path)], "npm install express", 5, None)
     assert result.success is False and result.exit_code == -1
 
 

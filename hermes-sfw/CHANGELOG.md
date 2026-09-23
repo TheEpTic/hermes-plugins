@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.16] - Unreleased
+
+### Security
+- **Terminal guard bypasses closed.** Package-manager commands ran raw, without sfw, behind `NAME=value` assignments (`FOO=1 pip install x`, `env FOO=1 pip ...`), `eval`, `stdbuf`/`ionice`/`exec -a`, quoted or split names (`'pip'`, `"pip"`, `p''ip`), versioned `pip3.13`, `python -I -m pip`, a `#` comment hiding a quote, and payloads mixing quotes. Every one is now routed or blocked; an execution test under real bash proves each routed form reaches the manager only through sfw.
+- **`bash -c`/`sh -c` rewrites no longer break argv.** The old rewrite inserted sfw between `-c` and the payload (`sh -c /sfw 'pip ...'`), so sfw ran with an empty command. Payloads are now rewritten in place (`sh -c '/sfw pip ...'`); payloads that are not one plain quoted string are blocked.
+- Dynamic command words (`$PM install`), double-quoted `$(...)`, shells reading stdin (`... | bash`), here-strings, and more opaque wrappers (`find -exec`, `taskset`, `flock`, `systemd-run`, `busybox`, ...) now block when a manager is named.
+
+### Fixed
+- **Heredoc and backtick false positives.** Any heredoc in a command mentioning `python`, or a backtick inside a quoted string (`printf "see \`x\`"`), was blocked. Heredocs and substitutions now block only when the command names a package manager.
+- **Plugin re-registration.** `register()` returned early once a module-level manager existed, so a host `discover(force=True)` unload left the sfw tool and hooks unregistered. Each call now registers fresh.
+- `contains_package_manager_command()` now agrees with the guard (it previously reported `command -v pip` as a manager call).
+- `SFWConfig` validates `sfw_bin` and `timeout` (zero, negative, or non-integer values used to fail at run time).
+- An `sfw_bin` override must be an executable file; a directory no longer reports as installed.
+- `--version` failures (non-zero exit) are no longer reported as a version, and `diagnose` queries the binary it reports on instead of the resolved default.
+- The launcher repair command is shell-quoted, so paths with spaces produce a runnable `ln -sfn`.
+- `plugin.yaml` version was stale (0.2.13 while the package shipped 0.2.15); a test now pins it to the package version.
+
+### Changed
+- One guard scanner: the separate `contains_package_manager_command` tokenizer and its manager tables were removed, as were the dead `_rewrite_dependency_operation` helper and unused manager re-exports.
+- Docs: README, SECURITY.md, and llms.txt describe what the terminal guard actually routes (including `npx`/`uvx`) versus what the sfw tool accepts; the architecture tree and config location are current.
+- Dev dependencies: mypy 2.3.1, pytest 9.1.1; removed the unused `tests.*` mypy override.
+
 ## [0.2.15] - 2026-09-18
 
 ### Fixed
