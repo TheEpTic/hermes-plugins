@@ -4,17 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 from importlib.metadata import PackageNotFoundError, version as distribution_version
 from typing import Any
 
 from .guard import plan_terminal_guard
 from .handlers import handle_sfw
-from .manager import (
-    SFWManager,
-    contains_package_manager_command,
-    is_dependency_operation,
-)
+from .manager import SFWManager
 from .schemas import SFW_TOOL_SCHEMA
 
 try:
@@ -26,6 +21,19 @@ __all__ = ["register"]
 logger = logging.getLogger(__name__)
 
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+# The manager the terminal hooks consult. ``register`` replaces it on every
+# call, so a host that unloads and re-registers plugins (``discover(force=True)``)
+# gets fresh registrations instead of a stale one-shot latch. SFWManager holds
+# only immutable config; binary discovery runs on demand.
+_manager: SFWManager | None = None
+
+
+def _current_manager() -> SFWManager:
+    global _manager
+    if _manager is None:
+        _manager = SFWManager()
+    return _manager
 
 
 def _direct_terminal_block_message(
@@ -42,34 +50,6 @@ def _direct_terminal_block_message(
     )
 
 
-def _rewrite_dependency_operation(command: str) -> dict[str, Any]:
-    sfw_path = _resolved_sfw_path()
-    if sfw_path is None:
-        return {
-            "action": "block",
-            "message": _direct_terminal_block_message(
-                command,
-                sfw_path,
-                "the sfw binary is unavailable",
-            ),
-        }
-    try:
-        tokens = shlex.split(command)
-    except ValueError as exc:  # defensive: validation already parses it
-        return {
-            "action": "block",
-            "message": _direct_terminal_block_message(
-                command,
-                sfw_path,
-                f"the command could not be parsed: {exc}",
-            ),
-        }
-    return {
-        "action": "modify",
-        "args": {"command": shlex.join([sfw_path, *tokens])},
-    }
-
-
 def _guard_direct_dependency_operation(
     tool_name: str, args: dict[str, Any], **kwargs: Any
 ) -> dict[str, Any] | None:
@@ -82,28 +62,17 @@ def _guard_direct_dependency_operation(
     if not isinstance(command, str):
         return None
 
-    plan = plan_terminal_guard(command, _resolved_sfw_path())
+    sfw_path = _current_manager().sfw_path
+    plan = plan_terminal_guard(command, sfw_path)
     if plan.action == "modify":
-        assert plan.command is not None
         return {"action": "modify", "args": {"command": plan.command}}
     if plan.action == "block":
+        reason = plan.reason or "the command could not be routed safely"
         return {
             "action": "block",
-            "message": _direct_terminal_block_message(
-                command,
-                _resolved_sfw_path(),
-                plan.reason or "the command could not be routed safely",
-            ),
+            "message": _direct_terminal_block_message(command, sfw_path, reason),
         }
     return None
-
-
-def _resolved_sfw_path() -> str | None:
-    """Return the resolved sfw binary path for PATH-independent invocation."""
-    global _manager
-    if _manager is None:
-        _manager = SFWManager()
-    return _manager.sfw_path
 
 
 def _annotate_sfw_bootstrap_failure(
@@ -121,23 +90,17 @@ def _annotate_sfw_bootstrap_failure(
     The ``transform_terminal_output`` hook adds both; any other output is
     returned untouched.
     """
-    if not isinstance(output, str) or _manager is None:
+    if not isinstance(output, str):
         return None
-    note = _manager.bootstrap_failure_note(output)
+    note = _current_manager().bootstrap_failure_note(output)
     if note is None:
         return None
     return f"{output}\n\n{note}"
 
 
-_manager: SFWManager | None = None
-
-
 def register(ctx: Any) -> None:
-    """Register tools with Hermes."""
+    """Register the sfw tool and terminal hooks with Hermes."""
     global _manager
-    if _manager is not None:
-        logger.debug("hermes-sfw: already registered, skipping")
-        return
     _manager = SFWManager()
 
     ctx.register_tool(

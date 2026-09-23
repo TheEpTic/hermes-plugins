@@ -79,7 +79,7 @@ sfw action=run command="pnpm add -D vitest" verbose=true
 sfw action=run command="npm install" workdir="/path/to/project"
 ```
 
-**Supported package managers:** npm, yarn, and pnpm for JavaScript/TypeScript; pip, pip3, and uv for Python; cargo for Rust. Direct terminal enforcement routes ordinary manager commands — including `cargo test`, `cargo clippy`, `pnpm test`, `npm run build`, and version checks — through sfw. `npx`, runner commands, opaque wrappers, path-qualified managers, command substitutions, and heredocs remain fail-closed when the hook cannot route them without changing shell semantics.
+**Supported package managers:** npm, yarn, and pnpm for JavaScript/TypeScript; pip, pip3, and uv for Python; cargo for Rust. The `sfw` tool accepts dependency operations only; `npx` and runner subcommands are rejected there. Direct terminal enforcement is broader: it routes every reachable manager command — including `cargo test`, `pnpm test`, `npm run build`, version checks, and runners such as `npx`/`pnpx`/`uvx` — through sfw, and blocks the forms it cannot rewrite faithfully (see below).
 
 **Blocked packages:** When sfw detects a malicious package, the install is blocked and the package name is returned in the response. Blocked and installed indicators are parsed from sfw output and returned as `blocked` and `installed` lists in the result, alongside `success`, `command`, `exit_code`, `stdout`, and `stderr`:
 
@@ -103,7 +103,13 @@ terminal command: npm install express
 executed command: /home/user/.local/share/pnpm/bin/sfw npm install express
 ```
 
-The model does not need to notice a block or issue a second tool call. Opaque-wrapper calls (`sudo`, `doas`, `xargs`), path-qualified managers, command substitutions, heredocs, malformed commands, and other forms the hook cannot rewrite without changing semantics are blocked before raw execution. Non-package-manager terminal commands are unaffected.
+The model does not need to notice a block or issue a second tool call. A manager is found wherever the shell would run it: after `NAME=value` assignments and redirections, behind transparent wrappers (`env`, `timeout`, `nice`, `ionice`, `stdbuf`, `nohup`, `setsid`, `time`, `exec`, `command`), as `python -m pip` (any CPython option form: `-mpip`, `-Im pip`, `-W ignore -m pip`) or `python -c` code naming a manager, or a versioned `pip3.12`, with quoted or escaped names (`'pip'`, `\pip`), and inside `bash -c '...'`/`env -S '...'` payloads, which are rewritten in place.
+
+Forms the hook cannot rewrite faithfully are blocked before raw execution when they name a manager: opaque wrappers (`sudo`, `doas`, `xargs`, `eval`, `find -exec`, `taskset`, ...), aliases naming a manager, path-qualified managers, dynamic command words (`$PM install`), backtick or double-quoted `$(...)` substitutions, heredocs and here-strings, shells reading commands from stdin (`... | bash`), payloads that are not one plain quoted string, and malformed commands. Commands that never name a manager are untouched, so a `python - <<'EOF'` script or a backtick inside a quoted commit message runs normally.
+
+Direct enforcement covers the managers sfw supports (npm, yarn, pnpm, pip, uv, cargo and their runners); `pipx`, `poetry`, and `bun` are outside sfw's support and are not routed. `python -m ensurepip` installs pip from the wheel bundled with Python and does not touch a registry.
+
+The hook reads the command text only. A manager invoked from inside a file (`./install.sh`, `source setup.sh`, `cat install.sh | sh`, a Makefile target, an npm script) is not visible to it and runs unwrapped; blocking every script or `source` would also block `source .venv/bin/activate`.
 
 A routed command that fails because the sfw launcher cannot start its own engine is annotated with the local cause and its repair, so a blocked `cargo build` is not just sfw's one-line error — see [troubleshooting](#troubleshooting).
 
@@ -147,11 +153,11 @@ The sfw binary is located on demand for every call rather than cached, so an ins
 
 ## configuration
 
-All settings live in `src/hermes_sfw/manager.py` as an `SFWConfig` dataclass:
+All settings live in `src/hermes_sfw/models.py` as an `SFWConfig` dataclass. Invalid values (an empty `sfw_bin`, a non-positive or non-integer `timeout`) raise `ValueError` at construction:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `sfw_bin` | `sfw` | Path to the sfw binary (a concrete path bypasses PATH and shim discovery) |
+| `sfw_bin` | `sfw` | Path to the sfw binary (a concrete path bypasses PATH and shim discovery; it must be an executable file) |
 | `timeout` | 300s | Max seconds per command |
 
 ## architecture
@@ -159,9 +165,17 @@ All settings live in `src/hermes_sfw/manager.py` as an `SFWConfig` dataclass:
 ```
 src/hermes_sfw/
 ├── __init__.py          # Plugin registration + Hermes hooks
-├── manager.py           # SFWManager — command execution + output parsing
+├── guard.py             # Terminal guard: route / block / pass per command
+├── manager.py           # SFWManager — thin facade over the modules below
+├── validate.py          # sfw tool command + workdir validation
+├── resolve.py           # Binary discovery, launcher cache faults, version query
+├── diagnose.py          # action=status self-diagnosis
+├── output.py            # Subprocess execution + output parsing
+├── approval.py          # Hermes dangerous-command approval bridge
+├── models.py            # SFWConfig, SFWResult, diagnosis models
 ├── schemas.py           # Tool schema (what the LLM sees)
 ├── utils.py             # ok(), err(), require() helpers
+├── plugin.yaml          # Hermes plugin manifest
 ├── py.typed             # PEP 561 marker
 └── handlers/
     ├── __init__.py
@@ -170,7 +184,7 @@ src/hermes_sfw/
 
 **Key design decisions:**
 
-- `SFWManager` owns all state. No module-level mutable state.
+- `SFWManager` holds immutable config only; binary discovery runs on demand. The terminal hooks read one module-level manager that `register()` replaces on every call, so a host unload + re-register gets fresh registrations.
 - Command prefix allowlist prevents arbitrary command execution through sfw.
 - `shlex.split()` parsing with error handling catches malformed commands early.
 - Output sanitization truncates long outputs to prevent context overflow.

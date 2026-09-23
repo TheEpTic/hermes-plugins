@@ -31,6 +31,7 @@ def manager(tmp_path: Path) -> SFWManager:
     sfw_bin.write_text(
         "#!/bin/bash\n"
         "# Fake sfw: strip --verbose flag and pass rest to real command\n"
+        'if [[ "$1" == "--version" ]]; then echo "Socket Firewall Free, version 0.0.0-test"; exit 0; fi\n'
         'args=("$@")\n'
         "real_args=()\n"
         'for arg in "${args[@]}"; do\n'

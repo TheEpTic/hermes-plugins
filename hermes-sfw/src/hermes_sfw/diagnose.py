@@ -6,7 +6,6 @@ import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 from .models import SFWDiagnosis
 from .resolve import classify_binary, resolve_shim_target
@@ -91,7 +90,7 @@ def diagnose_candidate(
 def diagnose(
     sfw_bin: str,
     candidates: list[Path],
-    get_version: Callable[[], Any],
+    version_of: Callable[[str], str | None],
 ) -> SFWDiagnosis:
     """Self-diagnose the sfw install.
 
@@ -106,12 +105,11 @@ def diagnose(
         human-readable ``why``, the list of ``checked`` locations and any
         discovery ``errors``.
     """
-    version_fn = get_version
     checked: list[str] = []
     errors: list[str] = []
 
     def binary_at(binary: str, failure_reason: str) -> SFWDiagnosis:
-        version = version_fn()
+        version = version_of(binary)
         info = classify_binary(binary)
         return _build_diagnosis(
             healthy=version is not None,

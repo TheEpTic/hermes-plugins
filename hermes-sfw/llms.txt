@@ -35,9 +35,9 @@ Accepted ecosystems:
 - Python: pip, pip3, uv
 - Rust: cargo
 
-`npx`, `rustup`, runner subcommands, arbitrary shell commands, and hidden runner forms are rejected.
+The sfw tool rejects `npx`, `rustup`, runner subcommands, arbitrary shell commands, and hidden runner forms.
 
-The plugin's pre-tool hook transparently rewrites supported dependency operations sent through Hermes `terminal` to the resolved `sfw` binary. Unsupported package-manager forms, shell-prefixed commands, malformed commands, and manager paths are blocked before raw execution. Set `HERMES_SFW_ENFORCE_DIRECT=off` only when explicitly accepting direct terminal dependency execution.
+The plugin's pre-tool hook transparently rewrites every reachable package-manager command sent through Hermes `terminal` (including dev commands and runners such as `npx`/`uvx`) to the resolved `sfw` binary, also behind assignments, transparent wrappers, `python -m pip` (any option form) or `python -c` naming a manager, and quoted `bash -c` payloads. Forms it cannot rewrite faithfully are blocked when they name a manager: opaque wrappers (`sudo`, `xargs`, `eval`, ...), aliases, path-qualified managers, dynamic command words, backtick/quoted substitutions, heredocs, stdin shells, and malformed commands. Commands that never name a manager are untouched; managers invoked from inside scripts or sourced files are not visible to the hook. Set `HERMES_SFW_ENFORCE_DIRECT=off` only when explicitly accepting direct terminal dependency execution.
 
 Output beyond 10,000 characters is discarded after a truncation notice. Commands time out after 300 seconds by default.
 

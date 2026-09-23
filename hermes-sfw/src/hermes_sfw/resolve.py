@@ -16,7 +16,9 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shlex
 import shutil
+import subprocess
 from pathlib import Path
 
 from .models import SFWBinaryInfo, SFWCacheFault
@@ -189,8 +191,28 @@ def cache_fault(binary: str) -> SFWCacheFault | None:
         reason=_latest_reason(latest),
         cache_dir=str(cache_dir),
         cached_asset=str(cached_asset),
-        repair=f"ln -sfn {cached_asset} {latest}",
+        repair=shlex.join(["ln", "-sfn", str(cached_asset), str(latest)]),
     )
+
+
+def _executable_file(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def query_version(binary: str) -> str | None:
+    """``binary --version`` output, or None when it fails or exits non-zero."""
+    try:
+        proc = subprocess.run(
+            [binary, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    stdout = proc.stdout.decode("utf-8", errors="replace").strip()
+    stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+    return (stdout or stderr or None) if proc.returncode == 0 else None
 
 
 def _candidate_sfw(candidate: Path) -> str | None:
@@ -222,7 +244,7 @@ def find_sfw(sfw_bin: str) -> str | None:
     """
     # If config points to a specific binary, use it directly.
     if sfw_bin != "sfw":
-        return sfw_bin if Path(sfw_bin).exists() else None
+        return sfw_bin if _executable_file(Path(sfw_bin)) else None
 
     # Default: search PATH and common locations. A candidate that exists but
     # cannot run is skipped in favour of a working install — a shim whose
