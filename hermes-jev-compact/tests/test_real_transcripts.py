@@ -201,6 +201,23 @@ def test_commit_gate_still_rejects_damage(mutate: str):
     assert _commit_valid(before, after) is False
 
 
+def _pair(cid: str) -> list[dict[str, Any]]:
+    return [
+        _call(cid, content=cid),
+        {"role": "tool", "tool_call_id": cid, "content": "x"},
+    ]
+
+
+def test_commit_gate_rejects_reordered_pairs():
+    user = {"role": "user", "content": "go"}
+    before = [user, *_pair("a"), *_pair("b")]
+    assert _commit_valid(before, [user, *_pair("b"), *_pair("a")]) is False
+    # a pair moved across a non-tool row is also a reorder
+    before = [*_pair("a"), user, *_pair("b")]
+    assert _commit_valid(before, [*_pair("a"), *_pair("b"), user]) is False
+    assert _commit_valid(before, [user, *_pair("a"), *_pair("b")]) is False
+
+
 def test_commit_gate_accepts_clean_drop_and_truncate():
     before = _irregular_transcript()
     after = [m for m in before if m.get("tool_call_id") != "a" and m is not before[3]]

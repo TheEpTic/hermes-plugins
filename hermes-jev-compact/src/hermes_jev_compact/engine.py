@@ -512,6 +512,25 @@ def _adjacent_assistants(messages: list[Any]) -> int:
     )
 
 
+def _event_order(messages: list[Any]) -> list[tuple[str, object]]:
+    """The transcript as an ordered event stream: each non-assistant/tool row
+    (by identity), each tool call and each tool result (by id). Merging two
+    assistant rows keeps this stream intact; moving a pair does not."""
+    events: list[tuple[str, object]] = []
+    for msg in messages:
+        role = msg.get("role") if isinstance(msg, dict) else None
+        if role == "assistant" and isinstance(msg.get("tool_calls"), list):
+            for tc in msg["tool_calls"]:
+                cid = tc.get("id") if isinstance(tc, dict) else None
+                events.append(("call", cid if isinstance(cid, str) and cid else _NO_ID))
+        elif role == "tool":
+            cid = msg.get("tool_call_id")
+            events.append(("result", cid if isinstance(cid, str) and cid else _NO_ID))
+        elif role != "assistant":
+            events.append(("row", id(msg)))
+    return events
+
+
 def _other_rows(messages: list[Any]) -> list[int]:
     return [
         id(m)
@@ -536,7 +555,9 @@ def _commit_valid(before: list[Any], after: list[Any]) -> bool:
     - a pair that was valid in the input is either gone entirely (drop_call)
       or still valid: one well-formed call, one result, result after call;
     - every irregular id keeps its exact call/result counts;
-    - no new adjacent assistant rows (strict role alternation).
+    - no new adjacent assistant rows (strict role alternation);
+    - surviving rows, calls and results keep their relative order: the
+      output's event stream is the input's with dropped ids removed.
     """
     if _other_rows(before) != _other_rows(after):
         return False
@@ -556,4 +577,8 @@ def _commit_valid(before: list[Any], after: list[Any]) -> bool:
             continue
         if len(ac) != 1 or len(ar) != 1 or not ac[0][1] or ar[0] <= ac[0][0]:
             return False
-    return _adjacent_assistants(after) <= _adjacent_assistants(before)
+    if _adjacent_assistants(after) > _adjacent_assistants(before):
+        return False
+    kept = set(a_calls) | set(a_results)
+    expected = [e for e in _event_order(before) if e[0] == "row" or e[1] in kept]
+    return _event_order(after) == expected

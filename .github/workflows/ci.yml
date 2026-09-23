@@ -46,7 +46,7 @@ jobs:
         with:
           repository: NousResearch/hermes-agent
           path: _host/hermes-agent
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: false
       - name: install host + plugin
@@ -57,9 +57,12 @@ jobs:
         working-directory: hermes-jev-compact
         env:
           HERMES_AGENT_DIR: ${{ github.workspace }}/_host/hermes-agent
+        shell: bash
         run: |
+          set -euo pipefail
           ../_host/venv/bin/python -m pytest -rs | tee ../_host/pytest.log
-          if grep -q " skipped" ../_host/pytest.log; then
+          # any skip means the host tree did not import; the contract went untested
+          if grep -Eq "^(SKIPPED|=+ .*[0-9]+ skipped)" ../_host/pytest.log; then
             echo "host contract tests were skipped; the host tree did not import" >&2
             exit 1
           fi
