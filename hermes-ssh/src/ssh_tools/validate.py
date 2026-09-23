@@ -10,7 +10,8 @@ from .helpers import coerce_int
 from .models import Machine
 
 # DNS-style name (underscores tolerated for ssh_config-style aliases).
-_HOSTNAME_RE = re.compile(r"(?=.{1,253}$)[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?")
+# An optional single trailing dot marks an absolute FQDN ("example.com.").
+_HOSTNAME_RE = re.compile(r"(?=.{1,254}$)[A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_])?\.?")
 _USER_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _NAME_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}")
 

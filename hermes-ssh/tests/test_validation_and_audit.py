@@ -12,7 +12,16 @@ from ssh_tools.validate import validate_host, validate_machine
 
 @pytest.mark.parametrize(
     "host",
-    ["example.com", "db-1.internal", "10.0.0.5", "my_alias", "2001:db8::1", "[2001:db8::1]", "::1"],
+    [
+        "example.com",
+        "example.com.",
+        "db-1.internal",
+        "10.0.0.5",
+        "my_alias",
+        "2001:db8::1",
+        "[2001:db8::1]",
+        "::1",
+    ],
 )
 def test_valid_hosts(host: str) -> None:
     assert validate_host(host) is None
@@ -30,6 +39,8 @@ def test_valid_hosts(host: str) -> None:
         "a b",
         "host/x",
         ".leading",
+        "example.com..",
+        ".",
         "trailing-",
         "",
     ],
@@ -60,6 +71,8 @@ def test_bracketed_ipv6_is_normalised_for_ssh_and_bracketed_for_sftp() -> None:
         "psql postgresql://u:hunter2@db/x",
         "tool --api-key hunter2",
         "git clone https://tok:hunter2@github.com/x",
+        "git clone https://user:p@hunter2@example.com/repo",
+        "curl 'https://user:hunter2@example.com/x'",
     ],
 )
 def test_audit_redacts_inline_credentials(command: str) -> None:
@@ -68,7 +81,16 @@ def test_audit_redacts_inline_credentials(command: str) -> None:
 
 @pytest.mark.parametrize(
     "command",
-    ["ls -p /tmp", "mysql -p db", "grep pwd file", "cd $PWD && ls", "curl -u admin https://x"],
+    [
+        "ls -p /tmp",
+        "mysql -p db",
+        "grep pwd file",
+        "cd $PWD && ls",
+        "curl -u admin https://x",
+        "rsync -a host:/x /y",
+        "cp -a a:b c",
+        "curl https://example.com:8443/a@b",
+    ],
 )
 def test_audit_leaves_ordinary_commands_intact(command: str) -> None:
     assert redact_command(command) == command

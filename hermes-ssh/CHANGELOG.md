@@ -3,8 +3,8 @@
 ## [0.4.11] - Unreleased
 
 ### Security
-- Audit redaction now covers prefixed credential variables (`PGPASSWORD=`, `MYSQL_PWD=`, `AWS_SECRET_ACCESS_KEY=`), `curl -u user:pass` / `--user`, `sshpass -p`, `mysql -pSECRET`, and `user:pass@` in any URL scheme (`postgresql://`, `redis://`, ...). Previously these were logged in clear text. Redaction remains pattern-based; README/SECURITY document the positional-secret limit.
-- Host validation rejects `host:alias` / `host:port` forms: a host containing `:` must now be an IPv6 literal. Bracketed IPv6 is normalised to the bare form OpenSSH expects.
+- Audit redaction now covers prefixed credential variables (`PGPASSWORD=`, `MYSQL_PWD=`, `AWS_SECRET_ACCESS_KEY=`), `curl -u user:pass` / `--user`, `sshpass -p`, `mysql -pSECRET`, and `user:pass@` in any URL scheme (`postgresql://`, `redis://`, ...), including passwords that contain `@`. Previously these were logged in clear text. Redaction remains pattern-based; README/SECURITY document the positional-secret limit.
+- Host validation rejects `host:alias` / `host:port` forms: a host containing `:` must now be an IPv6 literal. Bracketed IPv6 is normalised to the bare form OpenSSH expects. Absolute FQDNs with a trailing dot (`example.com.`) remain valid.
 
 ### Fixed
 - Transfers no longer blanket-block every path containing `.hermes`: inside a Hermes home (`~/.hermes`, `profiles/<name>/`, `$HERMES_HOME`) the non-secret working trees `cache/` (incl. the agent's `cache/scratch` TMPDIR), `images/`, `audio_cache/`, and `browser_screenshots/` are allowed; everything else there stays blocked. The test suite now passes when run under a Hermes-managed TMPDIR.
