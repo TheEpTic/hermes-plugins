@@ -15,7 +15,7 @@ jobs:
     outputs:
       plugin: ${{ steps.release.outputs.plugin }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: release
         name: validate tag and package version
         shell: bash
@@ -33,6 +33,11 @@ jobs:
             echo "tag version $version does not match $plugin version $package_version" >&2
             exit 1
           }
+          manifest_version=$(python -c "import pathlib,re,sys; t=next(pathlib.Path(sys.argv[1], 'src').rglob('plugin.yaml')).read_text(); print(re.search(r'^version:\s*[\x22\x27]?([^\x22\x27\s]+)', t, re.M).group(1))" "$plugin")
+          test "$version" = "$manifest_version" || {
+            echo "tag version $version does not match $plugin plugin.yaml version $manifest_version" >&2
+            exit 1
+          }
           echo "plugin=$plugin" >> "$GITHUB_OUTPUT"
 
   build:
@@ -43,13 +48,13 @@ jobs:
       run:
         working-directory: ${{ needs.prepare.outputs.plugin }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.2.0
       - name: build distributions
         run: uv build --out-dir dist
       - name: verify distributions
         run: uvx twine check dist/*
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ needs.prepare.outputs.plugin }}-dist
           path: ${{ needs.prepare.outputs.plugin }}/dist/
@@ -63,7 +68,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.prepare.outputs.plugin }}-dist
           path: dist
