@@ -34,3 +34,35 @@ jobs:
         run: uv run black --check src tests
       - name: types
         run: uv run mypy src
+
+  # hermes-jev-compact subclasses the host compressor; without the host tree
+  # its engine/contract tests skip. Run them against current upstream main.
+  jev-host-contract:
+    name: hermes-jev-compact / host contract (hermes-agent main)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: NousResearch/hermes-agent
+          path: _host/hermes-agent
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: false
+      - name: install host + plugin
+        run: |
+          uv venv -p 3.12 _host/venv
+          uv pip install --python _host/venv/bin/python -e _host/hermes-agent -e "hermes-jev-compact[dev]"
+      - name: tests (no skips allowed)
+        working-directory: hermes-jev-compact
+        env:
+          HERMES_AGENT_DIR: ${{ github.workspace }}/_host/hermes-agent
+        shell: bash
+        run: |
+          set -euo pipefail
+          ../_host/venv/bin/python -m pytest -rs | tee ../_host/pytest.log
+          # any skip means the host tree did not import; the contract went untested
+          if grep -Eq "^(SKIPPED|=+ .*[0-9]+ skipped)" ../_host/pytest.log; then
+            echo "host contract tests were skipped; the host tree did not import" >&2
+            exit 1
+          fi

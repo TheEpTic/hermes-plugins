@@ -404,6 +404,86 @@ def _tool_row(
     return msg
 
 
+# Assistant rows the host replays verbatim or supersedes instead of merging
+# (agent_runtime_helpers._is_codex_interim / _merge_consecutive_assistants).
+_UNMERGEABLE_FINISH = frozenset({"incomplete", "verification_required", "verify_hook_continue"})
+_PERSISTED_MARKER = "_db_persisted"
+
+
+def _mergeable_assistant(msg: dict[str, Any]) -> bool:
+    return not (
+        msg.get("codex_reasoning_items")
+        or msg.get("codex_message_items")
+        or msg.get("finish_reason") in _UNMERGEABLE_FINISH
+    )
+
+
+def _merged_content(prev: Any, new: Any) -> tuple[bool, Any]:
+    """(ok, content) for folding ``new`` into ``prev``; not ok = leave both rows."""
+    if isinstance(prev, str) and isinstance(new, str):
+        return True, "\n".join(p for p in (prev.strip(), new.strip()) if p)
+    if not prev:
+        return True, new
+    if not new:
+        return True, prev
+    return False, None  # two non-empty multimodal/mixed bodies: never guess a join
+
+
+def _merge_assistant_pair(prev: dict[str, Any], msg: dict[str, Any]) -> dict[str, Any] | None:
+    """Host-shaped fold of ``msg`` into a COPY of ``prev`` (union tool_calls,
+    join text). None when the pair must stay as-is (host repair owns it)."""
+    if not (_mergeable_assistant(prev) and _mergeable_assistant(msg)):
+        return None
+    ok, content = _merged_content(prev.get("content"), msg.get("content"))
+    if not ok:
+        return None
+    merged = dict(prev)
+    calls = list(prev.get("tool_calls") or []) + list(msg.get("tool_calls") or [])
+    if calls:
+        merged["tool_calls"] = calls
+    else:
+        merged.pop("tool_calls", None)
+    if content != prev.get("content"):
+        merged["content"] = content
+        # A stale api_content sidecar would replay the pre-merge bytes.
+        merged.pop("api_content", None)
+    if not merged.get("reasoning_content") and msg.get("reasoning_content"):
+        merged["reasoning_content"] = msg["reasoning_content"]
+    # The merged row is not the persisted row; let the host re-flush it.
+    merged.pop(_PERSISTED_MARKER, None)
+    return merged
+
+
+def _merge_created_assistant_runs(rows: list[tuple[int, Any]]) -> list[Any]:
+    """Merge assistant rows made adjacent by jev removals.
+
+    ``rows`` pairs each surviving row with its source index. Two assistant rows
+    whose source indices are consecutive were already adjacent in the input —
+    that is pre-existing shape the host's own repair owns, so it is left alone.
+    Only adjacency jev CREATED (removed rows between them) is folded, keeping
+    the strict role-alternation invariant the host expects from a compressor.
+    """
+    out: list[Any] = []
+    last_src: list[int] = []
+    for src, row in rows:
+        prev = out[-1] if out else None
+        if (
+            isinstance(prev, dict)
+            and isinstance(row, dict)
+            and prev.get("role") == "assistant"
+            and row.get("role") == "assistant"
+            and src != last_src[-1] + 1
+        ):
+            merged = _merge_assistant_pair(prev, row)
+            if merged is not None:
+                out[-1] = merged
+                last_src[-1] = src
+                continue
+        out.append(row)
+        last_src.append(src)
+    return out
+
+
 def apply_decisions_openai(
     messages: list[dict[str, Any]],
     decisions: Sequence[JevCallDecision],
@@ -415,6 +495,10 @@ def apply_decisions_openai(
     Fail-closed on ambiguous input: duplicate short ids, duplicate decisions
     for one id, or two decisions colliding on one tool_call_id raise JevError
     (the engine treats that as a failed jev attempt → built-in prune).
+
+    Assistant rows that removals leave adjacent are merged (host
+    ``_merge_assistant_into`` semantics) so the output keeps strict role
+    alternation; adjacency already present in the input is left untouched.
     """
     by_short_id: dict[str, JevToolCall] = {}
     for c in calls:
@@ -436,19 +520,13 @@ def apply_decisions_openai(
     if not actions:
         return list(messages)
     error_by_call = {c.tool_call_id: c.is_error for c in calls}
-    out: list[dict[str, Any]] = []
-    for msg in messages:
-        if not isinstance(msg, dict):
-            out.append(msg)
-            continue
-        if msg.get("role") == "tool":
+    out: list[tuple[int, Any]] = []
+    for src, msg in enumerate(messages):
+        row: Any = msg
+        if isinstance(msg, dict) and msg.get("role") == "tool":
             row = _tool_row(msg, actions, error_by_call, head_chars)
-            if row is not None:
-                out.append(row)
-        elif msg.get("role") == "assistant":
-            dropped = _drop_tool_call(msg, actions)
-            if dropped is not None:
-                out.append(dropped)
-        else:
-            out.append(msg)
-    return out
+        elif isinstance(msg, dict) and msg.get("role") == "assistant":
+            row = _drop_tool_call(msg, actions)
+        if row is not None:
+            out.append((src, row))
+    return _merge_created_assistant_runs(out)

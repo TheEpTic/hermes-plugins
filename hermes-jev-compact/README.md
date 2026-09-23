@@ -35,7 +35,8 @@ matter?* — against the whole conversation as state. The result:
 `JevContextCompressor` subclasses the built-in `ContextCompressor` and
 overrides exactly one seam — `_prune_old_tool_results` (full-compression
 phase 1). The hot proactive path (`prune_tool_results_only`, documented
-deterministic/no-LLM) is untouched: it bypasses Jev entirely.
+deterministic/no-LLM) never calls Jev: the host routes it through the same
+seam, so the engine flags that call and runs the built-in prune for it.
 
 One prune, end to end:
 
@@ -57,8 +58,12 @@ One prune, end to end:
    `drop_call` (remove result rows, strip the call). Pinned calls always
    keep. Error results keep on a lower bar (`error_keep_threshold`, default
    0.25) than the plain `keep_threshold` (0.5).
-5. **Commit gates.** Output is validity-checked (no orphans either way, no
-   duplicates, no out-of-order pairs, clean row shapes) and must shrink the
+5. **Commit gates.** Output is validity-checked against Jev's own edits: no
+   new orphans, duplicates, or out-of-order pairs, no new adjacent assistant
+   rows, and rows Jev does not own (bookkeeping roles, replayed ids) are left
+   exactly as they arrived — so an already-irregular transcript never voids
+   a pass. Removals that leave two assistant rows adjacent are merged. It must
+   also shrink the
    transcript by ≥10% (`min_reduction_ratio`, default 0.10) — otherwise the
    deterministic prune runs instead. The hermes summary always runs after
    phase 1 either way, so the gate only picks the phase-1 author.

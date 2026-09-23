@@ -90,3 +90,52 @@ def make_tool_transcript(n_calls: int = 3, result_chars: int = 9000) -> List[Dic
         messages.append({"role": "tool", "tool_call_id": cid, "content": "x" * result_chars})
     messages.append({"role": "user", "content": "go ahead"})
     return messages
+
+
+# Strict structural oracle for tests: the full OpenAI sequence invariant.
+# The engine gates on _commit_valid (only what Jev changed); tests use this
+# to assert Jev output on clean input is fully well-formed.
+from hermes_jev_compact.adapter import is_well_formed_tool_call  # noqa: E402
+
+
+def _valid_openai_sequence(messages: list[dict[str, Any]]) -> bool:
+    """Bidirectional structural check: every tool row has its call id present
+    AND every assistant tool call keeps its result row (no orphans either way).
+    Also rejects duplicate tool rows for one call id, malformed ids, malformed
+    assistant tool-call rows (host shape: id/type/function.name/arguments),
+    duplicate assistant call ids (ambiguous address — jev output must never
+    create them), out-of-order pairs (tool row before its call), and malformed
+    top-level rows (non-dict, missing/unknown role)."""
+    call_rows: dict[str, int] = {}
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            return False
+        role = msg.get("role")
+        if not isinstance(role, str) or role not in {"system", "user", "assistant", "tool"}:
+            return False
+        if role != "assistant":
+            continue
+        tcs = msg.get("tool_calls")
+        if tcs is None:
+            continue
+        if not isinstance(tcs, list):
+            return False
+        for tc in tcs:
+            if not is_well_formed_tool_call(tc):
+                return False
+            if tc["id"] in call_rows:
+                return False
+            call_rows[tc["id"]] = index
+    seen_results: set[str] = set()
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        cid = msg.get("tool_call_id")
+        if not isinstance(cid, str) or not cid or cid not in call_rows:
+            return False
+        if cid in seen_results:
+            return False
+        if index <= call_rows[cid]:
+            return False
+        seen_results.add(cid)
+    return set(call_rows) <= seen_results
