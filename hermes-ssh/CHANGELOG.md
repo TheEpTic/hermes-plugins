@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.11] - Unreleased
+## [0.4.11] - 2026-09-23
 
 ### Security
 - Audit redaction now covers prefixed credential variables (`PGPASSWORD=`, `MYSQL_PWD=`, `AWS_SECRET_ACCESS_KEY=`), `curl -u user:pass` / `--user`, `sshpass -p`, `mysql -pSECRET`, and `user:pass@` in any URL scheme (`postgresql://`, `redis://`, ...), including passwords that contain `@`. Previously these were logged in clear text. Redaction remains pattern-based; README/SECURITY document the positional-secret limit.
