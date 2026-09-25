@@ -936,3 +936,49 @@ def test_return_count_reconciles_with_split_counters(monkeypatch):
     assert eng.jev_fallbacks == 0
     assert count == eng.jev_pruned_units + eng.jev_hygiene_units
     assert eng.jev_pruned_units == eng.jev_truncate_units + eng.jev_drop_units
+
+
+def test_bypass_guard_does_not_leak_across_threads(monkeypatch):
+    """A deterministic prune on one thread must not bypass jev on another.
+
+    Regression test for the instance-counter → threading.local fix: the
+    host may share one compressor across profiles/threads.
+    """
+    import threading
+
+    eng = _engine(jev_min_result_chars=100)
+    messages = make_tool_transcript(n_calls=2, result_chars=9000)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "k")
+    probs = {f"{kind}_t{i}": 0.1 for i in (1, 2) for kind in ("call", "result")}
+    outcome: Dict[str, Any] = {}
+
+    def worker() -> None:
+        with patch(
+            "hermes_jev_compact.engine.JevAsker",
+            side_effect=lambda *a, **k: _fake_factory(probs)(*a, **k),
+        ):
+            outcome["result"] = eng._prune_old_tool_results(messages, 1, None, 200)
+
+    eng_mod._jev_bypass.depth = 1  # simulate this thread inside prune_tool_results_only
+    try:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+    finally:
+        eng_mod._jev_bypass.depth = 0
+    assert "result" in outcome
+    assert eng.jev_calls >= 1, "worker thread wrongly took the deterministic bypass"
+    assert eng.jev_fallbacks == 0
+
+
+def test_update_model_refreshes_jev_knobs():
+    """Runtime config changes must not leave jev endpoint/model stale."""
+    eng = _engine()
+    assert eng.jev_model == "jev-latest"
+    eng.update_model(
+        "test-model", 200000, jev_model="jev-next", jev_base_url="https://x.example/v1"
+    )
+    assert eng.jev_model == "jev-next"
+    assert eng.jev_base_url == "https://x.example/v1"
+    # knobs NOT passed stay untouched
+    assert eng.jev_endpoint_path == "/systemone"
