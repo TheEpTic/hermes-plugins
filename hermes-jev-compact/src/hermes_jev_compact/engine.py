@@ -19,6 +19,7 @@ import inspect
 import logging
 import math
 import os
+import threading
 from typing import Any
 from .adapter import collect_candidates, is_well_formed_tool_call, to_internal
 from .asker import JevAsker
@@ -101,14 +102,30 @@ def _answers_for_batch(batch: list[JevToolCall], raw: dict[str, Any]) -> dict[st
 
 
 def _resolve_secret(key_env: str) -> str:
-    """Call-time secret read: agent.secret_scope when importable, else os.environ."""
+    """Call-time secret read: agent.secret_scope when importable, else os.environ.
+
+    The env fallback is scope-blind (process env belongs to the host's
+    primary profile), so log which source won — otherwise a secondary
+    profile silently scoring with the wrong key is undiagnosable.
+    """
     try:
         from agent.secret_scope import get_secret
 
         value = get_secret(key_env)
     except Exception:
         value = os.environ.get(key_env)
+        if value:
+            logger.debug("jev: secret_scope unavailable, using process env for %s", key_env)
     return value if isinstance(value, str) else ""
+
+
+# Reentrancy guard for the deterministic hot path (prune_tool_results_only).
+# Thread-local — NOT an instance counter: the host may share one compressor
+# instance across profiles/threads (multiplexed gateway), and an instance
+# flag set by thread A's deterministic prune would wrongly bypass thread B's
+# jev scoring (or vice versa). Depth is balanced per thread, so a single
+# thread-local counter stays correct even across nested instances.
+_jev_bypass = threading.local()
 
 
 class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
@@ -151,7 +168,14 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
             self.api_key = ""
 
     def update_model(self, *args: Any, **kwargs: Any) -> None:
+        # Jev knobs are operator config, not model state — but they arrive
+        # through the same kwargs. Strip them before delegating (the host
+        # base rejects unknown kwargs) so a runtime config change does not
+        # leave jev_model/base_url stale till restart.
+        jev_updates = {attr: kwargs.pop(attr) for attr, _, _ in _JEV_KNOBS if attr in kwargs}
         super().update_model(*args, **kwargs)
+        for attr, value in jev_updates.items():
+            setattr(self, attr, value)
 
     @property
     def name(self) -> str:
@@ -178,7 +202,6 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
                 if key.startswith("_compression_cancelled") or key in {
                     "_session_db",
                     "api_key",
-                    "_jev_bypass_depth",
                 }:
                     continue
                 try:
@@ -440,11 +463,11 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         # which is the jev seam. Flag the call so that seam runs the base passes:
         # this path is documented deterministic/no-LLM and runs on the hot
         # post-tool path, so it must never read the key or touch the network.
-        self._jev_bypass_depth = getattr(self, "_jev_bypass_depth", 0) + 1
+        _jev_bypass.depth = getattr(_jev_bypass, "depth", 0) + 1
         try:
             out, n = super().prune_tool_results_only(messages, current_tokens=current_tokens)
         finally:
-            self._jev_bypass_depth -= 1
+            _jev_bypass.depth -= 1
         return (out, int(n))
 
     def _prune_old_tool_results(
@@ -454,7 +477,7 @@ class JevContextCompressor(ContextCompressor):  # type: ignore[misc]
         protect_tail_tokens: int | None = None,
         min_prune_chars: int = 200,
     ) -> tuple[list[dict[str, Any]], int]:
-        if getattr(self, "_jev_bypass_depth", 0) > 0:
+        if getattr(_jev_bypass, "depth", 0) > 0:
             base_out, base_n = super()._prune_old_tool_results(
                 messages, protect_tail_count, protect_tail_tokens, min_prune_chars
             )

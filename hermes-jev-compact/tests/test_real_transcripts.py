@@ -246,7 +246,9 @@ def test_proactive_prune_never_reaches_jev(monkeypatch):
     asker_cls.assert_not_called()
     assert count > 0 and out is not messages, "fixture must actually prune"
     assert eng.jev_fallbacks == 0 and eng.jev_calls == 0
-    assert getattr(eng, "_jev_bypass_depth", 0) == 0
+    from hermes_jev_compact.engine import _jev_bypass
+
+    assert getattr(_jev_bypass, "depth", 0) == 0
     # a later full compression still takes the jev seam
     with patch("hermes_jev_compact.engine.JevAsker", _DropAll):
         eng._prune_old_tool_results(messages, 1, None, 200)
